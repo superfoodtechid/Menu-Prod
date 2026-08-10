@@ -554,43 +554,46 @@ class GrabAPI:
 
         # Fallback ke alur standard jika bukan Menu Groups
         url = "https://api.grab.com/food/merchant/v2/menu"
-        js_code = f"""
-        async () => {{
-            try {{
-                const response = await fetch("{url}", {{
-                    method: "GET",
-                    headers: {{
+        for attempt in range(3):
+            target_gid = group_id if attempt == 0 else (store_id if attempt == 1 else None)
+            gid_hdr = f'hdrs["merchantgroupid"] = "{target_gid}";' if target_gid else ""
+            js_code = f"""
+            async () => {{
+                try {{
+                    const hdrs = {{
                         "Accept": "application/json",
                         "Accept-Language": "en",
-                        "merchantgroupid": "{group_id}",
                         "merchantid": "{store_id}",
                         "requestsource": "troyPortal"
-                    }},
-                    credentials: "include"
-                }});
-                const status = response.status;
-                const text = await response.text();
-                try {{
-                    return {{ status, data: JSON.parse(text) }};
+                    }};
+                    {gid_hdr}
+                    const response = await fetch("{url}", {{
+                        method: "GET",
+                        headers: hdrs,
+                        credentials: "include"
+                    }});
+                    const status = response.status;
+                    const text = await response.text();
+                    try {{
+                        return {{ status, data: JSON.parse(text) }};
+                    }} catch (e) {{
+                        return {{ status, data: text }};
+                    }}
                 }} catch (e) {{
-                    return {{ status, data: text }};
+                    return {{ status: 0, error: e.toString() }};
                 }}
-            }} catch (e) {{
-                return {{ status: 0, error: e.toString() }};
             }}
-        }}
-        """
-        for attempt in range(3):
+            """
             try:
                 res = await self.page.evaluate(js_code)
                 if res and res.get("status") == 200:
                     return res.get("data", {}), None
                 err = res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
-                logger.warning(f"Attempt {attempt+1} to fetch standard menu failed: {err}")
-                await asyncio.sleep(2)
+                logger.warning(f"Attempt {attempt+1} to fetch standard menu failed (using gid={target_gid}): {err}")
+                await asyncio.sleep(1.5)
             except Exception as e:
                 logger.warning(f"Attempt {attempt+1} to evaluate fetch standard menu failed: {e}")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
                 
         return None, "Failed to retrieve standard menu after 3 attempts"
 
@@ -1589,31 +1592,34 @@ def fetch_menu_via_cookie(cookie_str: str, group_id: str, store_id: str, store_n
 
     # Fallback ke alur standard jika bukan Menu Groups
     url = "https://api.grab.com/food/merchant/v2/menu"
-    headers = {
-        "Accept": "application/json",
-        "Accept-Language": "en",
-        "Cookie": cookie_str,
-        "merchantgroupid": group_id,
-        "merchantid": store_id,
-        "Origin": "https://merchant.grab.com",
-        "Referer": "https://merchant.grab.com/food/menu",
-        "requestsource": "troyPortal",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-site",
-    }
     for attempt in range(3):
+        target_gid = group_id if attempt == 0 else (store_id if attempt == 1 else None)
+        headers = {
+            "Accept": "application/json",
+            "Accept-Language": "en",
+            "Cookie": cookie_str,
+            "merchantid": store_id,
+            "Origin": "https://merchant.grab.com",
+            "Referer": "https://merchant.grab.com/food/menu",
+            "requestsource": "troyPortal",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+        }
+        if target_gid:
+            headers["merchantgroupid"] = target_gid
+
         try:
             resp = _req.get(url, headers=headers, timeout=30)
             if resp.status_code == 200:
                 return resp.json(), None
             err = f"Status {resp.status_code}: {resp.text[:300]}"
-            logger.warning(f"  [Cookie] Attempt {attempt+1} fetch_menu failed: {err}")
-            time.sleep(2)
+            logger.warning(f"  [Cookie] Attempt {attempt+1} fetch_menu failed (gid={target_gid}): {err}")
+            time.sleep(1.5)
         except Exception as e:
             logger.warning(f"  [Cookie] Attempt {attempt+1} fetch_menu exception: {e}")
-            time.sleep(2)
+            time.sleep(1.5)
     return None, "fetch_menu_via_cookie failed after 3 attempts"
 
 
