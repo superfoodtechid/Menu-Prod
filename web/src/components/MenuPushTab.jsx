@@ -174,6 +174,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
     if (filterMode === "new_item" && !item.is_new_item) return false;
     if (filterMode === "new_category" && !item.is_new_category) return false;
     if (filterMode === "delete_item" && !item.is_deleted_item) return false;
+    if (filterMode === "step_push" && !item.price_warning) return false;
     if (filterMode === "price" && !item.changes?.price_changed) return false;
     if (filterMode === "name" && !item.changes?.name_changed) return false;
     if (filterMode === "category" && !item.changes?.category_changed) return false;
@@ -330,6 +331,13 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
               <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{parseResult.summary.price_changes || 0}</p>
               <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">Harga Berubah</p>
             </div>
+            {parseResult.summary?.price_warning_count > 0 && (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-3.5 shadow-xs dark:border-amber-500/30 dark:bg-amber-500/10">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">Step Push</p>
+                <p className="mt-1 text-xl font-extrabold text-amber-600 dark:text-amber-400">{parseResult.summary.price_warning_count}</p>
+                <p className="mt-0.5 text-[11px] text-amber-600/70 dark:text-amber-400/70">Harga &gt;15%</p>
+              </div>
+            )}
             <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
               <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Nama Item</p>
               <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{parseResult.summary.name_changes || 0}</p>
@@ -533,6 +541,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                   ["new_item", "Item Baru"],
                   ["new_category", "Kategori Baru"],
                   ["delete_item", "Hapus Item"],
+                  ["step_push", "⚠️ >15% Step Push"],
                   ["invalid", "Tidak Valid"],
                   ["price", "Price Change"],
                   ["name", "Nama Item"],
@@ -692,6 +701,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                               {item.changes?.price_changed && !item.is_new_item && (
                                 <span className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
                                   Price
+                                </span>
+                              )}
+                              {item.price_warning && (
+                                <span title={`Perubahan harga ${item.price_diff_percent}% (>15%). Akan di-push secara bertahap.`} className="rounded-md bg-amber-500/10 border border-amber-500/30 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">
+                                  ⚠️ &gt;15% Step Push
                                 </span>
                               )}
                               {item.changes?.name_changed && !item.is_new_item && (

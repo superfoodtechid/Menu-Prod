@@ -1857,6 +1857,48 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
         "outlet_name": owner_name
     }
 
+def calculate_price_steps(current_price: float, target_price: float, max_step_pct: float = 0.15) -> list[int]:
+    """Calculates intermediate prices to reach target_price without any single step exceeding max_step_pct change."""
+    import math
+    curr = float(current_price)
+    target = float(target_price)
+    if curr <= 0 or curr == target:
+        return [int(round(target))]
+
+    steps = []
+    if target > curr:
+        while curr < target:
+            next_p = curr * (1.0 + max_step_pct)
+            if next_p >= target:
+                steps.append(int(round(target)))
+                break
+            else:
+                next_p_rounded = int(math.floor(next_p / 100.0) * 100)
+                if next_p_rounded <= curr:
+                    next_p_rounded = int(curr) + 100
+                if next_p_rounded >= target:
+                    steps.append(int(round(target)))
+                    break
+                steps.append(next_p_rounded)
+                curr = float(next_p_rounded)
+    else:  # target < curr
+        while curr > target:
+            next_p = curr * (1.0 - max_step_pct)
+            if next_p <= target:
+                steps.append(int(round(target)))
+                break
+            else:
+                next_p_rounded = int(math.ceil(next_p / 100.0) * 100)
+                if next_p_rounded >= curr:
+                    next_p_rounded = int(curr) - 100
+                if next_p_rounded <= target:
+                    steps.append(int(round(target)))
+                    break
+                steps.append(next_p_rounded)
+                curr = float(next_p_rounded)
+    return steps
+
+
 # ─── C5 MENU PUSH & PARSER ENDPOINTS ──────────────────────────────────────────
 
 def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, updates: list, progress_cb=None):
@@ -2261,77 +2303,65 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 except (ValueError, TypeError):
                     final_price = int(float(orig_item.get('price') or 0))
 
-                v2_payload = {
-                    "menu_common_id": orig_item.get('menu_common_id') or cat_common_id,
-                    "image_url": final_photo,
-                    "name": final_name,
-                    "description": final_desc,
-                    "price": final_price,
-                    "active": orig_item.get('is_active', orig_item.get('active', True)),
-                    "signature": orig_item.get('signature', False),
-                }
+                orig_price = float(orig_item.get('price') or 0)
+                price_steps = calculate_price_steps(orig_price, final_price) if want_price and orig_price > 0 else [final_price]
 
-                target_group_id = patch_group_id or orig_item.get('menu_common_id') or cat_common_id
-                v2_url = f'https://api.gojekapi.com/gofood/merchant/v2/menu_groups/{target_group_id}/menu_items/{item_id}'
+                res = None
+                if len(price_steps) > 1:
+                    logger.info(f"🔄 Step-push harga untuk '{final_name}' ({item_id}): Rp{orig_price:,.0f} -> Rp{final_price:,.0f} ({len(price_steps)} tahap: {price_steps})")
 
-                def send_patch_request(payload_data, max_retries=2):
-                    for attempt_idx in range(max_retries + 1):
-                        try:
-                            cr_res = context.request.fetch(
-                                v2_url, method='PATCH', headers=headers_direct, data=json.dumps(payload_data)
-                            )
-                            status_code = cr_res.status
-                            if status_code in (429, 403, 503, 504) and attempt_idx < max_retries:
-                                logger.warning(f"⚠️ Rate limit (HTTP {status_code}) item {item_id}. Tunggu 5s (attempt {attempt_idx+1})...")
-                                time.sleep(5.0)
-                                continue
-                            return {'ok': cr_res.ok, 'status': status_code, 'body': cr_res.text()}
-                        except Exception as ex:
-                            if attempt_idx < max_retries:
-                                time.sleep(3.0)
-                                continue
-                            return {'ok': False, 'error': str(ex)}
+                for step_idx, step_price in enumerate(price_steps):
+                    v2_payload["price"] = step_price
+                    res = send_patch_request(v2_payload)
 
-                res = send_patch_request(v2_payload)
+                    if res and res.get('status') == 429:
+                        logger.warning("⚠️ GoFood API Rate Limited (HTTP 429). Cooldown 10s...")
+                        time.sleep(10.0)
 
-                if res and res.get('status') == 429:
-                    logger.warning("⚠️ GoFood API Rate Limited (HTTP 429). Cooldown 10s...")
-                    time.sleep(10.0)
+                    # Fallback 1: include variant_category_common_ids if present
+                    if (not res or not res.get('ok')) and res.get('status') != 429:
+                        time.sleep(0.6)
+                        vars_ids = orig_item.get('variant_category_common_ids') or orig_item.get('variant_category_ids')
+                        if vars_ids and isinstance(vars_ids, list) and len(vars_ids) > 0:
+                            v2_payload_with_vars = dict(v2_payload)
+                            v2_payload_with_vars["variant_category_common_ids"] = vars_ids
+                            res_var = send_patch_request(v2_payload_with_vars, max_retries=1)
+                            if res_var and res_var.get('ok'):
+                                res = res_var
 
-                # Fallback 1: include variant_category_common_ids if present
-                if (not res or not res.get('ok')) and res.get('status') != 429:
-                    time.sleep(0.6)
-                    vars_ids = orig_item.get('variant_category_common_ids') or orig_item.get('variant_category_ids')
-                    if vars_ids and isinstance(vars_ids, list) and len(vars_ids) > 0:
-                        v2_payload_with_vars = dict(v2_payload)
-                        v2_payload_with_vars["variant_category_common_ids"] = vars_ids
-                        res_var = send_patch_request(v2_payload_with_vars, max_retries=1)
-                        if res_var and res_var.get('ok'):
-                            res = res_var
+                    # Fallback 2: V1 PUT
+                    if (not res or not res.get('ok')) and res.get('status') != 429:
+                        status_code = res.get('status', '?') if res else '?'
+                        body_err = (res.get('body') or '')[:300] if res else ''
+                        logger.warning(f"GoFood V2 PATCH gagal (HTTP {status_code}): {body_err}. Fallback V1 PUT...")
+                        time.sleep(0.6)
+                        v1_payload = {
+                            "name": final_name,
+                            "price": step_price,
+                            "active": orig_item.get('is_active', orig_item.get('active', True)),
+                            "description": final_desc,
+                            "image": final_photo,
+                        }
+                        v1_item_id = orig_item.get('id') or orig_item.get('common_id') or item_id
+                        if v1_item_id:
+                            v1_url = f'https://api.gojekapi.com/gofood/merchant/v1/restaurants/{rest_uuid}/menu_items/{v1_item_id}'
+                            try:
+                                cr_v1 = context.request.fetch(
+                                    v1_url, method='PUT', headers=headers_direct, data=json.dumps(v1_payload)
+                                )
+                                res = {'ok': cr_v1.ok, 'status': cr_v1.status, 'body': cr_v1.text()}
+                            except Exception as e:
+                                res = {'ok': False, 'error': str(e)}
 
-                # Fallback 2: V1 PUT
-                if (not res or not res.get('ok')) and res.get('status') != 429:
-                    status_code = res.get('status', '?') if res else '?'
-                    body_err = (res.get('body') or '')[:300] if res else ''
-                    logger.warning(f"GoFood V2 PATCH gagal (HTTP {status_code}): {body_err}. Fallback V1 PUT...")
-                    time.sleep(0.6)
-                    v1_payload = {
-                        "name": final_name,
-                        "price": final_price,
-                        "active": orig_item.get('is_active', orig_item.get('active', True)),
-                        "description": final_desc,
-                        "image": final_photo,
-                    }
-                    v1_item_id = orig_item.get('id') or orig_item.get('common_id') or item_id
-                    if v1_item_id:
-                        v1_url = f'https://api.gojekapi.com/gofood/merchant/v1/restaurants/{rest_uuid}/menu_items/{v1_item_id}'
-                        try:
-                            cr_v1 = context.request.fetch(
-                                v1_url, method='PUT', headers=headers_direct, data=json.dumps(v1_payload)
-                            )
-                            res = {'ok': cr_v1.ok, 'status': cr_v1.status, 'body': cr_v1.text()}
-                        except Exception as e:
-                            res = {'ok': False, 'error': str(e)}
+                    if res and res.get('ok'):
+                        if len(price_steps) > 1:
+                            logger.info(f"  ✅ Step {step_idx+1}/{len(price_steps)}: Rp{step_price:,} berhasil dipush.")
+                            if step_idx < len(price_steps) - 1:
+                                time.sleep(1.5)
+                    else:
+                        if len(price_steps) > 1:
+                            logger.warning(f"  ❌ Step {step_idx+1}/{len(price_steps)}: Rp{step_price:,} gagal dipush.")
+                        break
 
                 if res and res.get('ok'):
                     results.append({
@@ -2533,6 +2563,14 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
     contents = await file.read()
     import io
     import openpyxl
+    import re
+
+    try:
+        wb_raw = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=False)
+        sheet_raw = wb_raw['Item'] if 'Item' in wb_raw.sheetnames else wb_raw.active
+        raw_row1 = [sheet_raw.cell(row=1, column=c).value for c in range(1, sheet_raw.max_column + 1)]
+    except Exception:
+        raw_row1 = []
 
     try:
         wb = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=True)
@@ -2553,7 +2591,24 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
             "summary": {"total_stores": 0, "total_items": 0, "total_changes": 0}
         }
 
-    headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+    headers = []
+    data_row1 = rows[0]
+    max_cols = max(len(data_row1), len(raw_row1))
+    for c_idx in range(max_cols):
+        d_val = data_row1[c_idx] if c_idx < len(data_row1) else None
+        r_val = raw_row1[c_idx] if c_idx < len(raw_row1) else None
+        if d_val is not None and str(d_val).strip() != "":
+            headers.append(str(d_val).strip())
+        elif r_val is not None:
+            txt = r_val.text if hasattr(r_val, 'text') else str(r_val)
+            m = re.search(r'\"([^\"]+)\"', txt)
+            if m:
+                headers.append(m.group(1).strip())
+            else:
+                headers.append(str(txt).strip())
+        else:
+            headers.append("")
+
     header_map = {h: i for i, h in enumerate(headers) if h}
 
     def get_val(row, col_name, default=""):
@@ -2621,6 +2676,7 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
     total_changes = 0
     name_changes_count = 0
     price_changes_count = 0
+    price_warning_count = 0
     category_changes_count = 0
     photo_changes_count = 0
     description_changes_count = 0
@@ -2812,13 +2868,26 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
 
         # 5. Price Change
         price_changed = False
+        price_warning = False
+        price_diff_percent = 0.0
         if new_fake_price is not None:
-            if base_price is not None:
+            if base_price is not None and float(base_price) > 0:
                 price_changed = float(new_fake_price) != float(base_price)
+                price_diff_percent = (abs(float(new_fake_price) - float(base_price)) / float(base_price)) * 100.0
+                if price_changed and price_diff_percent > 15.0:
+                    price_warning = True
             else:
                 price_changed = True
+
         if price_changed:
-            diff_details.append({"column": "Price", "old_val": base_price, "new_val": new_fake_price})
+            if price_warning:
+                diff_details.append({
+                    "column": "Price",
+                    "old_val": f"Rp {float(base_price):,.0f}",
+                    "new_val": f"Rp {float(new_fake_price):,.0f} (⚠️ Perubahan {price_diff_percent:.1f}% >15% - Push Bertahap)"
+                })
+            else:
+                diff_details.append({"column": "Price", "old_val": base_price, "new_val": new_fake_price})
 
         # 6. Check all other columns in row for any explicit edits
         other_changed = False
@@ -2858,6 +2927,9 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
         if price_changed:
             change_types.append("PRICE_CHANGE")
             price_changes_count += 1
+            if price_warning:
+                change_types.append("PRICE_WARNING_STEP_PUSH")
+                price_warning_count += 1
         if other_changed:
             change_types.append("OTHER_CHANGE")
             other_changes_count += 1
@@ -2893,6 +2965,8 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
             "is_changed": is_changed,
             "is_new_item": is_new_item,
             "is_new_category": is_new_category,
+            "price_warning": price_warning,
+            "price_diff_percent": round(price_diff_percent, 2),
             "change_types": change_types,
             "diff_details": diff_details,
             "changes": {
@@ -2901,6 +2975,8 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
                 "photo_changed": photo_changed,
                 "description_changed": description_changed,
                 "price_changed": price_changed,
+                "price_warning": price_warning,
+                "price_diff_percent": round(price_diff_percent, 2),
                 "other_changed": other_changed,
                 "is_new_item": is_new_item,
                 "is_new_category": is_new_category,
@@ -2983,6 +3059,7 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
             "photo_changes": photo_changes_count,
             "description_changes": description_changes_count,
             "price_changes": price_changes_count,
+            "price_warning_count": price_warning_count,
             "other_changes": other_changes_count,
             "new_items_count": new_items_count,
             "new_categories_count": new_categories_count,
