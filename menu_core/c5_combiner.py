@@ -6,6 +6,17 @@ import pandas as pd
 FILE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE_PATH = os.path.join(FILE_DIR, "O. C5 Template.xlsx")
 
+def _get_ofd_sort_order(ofd_val):
+    v = str(ofd_val or '').strip().lower()
+    if 'go' in v:
+        return 1
+    if 'grab' in v:
+        return 2
+    if 'shopee' in v or 'shope' in v:
+        return 3
+    return 4
+
+
 def combine_c5(excel_paths, output_path):
     """
     Combines multiple C5 Excel files (Item & Modifier sheets) into a single C5 Excel file.
@@ -27,6 +38,16 @@ def combine_c5(excel_paths, output_path):
         
     df_combined_items = pd.concat(all_items, ignore_index=True)
     df_combined_mods = pd.concat(all_mods, ignore_index=True)
+
+    # Sort deterministically by platform (OFD): GoFood (1) -> GrabFood (2) -> ShopeeFood (3)
+    if 'OFD' in df_combined_items.columns:
+        df_combined_items['_ofd_sort'] = df_combined_items['OFD'].map(_get_ofd_sort_order)
+        sort_cols = [c for c in ['_ofd_sort', 'Outlet Name', 'Category', 'Item'] if c in df_combined_items.columns]
+        df_combined_items = df_combined_items.sort_values(by=sort_cols, kind='stable').drop(columns=['_ofd_sort']).reset_index(drop=True)
+
+    if 'OFD' in df_combined_mods.columns:
+        df_combined_mods['_ofd_sort'] = df_combined_mods['OFD'].map(_get_ofd_sort_order)
+        df_combined_mods = df_combined_mods.sort_values(by=['_ofd_sort'], kind='stable').drop(columns=['_ofd_sort']).reset_index(drop=True)
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
