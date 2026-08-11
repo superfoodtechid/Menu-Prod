@@ -165,7 +165,9 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
     const filteredByOwner = selectedOwner
       ? allOutlets.filter((o) => o.owner === selectedOwner)
       : allOutlets;
-    const parents = Array.from(new Set(filteredByOwner.map((o) => o.nama_outlet).filter(Boolean))).sort();
+    const parents = Array.from(
+      new Set(filteredByOwner.map((o) => o.nama_outlet || o.nama_resto_final || o.merchant_name).filter(Boolean))
+    ).sort();
     setUniqueParentNames(parents);
     setSelectedParents((current) => current.filter((p) => parents.includes(p)));
   }, [allOutlets, selectedOwner]);
@@ -180,7 +182,8 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
 
     // Filter branches whose parent name is in selectedParents list and owner matches if selectedOwner exists
     const filtered = allOutlets.filter((o) => {
-      const matchParent = selectedParents.includes(o.nama_outlet);
+      const parentName = o.nama_outlet || o.nama_resto_final || o.merchant_name;
+      const matchParent = selectedParents.includes(parentName);
       const matchOwner = selectedOwner ? o.owner === selectedOwner : true;
       return matchParent && matchOwner;
     });
