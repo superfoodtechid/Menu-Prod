@@ -360,7 +360,8 @@ def sync_sheets(db: Session = Depends(get_db)):
         owner_raw = row.get("Owner")
         owner = str(owner_raw).strip() if pd.notna(owner_raw) and str(owner_raw).strip() not in ("-", "") else None
 
-        nama_outlet = str(row.get("Nama Outlet", "")).strip() if pd.notna(row.get("Nama Outlet")) else None
+        n_out_raw = row.get("Nama Outlet") if (pd.notna(row.get("Nama Outlet")) and str(row.get("Nama Outlet")).strip() not in ("-", "")) else (row.get("Outlet") if (pd.notna(row.get("Outlet")) and str(row.get("Outlet")).strip() not in ("-", "")) else row.get("Nama Resto Final"))
+        nama_outlet = str(n_out_raw).strip() if pd.notna(n_out_raw) and str(n_out_raw).strip() not in ("-", "") else None
         cabang = str(row.get("Cabang", "")).strip() if pd.notna(row.get("Cabang")) else str(row.get("Brand", "")).strip()
         nama_resto_final = str(row.get("Nama Resto Final", "")).strip() if pd.notna(row.get("Nama Resto Final")) else None
         brand = str(row.get("Brand", "")).strip() if pd.notna(row.get("Brand")) else None

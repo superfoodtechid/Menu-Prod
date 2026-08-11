@@ -426,7 +426,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
       return fetch(url, { headers: { "X-API-Key": API_SECRET_KEY || "" } }).then(r => r.json())
         .then(data => {
           setAllOutlets(data);
-          setUniqueParents(Array.from(new Set(data.map(o => o.nama_outlet).filter(Boolean))).sort());
+          setUniqueParents(Array.from(new Set(data.map(o => o.nama_outlet || o.nama_resto_final || o.merchant_name).filter(Boolean))).sort());
         });
     }).catch((err) => console.error("Error fetching outlets:", err))
       .finally(() => setLoading(false));
@@ -623,7 +623,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const handleSelectOutlet = (name) => {
     setSelectedParent(name);
     setOpenOutletDropdown(false);
-    const targetBranches = allOutlets.filter(o => o.nama_outlet === name);
+    const targetBranches = allOutlets.filter(o => (o.nama_outlet || o.nama_resto_final || o.merchant_name) === name);
     setBranches(targetBranches);
     setSelectedBrandId("");
     setCheckedIds([]);
