@@ -998,35 +998,93 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             category_id = item_info["category_id"]
                             selling_time_id = item_info["sellingTimeID"]
                             old_p = float(orig_item.get("priceInMin", 0)) / 100.0
-                            
+
+                            # 1. Cek Kuota Bulanan Grab (Maksimal 15x Perubahan Harga per Item per 30 Hari)
+                            thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+                            monthly_count = thread_db.query(AuditTrail).filter(
+                                AuditTrail.outlet_id == outlet.id,
+                                AuditTrail.item_id == real_item_id,
+                                AuditTrail.field_changed.ilike("price"),
+                                AuditTrail.status.ilike("SUCCESS"),
+                                AuditTrail.created_at >= thirty_days_ago
+                            ).count()
+
+                            if monthly_count >= 15:
+                                fail_count += 1
+                                item_label = orig_item.get("itemName", real_item_id)
+                                err_quota = f"Item '{item_label}' telah mencapai batas maksimal 15x perubahan harga per bulan di Grab ({monthly_count}/15 terpakai)."
+                                logger.warning(f"⚠️ Kuota Grab Terlampaui: {err_quota}")
+                                trail = AuditTrail(
+                                    job_id=job.id,
+                                    outlet_id=outlet.id,
+                                    item_id=real_item_id,
+                                    item_name=item_label,
+                                    change_type="PRICE_UPDATE",
+                                    field_changed="price",
+                                    old_value=str(old_p),
+                                    new_value=str(new_price),
+                                    status="FAILED",
+                                    error_message=err_quota
+                                )
+                                thread_db.add(trail)
+                                thread_db.commit()
+                                items_breakdown.append({
+                                    "item_id": real_item_id,
+                                    "item_name": item_label,
+                                    "old_price": old_p,
+                                    "requested_price": new_price,
+                                    "verified_price": None,
+                                    "status": "FAILED",
+                                    "error_message": err_quota
+                                })
+                                continue
+
+                            # 2. Hitung Tahapan Kenaikan / Penurunan (>15% Push Bertahap)
+                            steps = calculate_price_steps(old_p, new_price, max_step_pct=0.15)
+                            if len(steps) > 1:
+                                logger.info(f"📊 Grab Push Bertahap (>15%) untuk {orig_item.get('itemName')}: Rp {old_p:,.0f} -> Rp {new_price:,.0f} via {len(steps)} tahapan: {steps}")
+
                             item_data = dict(orig_item)
-                            item_data["priceInMin"] = int(new_price * 100)
                             if category_id and "categoryID" not in item_data:
                                 item_data["categoryID"] = category_id
                             if selling_time_id and "sellingTimeID" not in item_data:
                                 item_data["sellingTimeID"] = selling_time_id
 
-                            val_ok, val_err = await api.validate_item(
-                                mgid, store_id, category_id, item_data,
-                                is_menu_group=is_menu_group_detected,
-                                menu_group_id=detected_menu_group_id
-                            )
-                            if val_err:
-                                logger.warning(f"Grab validation warning for item {real_item_id}: {val_err}")
+                            status_str = "SUCCESS"
+                            err_msg = None
 
-                            upsert_res, upsert_err = await api.upsert_item(
-                                mgid, store_id, category_id, item_data,
-                                is_menu_group=is_menu_group_detected,
-                                menu_group_id=detected_menu_group_id
-                            )
-                            if upsert_res and not upsert_err:
+                            for step_idx, step_p in enumerate(steps):
+                                item_data["priceInMin"] = int(step_p * 100)
+
+                                val_ok, val_err = await api.validate_item(
+                                    mgid, store_id, category_id, item_data,
+                                    is_menu_group=is_menu_group_detected,
+                                    menu_group_id=detected_menu_group_id
+                                )
+                                if val_err:
+                                    logger.warning(f"Grab validation warning for item {real_item_id}: {val_err}")
+
+                                upsert_res, upsert_err = await api.upsert_item(
+                                    mgid, store_id, category_id, item_data,
+                                    is_menu_group=is_menu_group_detected,
+                                    menu_group_id=detected_menu_group_id
+                                )
+
+                                if not (upsert_res and not upsert_err):
+                                    status_str = "FAILED"
+                                    err_msg = upsert_err or "Unknown Grab API error."
+                                    logger.error(f"❌ Grab PUSH tahap harga Rp {step_p:,.0f} gagal: {err_msg}")
+                                    break
+
+                                if len(steps) > 1:
+                                    logger.info(f"   [Grab Tahap {step_idx+1}/{len(steps)}] Berhasil PUSH harga intermediate: Rp {step_p:,.0f}")
+                                    if step_idx < len(steps) - 1:
+                                        await asyncio.sleep(1.5)
+
+                            if status_str == "SUCCESS":
                                 success_count += 1
-                                status_str = "SUCCESS"
-                                err_msg = None
                             else:
                                 fail_count += 1
-                                status_str = "FAILED"
-                                err_msg = upsert_err or "Unknown Grab API error."
 
                             trail = AuditTrail(
                                 job_id=job.id,
@@ -1148,6 +1206,44 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                 if not cached_data and account.portal:
                     cached_data = load_gofood_session(account.portal)
 
+                def _get_token_from_session_dict(sdata):
+                    if not sdata: return None
+                    t = sdata.get("access_token") or sdata.get("token") or sdata.get("authorization")
+                    if t and len(t) > 20:
+                        return t if t.startswith("Bearer ") else f"Bearer {t}"
+                    for c in sdata.get("cookies", []):
+                        if c.get("name") in ('access_token', 'token', 'gobiz_token', 'authorization'):
+                            val = c.get("value", "")
+                            if val and len(val) > 20:
+                                return val if val.startswith("Bearer ") else f"Bearer {val}"
+                    return None
+
+                token = _get_token_from_session_dict(cached_data)
+                if not token and session_path and os.path.exists(session_path):
+                    try:
+                        with open(session_path, "r", encoding="utf-8") as sf:
+                            token = _get_token_from_session_dict(json.load(sf))
+                    except Exception: pass
+
+                def _find_gofood_cache_file(m_id):
+                    cands = [m_id, m_id.replace("GM", "M"), m_id.lstrip("G"), m_id.strip()]
+                    for cid in cands:
+                        cp = os.path.join(BASE_DIR, "Gofood", "API", f"menu-response-{cid}.json")
+                        if os.path.exists(cp):
+                            return cp
+                    return None
+
+                rest_uuid = None
+                cache_path = _find_gofood_cache_file(merchant_id)
+                if cache_path and os.path.exists(cache_path):
+                    try:
+                        with open(cache_path, "r", encoding="utf-8") as f:
+                            raw_cdata = f.read()
+                            match = re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', raw_cdata, re.I)
+                            if match:
+                                rest_uuid = match.group(0)
+                    except Exception: pass
+
                 headless_env = os.getenv("HEADLESS") or os.getenv("HEADLESS_GOFOOD")
                 is_headless = headless_env.lower() in ("true", "1", "yes") if headless_env else True
                 from src.core.browser_factory import launch_universal_playwright_browser
@@ -1163,10 +1259,8 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
                 page = context.new_page()
                 api_headers = {}
-
-                if cached_data and cached_data.get("access_token"):
-                    tok = cached_data["access_token"]
-                    api_headers['authorization'] = tok if tok.startswith("Bearer ") else f"Bearer {tok}"
+                if token:
+                    api_headers['authorization'] = token
 
                 def capture_headers(request):
                     url_lower = request.url.lower()
@@ -1192,35 +1286,48 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                     api_headers['menu_group_id'] = candidate
 
                 page.on("request", capture_headers)
-                page.goto("https://portal.gofoodmerchant.co.id/dashboard", wait_until="domcontentloaded")
-                time.sleep(2)
 
                 def perform_fresh_login():
-                    logger.info(f"🔄 Token GoFood expired/tidak ditemukan. Melakukan fresh login untuk {email}...")
-                    if session_path and os.path.exists(session_path):
-                        try: os.remove(session_path)
-                        except Exception: pass
-                    
-                    page.goto("https://portal.gofoodmerchant.co.id/auth/login/email", wait_until="domcontentloaded")
-                    time.sleep(2)
-                    email_input = page.locator('input[type="email"]:visible, input[name="email"]:visible, input[placeholder*="email" i]:visible, input[type="text"]:visible').first
-                    if email_input.count() > 0:
-                        email_input.fill(email)
-                        submit_btn = page.locator('button:has-text("Lanjut"), button:has-text("Masuk"), button[type="submit"]')
-                        if submit_btn.count() > 0:
-                            submit_btn.first.click()
-                            time.sleep(2)
-                    
-                    pass_input = page.locator('input[type="password"]:visible, input[name*="password" i]:visible').first
-                    if pass_input.count() > 0:
-                        pass_input.fill(password)
-                        page.locator('button:has-text("Masuk"), button[type="submit"]').first.click()
-                    
+                    logger.info(f"🔄 Token GoFood expired/tidak ditemukan. Menjalankan login_outlet untuk {email} (store: {merchant_id})...")
                     try:
-                        page.wait_for_url(lambda u: "/auth/login" not in u and "/auth" not in u, timeout=15000)
-                        context.storage_state(path=session_path)
+                        import threading, asyncio
+                        res_box = [None]
+                        err_box = [None]
+                        
+                        outlet_meta = {
+                            'store_id': merchant_id,
+                            'email': email,
+                            'emails': [email] if email else [],
+                        }
+
+                        def _worker():
+                            try:
+                                asyncio.set_event_loop(asyncio.new_event_loop())
+                                from login_gofood import login_outlet
+                                res_box[0] = login_outlet(outlet_meta)
+                            except Exception as ex:
+                                err_box[0] = ex
+
+                        t = threading.Thread(target=_worker)
+                        t.start()
+                        t.join()
+
+                        if err_box[0]:
+                            raise err_box[0]
+
+                        res = res_box[0]
+                        if res and res.get('access_token'):
+                            tok = res['access_token']
+                            api_headers['authorization'] = tok if tok.startswith("Bearer ") else f"Bearer {tok}"
+                            if res.get('restaurant_uuid'):
+                                api_headers['restaurant_uuid'] = res['restaurant_uuid']
+                            if res.get('cookies'):
+                                try: context.add_cookies(res['cookies'])
+                                except Exception: pass
+                            return True
                     except Exception as e:
-                        logger.warning(f"Tunggu redirect login timeout (15s): {e}")
+                        logger.warning(f"Terjadi kesalahan saat login_outlet: {e}")
+                    return False
 
                 if "/auth" in page.url or "login" in page.url:
                     if not api_headers.get('authorization'):
@@ -1317,6 +1424,44 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             token = token_eval if token_eval.startswith("Bearer ") else f"Bearer {token_eval}"
                     except Exception as e:
                         logger.warning(f"Gagal mengekstrak token dari web storage: {e}")
+
+                def _get_token_from_session_dict(sdata):
+                    t = sdata.get("access_token") or sdata.get("token") or sdata.get("authorization")
+                    if t and len(t) > 20:
+                        return t if t.startswith("Bearer ") else f"Bearer {t}"
+                    for c in sdata.get("cookies", []):
+                        if c.get("name") in ('access_token', 'token', 'gobiz_token', 'authorization'):
+                            val = c.get("value", "")
+                            if val and len(val) > 20:
+                                return val if val.startswith("Bearer ") else f"Bearer {val}"
+                    return None
+
+                if not token and session_path and os.path.exists(session_path):
+                    try:
+                        with open(session_path, "r", encoding="utf-8") as sf:
+                            sdata = json.load(sf)
+                            extracted = _get_token_from_session_dict(sdata)
+                            if extracted:
+                                token = extracted
+                                logger.info(f"🔑 Berhasil mengekstrak token dari session file {os.path.basename(session_path)}")
+                    except Exception as se:
+                        logger.warning(f"Gagal mengekstrak token dari session_path file: {se}")
+
+                if not token:
+                    gofood_dir = os.path.join(BASE_DIR, "Gofood")
+                    if os.path.exists(gofood_dir):
+                        for fname in os.listdir(gofood_dir):
+                            if fname.startswith("session_gofood_") and fname.endswith(".json"):
+                                sp = os.path.join(gofood_dir, fname)
+                                try:
+                                    with open(sp, "r", encoding="utf-8") as sf:
+                                        sdata = json.load(sf)
+                                        extracted = _get_token_from_session_dict(sdata)
+                                        if extracted:
+                                            token = extracted
+                                            logger.info(f"🔑 Berhasil mengekstrak token dari {fname}")
+                                            break
+                                except Exception: pass
 
                 rest_uuid = api_headers.get('restaurant_uuid')
                 if not rest_uuid or len(rest_uuid) != 36:
@@ -1489,12 +1634,19 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     orig_item = item_info["item"]
                     cat_common_id = item_info["category_common_id"] or item_info["category_id"]
 
+                    old_price = int(float(orig_item.get('price') or 0))
+                    target_price = float(new_price)
+                    steps = calculate_price_steps(old_price, target_price, max_step_pct=0.15)
+
+                    if len(steps) > 1:
+                        logger.info(f"📊 Single/Batch PUSH bertahap (>15%) untuk {orig_item.get('name')}: Rp {old_price:,.0f} -> Rp {target_price:,.0f} via {len(steps)} tahapan: {steps}")
+
                     v2_payload = {
                         "menu_common_id": orig_item.get('menu_common_id') or cat_common_id,
                         "image_url": orig_item.get('image_url', orig_item.get('image', '')),
                         "name": orig_item.get('name'),
                         "description": orig_item.get('description', ''),
-                        "price": int(new_price),
+                        "price": int(steps[0]),
                         "active": orig_item.get('is_active', orig_item.get('active', True)),
                         "signature": orig_item.get('signature', False)
                     }
@@ -1539,55 +1691,67 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                     continue
                                 return {'ok': False, 'error': str(ex)}
 
-                    res = send_patch_request(v2_payload)
+                    res = None
+                    for step_idx, step_p in enumerate(steps):
+                        v2_payload["price"] = int(step_p)
+                        res = send_patch_request(v2_payload)
 
-                    # Jika terkena HTTP 429, berikan cooldown dan JANGAN langsung pemboman request fallback
-                    if res and res.get('status') == 429:
-                        logger.warning(f"⚠️ GoFood API Rate Limited (HTTP 429). Mengistirahatkan proses 10 detik agar server pulih...")
-                        time.sleep(10.0)
+                        # Jika terkena HTTP 429, berikan cooldown dan JANGAN langsung pemboman request fallback
+                        if res and res.get('status') == 429:
+                            logger.warning(f"⚠️ GoFood API Rate Limited (HTTP 429). Mengistirahatkan proses 10 detik agar server pulih...")
+                            time.sleep(10.0)
 
-                    # Fallback 1: Jika gagal (bukan 429) dan ada variant_category_common_ids, coba sertakan
-                    if (not res or not res.get('ok')) and res.get('status') != 429:
-                        time.sleep(0.6)  # Jeda jeda sebelum fallback
-                        vars_ids = orig_item.get('variant_category_common_ids') or orig_item.get('variant_category_ids')
-                        if vars_ids and isinstance(vars_ids, list) and len(vars_ids) > 0:
-                            v2_payload_with_vars = dict(v2_payload)
-                            v2_payload_with_vars["variant_category_common_ids"] = vars_ids
-                            res_var = send_patch_request(v2_payload_with_vars, max_retries=1)
-                            if res_var and res_var.get('ok'):
-                                res = res_var
+                        # Fallback 1: Jika gagal (bukan 429) dan ada variant_category_common_ids, coba sertakan
+                        if (not res or not res.get('ok')) and res.get('status') != 429:
+                            time.sleep(0.6)  # Jeda jeda sebelum fallback
+                            vars_ids = orig_item.get('variant_category_common_ids') or orig_item.get('variant_category_ids')
+                            if vars_ids and isinstance(vars_ids, list) and len(vars_ids) > 0:
+                                v2_payload_with_vars = dict(v2_payload)
+                                v2_payload_with_vars["variant_category_common_ids"] = vars_ids
+                                res_var = send_patch_request(v2_payload_with_vars, max_retries=1)
+                                if res_var and res_var.get('ok'):
+                                    res = res_var
 
-                    # Fallback 2: Jika masih gagal (dan bukan 429)
-                    if (not res or not res.get('ok')) and res.get('status') != 429:
-                        status_code = res.get('status', '?') if res else '?'
-                        body_err = (res.get('body') or '')[:500] if res else ''
-                        logger.warning(f"GoFood V2 PATCH gagal (HTTP {status_code}), Body: {body_err}, Error: {res.get('error')}. Fallback ke V1 PUT...")
-                        time.sleep(0.6)  # Jeda jeda sebelum fallback V1
+                        # Fallback 2: Jika masih gagal (dan bukan 429)
+                        if (not res or not res.get('ok')) and res.get('status') != 429:
+                            status_code = res.get('status', '?') if res else '?'
+                            body_err = (res.get('body') or '')[:500] if res else ''
+                            logger.warning(f"GoFood V2 PATCH gagal (HTTP {status_code}), Body: {body_err}, Error: {res.get('error')}. Fallback ke V1 PUT...")
+                            time.sleep(0.6)  # Jeda jeda sebelum fallback V1
 
-                        v1_payload = {
-                            "name": orig_item.get('name'),
-                            "price": int(new_price),
-                            "active": orig_item.get('is_active', orig_item.get('active', True)),
-                            "description": orig_item.get('description', ''),
-                            "image": orig_item.get('image_url', orig_item.get('image', ''))
-                        }
-                        v1_item_id = orig_item.get('id') or orig_item.get('common_id') or item_id
+                            v1_payload = {
+                                "name": orig_item.get('name'),
+                                "price": int(step_p),
+                                "active": orig_item.get('active', True),
+                                "description": orig_item.get('description', ''),
+                                "image": orig_item.get('image_url', orig_item.get('image', ''))
+                            }
+                            v1_item_id = orig_item.get('id') or orig_item.get('common_id') or item_id
+                            
+                            # V1 PUT via context.request (bypass CORS)
+                            if v1_item_id:
+                                v1_url = f'https://api.gojekapi.com/gofood/merchant/v1/restaurants/{rest_uuid}/menu_items/{v1_item_id}'
+                                try:
+                                    cr_v1 = context.request.fetch(
+                                        v1_url,
+                                        method='PUT',
+                                        headers=headers_direct,
+                                        data=json.dumps(v1_payload)
+                                    )
+                                    res = {'ok': cr_v1.ok, 'status': cr_v1.status, 'body': cr_v1.text()}
+                                except Exception as e:
+                                    res = {'ok': False, 'error': str(e)}
+                            else:
+                                res = {'ok': False, 'error': 'No V1 item ID available for fallback'}
+
+                        if not (res and res.get('ok')):
+                            logger.error(f"❌ Tahap harga Rp {step_p:,.0f} gagal: {res.get('error') or res.get('body')}")
+                            break
                         
-                        # V1 PUT via context.request (bypass CORS)
-                        if v1_item_id:
-                            v1_url = f'https://api.gojekapi.com/gofood/merchant/v1/restaurants/{rest_uuid}/menu_items/{v1_item_id}'
-                            try:
-                                cr_v1 = context.request.fetch(
-                                    v1_url,
-                                    method='PUT',
-                                    headers=headers_direct,
-                                    data=json.dumps(v1_payload)
-                                )
-                                res = {'ok': cr_v1.ok, 'status': cr_v1.status, 'body': cr_v1.text()}
-                            except Exception as e:
-                                res = {'ok': False, 'error': str(e)}
-                        else:
-                            res = {'ok': False, 'error': 'No V1 item ID available for fallback'}
+                        if len(steps) > 1:
+                            logger.info(f"   [Tahap {step_idx+1}/{len(steps)}] Berhasil PUSH harga intermediate: Rp {step_p:,.0f}")
+                            if step_idx < len(steps) - 1:
+                                time.sleep(1.5)
 
                     if res and res.get('ok'):
                         success_count += 1
