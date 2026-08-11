@@ -12,7 +12,7 @@ def get_master_df(force_download=False):
     df = None
     if not force_download and os.path.exists(CACHE_PATH):
         age = time.time() - os.path.getmtime(CACHE_PATH)
-        if age < 3600:
+        if age < 180:  # Near real-time cache TTL: 3 minutes (180 seconds)
             try:
                 df = pd.read_csv(CACHE_PATH)
             except Exception:

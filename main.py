@@ -81,6 +81,27 @@ def startup_event():
     exports_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"📂 Exports directory verified at: {exports_dir}")
 
+    # Launch background near real-time auto-sync loop (syncs Google Sheets every 3 minutes)
+    def _bg_auto_sync_loop():
+        import time
+        time.sleep(15)  # Initial grace period after startup
+        logger.info("🔄 Background GSheets auto-sync worker started (interval: 3 mins)")
+        while True:
+            try:
+                from menu_core.database import SessionLocal
+                db = SessionLocal()
+                try:
+                    sync_sheets(db)
+                finally:
+                    db.close()
+            except Exception as ex:
+                logger.warning(f"⚠️ Background auto-sync iteration error: {ex}")
+            time.sleep(180)  # Sync every 3 minutes
+
+    import threading
+    t = threading.Thread(target=_bg_auto_sync_loop, daemon=True)
+    t.start()
+
 
 # ─── PYDANTIC SCHEMAS ─────────────────────────────────────────────────────────
 
@@ -216,6 +237,11 @@ def sync_sheets(db: Session = Depends(get_db)):
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
+        try:
+            from menu_core.sheets import CACHE_PATH
+            df.to_csv(CACHE_PATH, index=False)
+        except Exception as ce:
+            logger.warning(f"⚠️ Failed to update master_merchants_cache.csv: {ce}")
     except Exception as e:
         logger.error(f"❌ Failed to fetch Google Sheet: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch Google Sheet: {str(e)}")
@@ -369,6 +395,10 @@ def sync_sheets(db: Session = Depends(get_db)):
         else:
             db_outlet.store_id = store_id
             db_outlet.owner = owner
+            if merchant_name and merchant_name != "-":
+                db_outlet.merchant_name = merchant_name
+            if nama_outlet:
+                db_outlet.nama_outlet = nama_outlet
             db_outlet.nama_resto_final = nama_resto_final
             db_outlet.brand = brand
             db_outlet.is_active = True
