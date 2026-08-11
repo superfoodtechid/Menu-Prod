@@ -254,11 +254,11 @@ def sync_sheets(db: Session = Depends(get_db)):
     # Use block_id (derived from non-null No column) to prevent global ffill leak across empty rows/different outlets
     if "No" in df.columns:
         df["block_id"] = df["No"].notna().cumsum()
-        for col in ["Owner", "Status", "Nama Outlet", "Merchant Name", "Cabang", "Nama Resto Final", "Brand"]:
+        for col in ["Owner", "Status", "Nama Outlet", "Outlet", "Merchant Name", "Cabang", "Nama Resto Final", "Brand"]:
             if col in df.columns:
                 df[col] = df.groupby("block_id")[col].ffill()
     else:
-        for col in ["Owner", "Status", "Nama Outlet", "Merchant Name", "Cabang", "Nama Resto Final", "Brand"]:
+        for col in ["Owner", "Status", "Nama Outlet", "Outlet", "Merchant Name", "Cabang", "Nama Resto Final", "Brand"]:
             if col in df.columns:
                 df[col] = df[col].ffill()
 
