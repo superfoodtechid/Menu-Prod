@@ -80,6 +80,144 @@ def clear_all_caches():
     time.sleep(2)
 
 
+def auto_login_shopee_process(account_list):
+    total_to_run = len(account_list)
+    if total_to_run == 0:
+        return
+
+    # Import shopee browser module
+    automation_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "shopee-omzet-automation")
+    if automation_dir not in sys.path:
+        sys.path.insert(0, automation_dir)
+    from core import browser as shopee_browser
+
+    success_count = 0
+    skipped_count = 0
+    fail_count = 0
+    import json
+
+    for idx, ((username, password), info) in enumerate(account_list, 1):
+        merchant_name = info['merchant']
+        owner = info['owner']
+        profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name or username).strip('_').lower()
+        
+        session_file = os.path.join(FILE_DIR, "shopee", "data", f"session_{profile_name}.json")
+        
+        # Check if valid session already exists
+        if os.path.exists(session_file):
+            try:
+                with open(session_file, 'r', encoding='utf-8') as f:
+                    sdata = json.load(f)
+                if sdata and "shopee_tob_token" in sdata:
+                    print(f"  [{idx:2d}/{total_to_run}] {GREEN}✔ Session sudah aktif:{RESET} Owner={owner:<10} | Merchant={merchant_name:<30} | Username={username}")
+                    skipped_count += 1
+                    continue
+            except Exception:
+                pass
+
+        print(f"\n  [{idx:2d}/{total_to_run}] {CYAN}🔑 Process Login Shopee:{RESET} Owner={owner} | Merchant={merchant_name}")
+        print(f"       Username: {username} | Profile: session_{profile_name}.json")
+        
+        shopee_browser.set_session_file(session_file)
+        try:
+            session_data = shopee_browser.get_session(
+                username=username,
+                password=password,
+                phone=None,
+                headless=False,
+                close_browser=True,
+                interactive=True
+            )
+            if session_data and "shopee_tob_token" in session_data:
+                print(f"       {GREEN}✔ Login BERHASIL untuk {username}! Session tersimpan.{RESET}")
+                success_count += 1
+            else:
+                print(f"       {RED}✘ Gagal mendapatkan session untuk {username}.{RESET}")
+                fail_count += 1
+        except Exception as err:
+            print(f"       {RED}✘ Error saat login {username}: {err}{RESET}")
+            fail_count += 1
+
+    print(f"\n  {BOLD}{CYAN}=== RINGKASAN LOGIN SHOPEE ==={RESET}")
+    print(f"    Total Akun Ditarget  : {total_to_run}")
+    print(f"    Sudah Ada (Skipped)  : {skipped_count}")
+    print(f"    Berhasil Login Baru  : {success_count}")
+    print(f"    Gagal                : {fail_count}\n")
+    input(f"  {BOLD}Tekan ENTER untuk kembali ke menu...{RESET}")
+
+
+def auto_login_all_shopee_sessions():
+    print(f"\n  {CYAN}=== AUTO LOGIN SESSION SHOPEE FROM GSHEETS (KOLOM Q & S) ==={RESET}")
+    print(f"  {DIM}Membaca data merchant dari Google Sheets...{RESET}")
+    
+    try:
+        from menu_core.sheets import get_master_df
+        df = get_master_df(force_download=True)
+    except Exception as e:
+        print(f"  {RED}✘ Gagal membaca Google Sheets: {e}{RESET}\n")
+        time.sleep(2)
+        return
+
+    shopee_mask = df['Aplikasi'].astype(str).str.strip().str.lower().str.contains('shopee', na=False)
+    live_mask = df['Status'].astype(str).str.strip().str.lower() == 'live'
+    shopee_df = df[shopee_mask & live_mask].copy()
+
+    accounts = {}
+    for idx, r in shopee_df.iterrows():
+        username = str(r.get('Nama Pengguna', '')).strip()
+        password = str(r.get('Kata Sandi', '')).strip()
+        merchant = str(r.get('Merchant Name', '')).strip() or str(r.get('Outlet', '')).strip() or str(r.get('Nama Resto Final', '')).strip()
+        owner = str(r.get('Owner', '')).strip()
+        
+        if username and password and username not in ('-', 'nan') and password not in ('-', 'nan'):
+            key = (username, password)
+            if key not in accounts:
+                accounts[key] = {
+                    'merchant': merchant,
+                    'owner': owner,
+                    'outlets': [merchant]
+                }
+            else:
+                accounts[key]['outlets'].append(merchant)
+
+    total_accounts = len(accounts)
+    if total_accounts == 0:
+        print(f"  {YELLOW}[!] Tidak ada akun Shopee LIVE dengan Username & Password (Kolom Q & S) ditemukan.{RESET}\n")
+        time.sleep(2)
+        return
+
+    account_list = list(accounts.items())
+
+    print(f"\n  {BOLD}Pilih Mode Login Shopee GSheets ({total_accounts} Akun Ditemukan):{RESET}")
+    print(f"    {GREEN}[1]{RESET} Login SEMUA Akun Shopee secara otomatis ({total_accounts} Akun)")
+    print(f"    {CYAN}[2]{RESET} Pilih SATUAN Akun Shopee (Pilih 1 Akun spesifik)")
+    print(f"    {YELLOW}[b]{RESET} Kembali ke menu utama")
+    print()
+
+    choice = input(f"  {BOLD}Pilihan (1/2/b):{RESET} ").strip().lower()
+    if choice == 'b' or not choice:
+        return
+    elif choice == '1':
+        auto_login_shopee_process(account_list)
+    elif choice == '2':
+        print(f"\n  {BOLD}DAFTAR AKUN SHOPEE GSHEETS (KOLOM Q & S):{RESET}")
+        for i, ((uname, pwd), info) in enumerate(account_list, 1):
+            print(f"    {GREEN}[{i:2d}]{RESET} Owner: {info['owner']:<10} | Merchant: {info['merchant']:<32} | User: {uname}")
+        print(f"    {YELLOW}[ b]{RESET} Kembali")
+        print()
+        
+        sel = input(f"  {BOLD}Pilih nomor akun yang ingin di-login (1-{total_accounts}):{RESET} ").strip().lower()
+        if sel == 'b' or not sel:
+            return
+        if sel.isdigit():
+            idx = int(sel) - 1
+            if 0 <= idx < total_accounts:
+                auto_login_shopee_process([account_list[idx]])
+            else:
+                print(f"  {RED}✘ Nomor pilihan tidak valid.{RESET}\n")
+                time.sleep(1)
+
+
 def interactive_menu():
     state = "applicator"
     applicator = None
@@ -100,21 +238,30 @@ def interactive_menu():
             print(f"    {YELLOW}[4]{RESET} Semua (Jadikan 1 C5)")
             print(f"    {DIM}[5]{RESET} Clear Cache (Reset Sesi)")
             print(f"    {CYAN}[6]{RESET} Perbaiki Login Shopee (Manual OTP)")
-            print(f"    {RED}[7]{RESET} Keluar")
+            print(f"    {MAGENTA}[7]{RESET} Auto Login Semua Session Shopee (GSheet Kolom Q & S)")
+            print(f"    {RED}[8]{RESET} Keluar")
             print()
             
-            choice = input(f"  {BOLD}Pilihan (1/2/3/4/5/6/7):{RESET} ").strip()
-            if choice == "7":
+            choice = input(f"  {BOLD}Pilihan (1/2/3/4/5/6/7/8):{RESET} ").strip()
+            if choice == "8":
                 print("  Keluar.")
                 sys.exit(0)
+            elif choice == "7":
+                auto_login_all_shopee_sessions()
+                state = "applicator"
             elif choice == "6":
                 print(f"\n  {CYAN}=== PERBAIKI LOGIN SHOPEE ==={RESET}")
                 print(f"  {DIM}Pilih metode login yang ingin digunakan:{RESET}")
                 print(f"    {YELLOW}[1]{RESET} Login via Nomor HP (OTP)")
                 print(f"    {YELLOW}[2]{RESET} Login via Username & Password")
                 print(f"    {YELLOW}[3]{RESET} Full Manual (Buka Chrome & Ketik Langsung)")
+                print(f"    {MAGENTA}[4]{RESET} Auto Login Semua Account Shopee dari GSheets (Kolom Q & S)")
                 
-                login_method = input(f"  {BOLD}Pilihan Metode (1/2/3) [Default 1]:{RESET} ").strip() or "1"
+                login_method = input(f"  {BOLD}Pilihan Metode (1/2/3/4) [Default 1]:{RESET} ").strip() or "1"
+                if login_method == "4":
+                    auto_login_all_shopee_sessions()
+                    state = "applicator"
+                    continue
                 
                 username = None
                 phone = None
@@ -158,9 +305,7 @@ def interactive_menu():
                     phone=phone, 
                     headless=False, 
                     close_browser=True, 
-                    interactive=True,
-                    allow_otp=True,
-                    profile_name=profile_name
+                    interactive=True
                 )
                 if session_data and "shopee_tob_token" in session_data:
                     print(f"  {GREEN}✔ Login berhasil diperbaiki dan session tersimpan!{RESET}\n")

@@ -736,12 +736,12 @@ def _init_driver(headless: bool):
 
     # Delete SingletonLock if it exists to avoid SessionNotCreatedException on Linux
     singleton_lock = profile_dir / "SingletonLock"
-    if singleton_lock.exists() or singleton_lock.is_symlink():
-        try:
-            singleton_lock.unlink(missing_ok=True)
+    try:
+        if os.path.islink(singleton_lock) or os.path.exists(singleton_lock):
+            os.unlink(str(singleton_lock))
             log.info(f"🧹 Removed Chrome SingletonLock at {singleton_lock}")
-        except Exception as e:
-            log.warning(f"⚠️ Failed to remove SingletonLock: {e}")
+    except Exception as e:
+        log.warning(f"⚠️ Failed to remove SingletonLock: {e}")
 
     # Check for system Chromium & ChromeDriver (Linux / ARM64 / Docker)
     chromium_path = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else ("/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None)

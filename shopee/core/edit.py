@@ -8,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from .client import ShopeeModifyClient
 
-WORKSPACE_DIR = Path("/home/akbarhann/project/FoodMaster/menu-prod")
+WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent
 AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
