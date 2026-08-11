@@ -1362,13 +1362,11 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     cache_path = _find_gofood_cache_file(merchant_id)
                     if cache_path and os.path.exists(cache_path):
                         try:
-                            with open(cache_path, "r") as f:
-                                cdata = json.load(f)
-                                menus = cdata.get("menus") or cdata.get("categories") or []
-                                if menus and len(menus) > 0:
-                                    cand = menus[0].get("restaurant_id") or menus[0].get("restaurant_uuid")
-                                    if cand and len(cand) == 36:
-                                        rest_uuid = cand
+                            with open(cache_path, "r", encoding="utf-8") as f:
+                                raw_cdata = f.read()
+                                match = re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', raw_cdata, re.I)
+                                if match:
+                                    rest_uuid = match.group(0)
                         except Exception as e:
                             logger.error(f"Gagal membaca cached restaurant_id: {e}")
 
@@ -1424,7 +1422,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                         except Exception as e:
                             logger.error(f"Gagal membaca offline cache: {e}")
 
-                if not token:
+                if not token and not menu_data:
                     raise Exception("Gagal menangkap Authorization Token untuk GoFood setelah percobaan fresh login.")
 
                 if not menu_data:
