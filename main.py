@@ -1349,10 +1349,18 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     except Exception as e:
                         logger.warning(f"Gagal mengekstrak rest_uuid dari web storage: {e}")
 
+                def _find_gofood_cache_file(m_id):
+                    cands = [m_id, m_id.replace("GM", "M"), m_id.lstrip("G"), m_id.strip()]
+                    for cid in cands:
+                        cp = os.path.join(BASE_DIR, "Gofood", "API", f"menu-response-{cid}.json")
+                        if os.path.exists(cp):
+                            return cp
+                    return None
+
                 if not rest_uuid or len(rest_uuid) != 36:
                     # Coba baca dari cached menu response hasil Pull sebelumnya
-                    cache_path = os.path.join(BASE_DIR, "Gofood", "API", f"menu-response-{merchant_id}.json")
-                    if os.path.exists(cache_path):
+                    cache_path = _find_gofood_cache_file(merchant_id)
+                    if cache_path and os.path.exists(cache_path):
                         try:
                             with open(cache_path, "r") as f:
                                 cdata = json.load(f)
@@ -1407,8 +1415,8 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
                 if not menu_data:
                     # Emergency fallback: Try reading offline cache file if available
-                    cache_path = os.path.join(BASE_DIR, "Gofood", "API", f"menu-response-{merchant_id}.json")
-                    if os.path.exists(cache_path):
+                    cache_path = _find_gofood_cache_file(merchant_id)
+                    if cache_path and os.path.exists(cache_path):
                         try:
                             with open(cache_path, "r", encoding="utf-8") as f:
                                 menu_data = json.load(f)
