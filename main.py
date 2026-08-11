@@ -361,10 +361,10 @@ def sync_sheets(db: Session = Depends(get_db)):
         owner = str(owner_raw).strip() if pd.notna(owner_raw) and str(owner_raw).strip() not in ("-", "") else None
 
         n_out_raw = row.get("Nama Outlet") if (pd.notna(row.get("Nama Outlet")) and str(row.get("Nama Outlet")).strip() not in ("-", "")) else (row.get("Outlet") if (pd.notna(row.get("Outlet")) and str(row.get("Outlet")).strip() not in ("-", "")) else row.get("Nama Resto Final"))
-        nama_outlet = str(n_out_raw).strip() if pd.notna(n_out_raw) and str(n_out_raw).strip() not in ("-", "") else None
         cabang = str(row.get("Cabang", "")).strip() if pd.notna(row.get("Cabang")) else str(row.get("Brand", "")).strip()
         nama_resto_final = str(row.get("Nama Resto Final", "")).strip() if pd.notna(row.get("Nama Resto Final")) else None
         brand = str(row.get("Brand", "")).strip() if pd.notna(row.get("Brand")) else None
+        nama_outlet = str(n_out_raw).strip() if pd.notna(n_out_raw) and str(n_out_raw).strip() not in ("-", "") else (nama_resto_final or merchant_name or None)
 
         # 3. Upsert Outlet
         db_outlet = None
@@ -398,8 +398,7 @@ def sync_sheets(db: Session = Depends(get_db)):
             db_outlet.owner = owner
             if merchant_name and merchant_name != "-":
                 db_outlet.merchant_name = merchant_name
-            if nama_outlet:
-                db_outlet.nama_outlet = nama_outlet
+            db_outlet.nama_outlet = nama_outlet or db_outlet.nama_resto_final or db_outlet.merchant_name
             db_outlet.nama_resto_final = nama_resto_final
             db_outlet.brand = brand
             db_outlet.is_active = True
@@ -1218,10 +1217,10 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                         page.locator('button:has-text("Masuk"), button[type="submit"]').first.click()
                     
                     try:
-                        page.wait_for_url(lambda url: "/auth/login" not in url, timeout=45000)
+                        page.wait_for_url(lambda u: "/auth/login" not in u and "/auth" not in u, timeout=15000)
                         context.storage_state(path=session_path)
                     except Exception as e:
-                        logger.warning(f"Tunggu redirect login timeout: {e}")
+                        logger.warning(f"Tunggu redirect login timeout (15s): {e}")
 
                 if "/auth" in page.url or "login" in page.url:
                     if not api_headers.get('authorization'):
@@ -1323,6 +1322,13 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                 if not rest_uuid or len(rest_uuid) != 36:
                     try:
                         uuid_eval = page.evaluate("""() => {
+                            try {
+                                if (window.__NEXT_DATA__ && window.__NEXT_DATA__.props) {
+                                    const strData = JSON.stringify(window.__NEXT_DATA__.props);
+                                    const match = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(strData);
+                                    if (match) return match[0];
+                                }
+                            } catch(e){}
                             const uuidRegex = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
                             for (let i = 0; i < localStorage.length; i++) {
                                 const val = localStorage.getItem(localStorage.key(i));
@@ -1358,16 +1364,19 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                         except Exception as e:
                             logger.error(f"Gagal membaca cached restaurant_id: {e}")
 
-                if not rest_uuid:
-                    rest_uuid = merchant_id
+                if not rest_uuid or len(rest_uuid) != 36:
+                    rest_uuid = None
 
                 menu_data = None
                 if token and rest_uuid:
-                    menu_data = go_api.fetch_menus(page, token, rest_uuid)
+                    try:
+                        menu_data = go_api.fetch_menus(page, token, rest_uuid)
+                    except Exception as fe:
+                        logger.warning(f"⚠️ Fetch menus via API 36-char UUID gagal ({fe}).")
 
                 # Jika token missing atau menu_data 401 / None, picu fresh login
                 if not token or not menu_data:
-                    logger.warning("⚠️ GoFood session expired (token tidak valid/401). Memicu fresh login ulang...")
+                    logger.warning("⚠️ GoFood session expired / 401 / 422. Memicu fresh login & reload...")
                     perform_fresh_login()
                     page.goto(f"https://portal.gofoodmerchant.co.id/gofood/{merchant_id}/menu-items", wait_until="domcontentloaded")
                     time.sleep(3)
@@ -1386,8 +1395,32 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                 token = f"Bearer {c['value']}"
                                 break
 
-                    if token and rest_uuid:
-                        menu_data = go_api.fetch_menus(page, token, rest_uuid)
+                    cand_uuid = api_headers.get('restaurant_uuid')
+                    if cand_uuid and len(cand_uuid) == 36:
+                        rest_uuid = cand_uuid
+
+                    if token and rest_uuid and len(rest_uuid) == 36:
+                        try:
+                            menu_data = go_api.fetch_menus(page, token, rest_uuid)
+                        except Exception as fe2:
+                            logger.warning(f"⚠️ Retry fetch menus gagal ({fe2}).")
+
+                if not menu_data:
+                    # Emergency fallback: Try reading offline cache file if available
+                    cache_path = os.path.join(BASE_DIR, "Gofood", "API", f"menu-response-{merchant_id}.json")
+                    if os.path.exists(cache_path):
+                        try:
+                            with open(cache_path, "r", encoding="utf-8") as f:
+                                menu_data = json.load(f)
+                                logger.info(f"📦 Emergency Fallback: Berhasil membaca menu GoFood dari offline cache {os.path.basename(cache_path)}")
+                        except Exception as e:
+                            logger.error(f"Gagal membaca offline cache: {e}")
+
+                if not token:
+                    raise Exception("Gagal menangkap Authorization Token untuk GoFood setelah percobaan fresh login.")
+
+                if not menu_data:
+                    raise Exception(f"Gagal menarik menu GoFood ({merchant_id}) untuk perbandingan harga.")
 
                 group_id = api_headers.get('menu_group_id')
                 if not group_id and rest_uuid and token and len(rest_uuid) == 36:

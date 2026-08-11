@@ -40,10 +40,10 @@ def combine_c5(excel_paths, output_path):
     df_combined_mods = pd.concat(all_mods, ignore_index=True)
 
     # Sort deterministically by platform (OFD): GoFood (1) -> GrabFood (2) -> ShopeeFood (3)
+    # Uses stable sort on _ofd_sort ONLY to guarantee exact original menu item sequence per SID is preserved
     if 'OFD' in df_combined_items.columns:
         df_combined_items['_ofd_sort'] = df_combined_items['OFD'].map(_get_ofd_sort_order)
-        sort_cols = [c for c in ['_ofd_sort', 'Outlet Name', 'Category', 'Item'] if c in df_combined_items.columns]
-        df_combined_items = df_combined_items.sort_values(by=sort_cols, kind='stable').drop(columns=['_ofd_sort']).reset_index(drop=True)
+        df_combined_items = df_combined_items.sort_values(by=['_ofd_sort'], kind='stable').drop(columns=['_ofd_sort']).reset_index(drop=True)
 
     if 'OFD' in df_combined_mods.columns:
         df_combined_mods['_ofd_sort'] = df_combined_mods['OFD'].map(_get_ofd_sort_order)

@@ -64,7 +64,8 @@ def main():
         clean_outlet_folder = "".join(c for c in raw_outlet if c.isalnum() or c in (' ', '_', '-')).strip()
         clean_outlet_folder = re.sub(r'\s+', ' ', clean_outlet_folder).lower()
         
-        output_dir = f"/home/akbarhann/project/FoodMaster/menu-prod/data/exports/shopee/{clean_outlet_folder}"
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        output_dir = os.path.join(base_dir, "data", "exports", "shopee", clean_outlet_folder)
         excel_path = os.path.join(output_dir, excel_filename)
         
         # Cek jika file excel sudah ada

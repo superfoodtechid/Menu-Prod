@@ -28,8 +28,8 @@ from selenium.webdriver.chrome.options import Options
 # Path Setup
 # ──────────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent  # menu-shopee
-AUTOMATION_DIR = Path("/home/akbarhann/project/FoodMaster/menu-prod/src/shopee-omzet-automation")
+PROJECT_DIR = SCRIPT_DIR.parent
+AUTOMATION_DIR = PROJECT_DIR / "src" / "shopee-omzet-automation"
 
 # Add automation dir to sys.path for browser module import
 if str(AUTOMATION_DIR) not in sys.path:
@@ -41,7 +41,7 @@ from core import browser
 orig_add_argument = Options.add_argument
 def custom_add_argument(self, argument):
     if "--user-data-dir=" in argument:
-        argument = f"--user-data-dir=/home/akbarhann/project/FoodMaster/menu-prod/outlet -info/data/chrome_profile"
+        argument = f"--user-data-dir={PROJECT_DIR / 'outlet -info' / 'data' / 'chrome_profile'}"
         print(f"🔧 [PATCH] Mengalihkan user data dir ke: {argument}")
     orig_add_argument(self, argument)
 Options.add_argument = custom_add_argument

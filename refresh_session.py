@@ -2,8 +2,8 @@ import os
 import sys
 from pathlib import Path
 
-# Add weekly to sys.path
-WEEKLY_DIR = Path("/home/akbarhann/project/task-weekly/weekly")
+BASE_DIR = Path(__file__).resolve().parent
+WEEKLY_DIR = BASE_DIR / "src" / "shopee-omzet-automation"
 sys.path.insert(0, str(WEEKLY_DIR))
 
 from core import browser

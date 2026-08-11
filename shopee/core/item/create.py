@@ -5,8 +5,8 @@ import time
 from pathlib import Path
 from ..client import ShopeeModifyClient
 
-MENU_DIR = Path("/home/akbarhann/project/FoodMaster/menu-prod/shopee")
-AUTOMATION_DIR = Path("/home/akbarhann/project/FoodMaster/menu-prod/src/shopee-omzet-automation")
+MENU_DIR = Path(__file__).resolve().parent.parent.parent
+AUTOMATION_DIR = MENU_DIR.parent / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
 from core import browser
