@@ -329,14 +329,12 @@ def sync_sheets(db: Session = Depends(get_db)):
         store_id = str(store_id_raw).strip().split(".")[0] if pd.notna(store_id_raw) and str(store_id_raw).strip() != "-" else None
         
         m_name_raw = row.get("Merchant Name")
-        n_out_cand = row.get("Nama Outlet") if pd.notna(row.get("Nama Outlet")) and str(row.get("Nama Outlet")).strip() not in ("-", "") else (row.get("Outlet") if pd.notna(row.get("Outlet")) and str(row.get("Outlet")).strip() not in ("-", "") else (row.get("Nama Resto Final") if pd.notna(row.get("Nama Resto Final")) and str(row.get("Nama Resto Final")).strip() not in ("-", "") else row.get("Rekomendasi Nama Resto")))
-
-        nama_outlet = str(n_out_cand).strip() if pd.notna(n_out_cand) and str(n_out_cand).strip() not in ("-", "") else None
-        merchant_name = str(m_name_raw).strip() if pd.notna(m_name_raw) and str(m_name_raw).strip() not in ("-", "") else (nama_outlet or "-")
+        merchant_name = str(m_name_raw).strip() if pd.notna(m_name_raw) and str(m_name_raw).strip() != "-" else str(row.get("Nama Outlet", "")).strip()
 
         owner_raw = row.get("Owner")
         owner = str(owner_raw).strip() if pd.notna(owner_raw) and str(owner_raw).strip() not in ("-", "") else None
 
+        nama_outlet = str(row.get("Nama Outlet", "")).strip() if pd.notna(row.get("Nama Outlet")) else None
         cabang = str(row.get("Cabang", "")).strip() if pd.notna(row.get("Cabang")) else str(row.get("Brand", "")).strip()
         nama_resto_final = str(row.get("Nama Resto Final", "")).strip() if pd.notna(row.get("Nama Resto Final")) else None
         brand = str(row.get("Brand", "")).strip() if pd.notna(row.get("Brand")) else None
@@ -371,10 +369,6 @@ def sync_sheets(db: Session = Depends(get_db)):
         else:
             db_outlet.store_id = store_id
             db_outlet.owner = owner
-            if nama_outlet:
-                db_outlet.nama_outlet = nama_outlet
-            if merchant_name and merchant_name != "-":
-                db_outlet.merchant_name = merchant_name
             db_outlet.nama_resto_final = nama_resto_final
             db_outlet.brand = brand
             db_outlet.is_active = True
