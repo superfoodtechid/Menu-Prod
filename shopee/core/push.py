@@ -164,3 +164,119 @@ def push_price_update_dish(
         return False, f"Gagal mengupdate hidangan via API: {client.last_error}"
         
     return True, f"Hidangan '{target_name}' (ID {dish_id}) berhasil diupdate ke Rp {new_price:,.0f}."
+
+
+def push_price_update_batch(
+    store_metadata: dict,
+    updates: list[dict],
+    headless: bool = True,
+    on_item_progress = None
+) -> list[dict]:
+    """
+    Melakukan PUSH perubahan harga batch (banyak item sekaligus)
+    menggunakan 1 KALI boot browser session Shopee Partner.
+    Jika terjadi kesalahan sesi di tengah jalan, akan dilakukan re-boot 1 kali.
+    """
+    client, err = _boot_push_client(store_metadata, headless=headless)
+    results = []
+    total = len(updates)
+
+    for idx, update in enumerate(updates):
+        dish_id = str(update["item_id"])
+        new_price = float(update["new_price"])
+        item_name = update.get("item_name") or dish_id
+
+        if on_item_progress:
+            try:
+                on_item_progress(idx, total, item_name, new_price)
+            except Exception:
+                pass
+
+        if not client:
+            print(f"[PUSH_BATCH] Retrying _boot_push_client for item {item_name}...")
+            client, err = _boot_push_client(store_metadata, headless=headless)
+
+        if not client:
+            results.append({
+                "item_id": dish_id,
+                "item_name": item_name,
+                "new_price": new_price,
+                "success": False,
+                "error_message": f"Boot client failed: {err}"
+            })
+            continue
+
+        store_id = client.entity_id or store_metadata.get("store_id")
+        if not store_id:
+            results.append({
+                "item_id": dish_id,
+                "item_name": item_name,
+                "new_price": new_price,
+                "success": False,
+                "error_message": "Store ID / Entity ID Shopee tidak ditemukan"
+            })
+            continue
+
+        try:
+            dish = client.get_dish_detail(dish_id, store_id)
+            if not dish:
+                catalog_id = 0
+                target_name = item_name
+                target_desc = ""
+                target_avail = True
+                target_pic = ""
+                opt_groups = []
+                existing_dish = None
+            else:
+                catalog_id = dish.get("catalog_id", 0)
+                target_name = dish.get("name", item_name)
+                target_desc = dish.get("description", "")
+                target_avail = dish.get("available", True)
+                target_pic = dish.get("picture", "")
+                opt_groups = dish.get("option_groups", [])
+                existing_dish = dish
+
+            ok = update_dish(
+                client=client,
+                store_id=store_id,
+                catalog_id=catalog_id,
+                dish_id=int(dish_id),
+                name=target_name,
+                price=new_price,
+                description=target_desc,
+                available=target_avail,
+                picture=target_pic,
+                opt_groups=opt_groups,
+                existing_dish=existing_dish
+            )
+
+            # If token expired or API failed due to auth, clear client once to force re-boot on next item if needed
+            if not ok and client.last_error and ("token" in str(client.last_error).lower() or "auth" in str(client.last_error).lower()):
+                client = None
+
+            if ok:
+                results.append({
+                    "item_id": dish_id,
+                    "item_name": target_name,
+                    "new_price": new_price,
+                    "success": True,
+                    "error_message": None
+                })
+            else:
+                results.append({
+                    "item_id": dish_id,
+                    "item_name": target_name,
+                    "new_price": new_price,
+                    "success": False,
+                    "error_message": f"Gagal mengupdate hidangan via API: {client.last_error if client else 'Session error'}"
+                })
+        except Exception as ex:
+            results.append({
+                "item_id": dish_id,
+                "item_name": item_name,
+                "new_price": new_price,
+                "success": False,
+                "error_message": str(ex)
+            })
+
+    return results

@@ -812,7 +812,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
             # Add project root to sys.path
             if str(BASE_DIR) not in sys.path:
                 sys.path.insert(0, str(BASE_DIR))
-            from shopee.core.push import push_price_update_dish
+            from shopee.core.push import push_price_update_batch
 
             store_metadata = {
                 "store_id": outlet.store_id,
@@ -824,37 +824,35 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
             }
 
             job.progress_pct = 30
-            job.current_step = "Membuka browser Shopee..."
+            job.current_step = "Membuka browser Shopee & mengautentikasi sesi..."
             db.commit()
 
-            for idx, update in enumerate(updates_list):
-                item_id = update["item_id"]
-                new_price = update["new_price"]
-                
-                job.current_step = f"Memproses update harga item {item_id} ke Rp {new_price}..."
-                job.progress_pct = int(30 + (idx / total_updates) * 60)
+            def on_progress(idx, total, name, price):
+                job.current_step = f"Memproses update harga '{name}' ({idx + 1}/{total}) ke Rp {price:,.0f}..."
+                job.progress_pct = int(30 + ((idx + 1) / total) * 60)
                 db.commit()
 
-                try:
-                    success, msg = push_price_update_dish(store_metadata, dish_id=item_id, new_price=new_price, headless=False)
-                    if success:
-                        success_count += 1
-                        status_str = "SUCCESS"
-                        err_msg = None
-                    else:
-                        fail_count += 1
-                        status_str = "FAILED"
-                        err_msg = msg
-                except Exception as ex:
+            results = push_price_update_batch(store_metadata, updates_list, headless=False, on_item_progress=on_progress)
+
+            for res in results:
+                item_id = res["item_id"]
+                item_name = res["item_name"]
+                new_price = res["new_price"]
+                
+                if res["success"]:
+                    success_count += 1
+                    status_str = "SUCCESS"
+                    err_msg = None
+                else:
                     fail_count += 1
                     status_str = "FAILED"
-                    err_msg = str(ex)
+                    err_msg = res["error_message"]
 
                 trail = AuditTrail(
                     job_id=job.id,
                     outlet_id=outlet.id,
                     item_id=item_id,
-                    item_name=update.get("item_name") or item_id,
+                    item_name=item_name,
                     change_type="PRICE_UPDATE",
                     field_changed="price",
                     old_value=None,
