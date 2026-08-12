@@ -577,7 +577,8 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             status: job.status,
             progress_pct: job.progress_pct,
             current_step: job.current_step,
-            error_message: job.error_message
+            error_message: job.error_message,
+            result_metadata: job.result_metadata
           } : j));
 
           if (job.current_step && job.current_step.includes("[WAIT_OTP]")) {
@@ -590,7 +591,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             }));
           }
 
-          if (job.status === "SUCCESS" || job.status === "FAILED") {
+          if (job.status === "SUCCESS" || job.status === "FAILED" || job.status === "PARTIAL_SUCCESS") {
             clearInterval(pushPollingIntervalsRef.current[jobId]);
             delete pushPollingIntervalsRef.current[jobId];
           }
@@ -1015,22 +1016,137 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
       {/* Active Jobs Progress Card */}
       {activeJobs.length > 0 && (
-        <div className="rounded-3xl border border-orange-200 dark:border-orange-900/40 bg-white dark:bg-zinc-900 p-6 shadow-sm">
-          <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-500 mb-3">Status PUSH Harga Shopee</h4>
-          {activeJobs.map(j => (
-            <div key={j.id} className="space-y-2 p-3 rounded-2xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800">
-              <div className="flex justify-between text-xs font-bold">
-                <span>{j.name}</span>
-                <span className={j.status === "SUCCESS" ? "text-emerald-600" : j.status === "FAILED" ? "text-red-600" : "text-orange-600"}>
-                  {j.status} ({j.progress_pct}%)
-                </span>
+        <div className="rounded-3xl border border-orange-200 dark:border-orange-900/40 bg-white dark:bg-zinc-900 p-6 shadow-sm space-y-4">
+          <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-500 mb-1">Status PUSH Harga Shopee</h4>
+          {activeJobs.map(j => {
+            const isRunning = j.status === "PENDING" || j.status === "RUNNING";
+            const isSuccess = j.status === "SUCCESS";
+            const isFailed = j.status === "FAILED";
+            const isPartial = j.status === "PARTIAL_SUCCESS";
+
+            return (
+              <div
+                key={j.id}
+                className={`p-4 rounded-2xl border transition-all flex flex-col gap-3 ${
+                  isSuccess ? "bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-900/50" :
+                  isFailed ? "bg-red-50/50 dark:bg-red-950/20 border-red-200 dark:border-red-900/50" :
+                  isPartial ? "bg-amber-50/40 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900/50" :
+                  "bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 shadow-sm"
+                }`}
+              >
+                <div className="flex justify-between items-start">
+                  <div>
+                    <div className="text-sm font-bold text-zinc-900 dark:text-white flex items-center gap-2">
+                      {j.name}
+                    </div>
+                    <div className="text-[11px] text-zinc-400 font-mono mt-0.5">
+                      JOB ID: {j.id} · PLATFORM: SHOPEE
+                    </div>
+                  </div>
+                  {isRunning ? (
+                    <span className="text-[11px] font-bold uppercase px-3 py-1 rounded-full bg-orange-100 text-orange-800 border border-orange-200 inline-flex items-center gap-1.5 shadow-sm">
+                      <svg className="animate-spin h-3.5 w-3.5 text-orange-600" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Memproses ({j.progress_pct}%)
+                    </span>
+                  ) : (
+                    <span className={`text-[11px] font-bold uppercase px-3 py-1 rounded-full ${
+                      isSuccess ? "bg-emerald-100 text-emerald-800 border border-emerald-200" :
+                      isFailed ? "bg-red-100 text-red-800 border border-red-200" :
+                      isPartial ? "bg-amber-100 text-amber-800 border border-amber-200" :
+                      "bg-orange-100 text-orange-800 border border-orange-200"
+                    }`}>
+                      {j.status} ({j.progress_pct}%)
+                    </span>
+                  )}
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-full bg-zinc-200 dark:bg-zinc-800 rounded-full h-2 overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-300 rounded-full ${
+                      isSuccess ? "bg-emerald-500" :
+                      isFailed ? "bg-red-500" :
+                      isPartial ? "bg-amber-500" :
+                      "bg-orange-600"
+                    }`}
+                    style={{ width: `${j.progress_pct}%` }}
+                  />
+                </div>
+
+                {/* Step Description */}
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 font-medium bg-white dark:bg-zinc-900 p-2.5 rounded-xl border border-zinc-100 dark:border-zinc-800">
+                  {j.current_step}
+                </p>
+
+                {/* Explicit Error Banner when Failed or Partial */}
+                {(j.error_message || isFailed || isPartial) && (
+                  <div className="rounded-xl border border-red-200 bg-red-50/90 dark:bg-red-950/40 p-3 flex items-start gap-2 text-xs text-red-800 dark:text-red-300 font-medium shadow-sm">
+                    <div className="flex-1">
+                      <div className="font-bold text-red-900 dark:text-red-200 mb-0.5">Detail Ringkasan Perubahan:</div>
+                      <div>{j.error_message || j.current_step || "Beberapa item gagal diperbarui atau dibatalkan oleh Shopee Portal."}</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Detailed Breakdown per Item Table */}
+                {j.result_metadata?.items_breakdown && j.result_metadata.items_breakdown.length > 0 && (
+                  <div className="mt-2 space-y-2">
+                    <div className="text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center justify-between">
+                      <span>Rincian Hasil Pembaruan Per Item ({j.result_metadata.items_breakdown.length} Menu)</span>
+                      {isPartial && (
+                        <span className="text-amber-700 dark:text-amber-400 font-bold lowercase text-xs">
+                          ({j.result_metadata.success_count ?? 0} sukses, {j.result_metadata.fail_count ?? 0} gagal)
+                        </span>
+                      )}
+                    </div>
+                    <div className="overflow-x-auto border border-zinc-200 dark:border-zinc-800 rounded-2xl bg-white dark:bg-zinc-900 shadow-xs">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-zinc-100 dark:bg-zinc-950 font-bold uppercase tracking-wider text-zinc-600 dark:text-zinc-400 border-b border-zinc-200 dark:border-zinc-800">
+                          <tr>
+                            <th className="py-2.5 px-3">Nama Menu</th>
+                            <th className="py-2.5 px-3 text-right">Harga Asli</th>
+                            <th className="py-2.5 px-3 text-right">Harga Diminta</th>
+                            <th className="py-2.5 px-3 text-right">Harga Baru Live</th>
+                            <th className="py-2.5 px-3 text-center">Status</th>
+                            <th className="py-2.5 px-3">Keterangan / Detail Error</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800 font-semibold">
+                          {j.result_metadata.items_breakdown.map((item, idx) => (
+                            <tr key={idx} className={item.status === 'SUCCESS' ? 'bg-emerald-50/20 dark:bg-emerald-950/10' : 'bg-red-50/30 dark:bg-red-950/20'}>
+                              <td className="py-2.5 px-3 text-zinc-900 dark:text-zinc-100 font-bold">{item.item_name}</td>
+                              <td className="py-2.5 px-3 text-right font-mono text-zinc-500 dark:text-zinc-400">{item.old_price ? `Rp ${Number(item.old_price).toLocaleString('id-ID')}` : '-'}</td>
+                              <td className="py-2.5 px-3 text-right font-mono text-zinc-900 dark:text-zinc-200">{item.requested_price ? `Rp ${Number(item.requested_price).toLocaleString('id-ID')}` : '-'}</td>
+                              <td className="py-2.5 px-3 text-right font-mono text-emerald-700 dark:text-emerald-400">{item.verified_price ? `Rp ${Number(item.verified_price).toLocaleString('id-ID')}` : '-'}</td>
+                              <td className="py-2.5 px-3 text-center">
+                                <span className={`inline-flex px-2 py-0.5 font-bold rounded-md text-[10px] ${
+                                  item.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' : 'bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300'
+                                }`}>
+                                  {item.status === 'SUCCESS' ? 'SUKSES' : 'GAGAL'}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-xs">
+                                {item.error_message ? (
+                                  <span className="text-red-700 dark:text-red-400 font-bold flex items-center gap-1">
+                                    <span>⚠️</span> {item.error_message}
+                                  </span>
+                                ) : (
+                                  <span className="text-emerald-700 dark:text-emerald-400 font-medium">Terverifikasi di Shopee Portal</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
               </div>
-              <p className="text-xs text-zinc-500 font-mono">{j.current_step}</p>
-              <div className="w-full h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
-                <div className="h-full bg-orange-600 transition-all duration-300" style={{ width: `${j.progress_pct}%` }} />
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
