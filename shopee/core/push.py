@@ -170,18 +170,30 @@ def push_price_update_batch(
     store_metadata: dict,
     updates: list[dict],
     headless: bool = True,
-    on_item_progress = None
+    on_item_progress = None,
+    item_delay_ms: int = 300,
+    batch_size: int = 10,
+    batch_pause_sec: float = 1.5
 ) -> list[dict]:
     """
     Melakukan PUSH perubahan harga batch (banyak item sekaligus)
-    menggunakan 1 KALI boot browser session Shopee Partner.
-    Jika terjadi kesalahan sesi di tengah jalan, akan dilakukan re-boot 1 kali.
+    menggunakan 1 KALI boot browser session Shopee Partner dengan jeda batching:
+    - Jeda per item: item_delay_ms (default: 300 ms)
+    - Jeda per batch: batch_pause_sec (default: 1.5 detik per batch_size 10 item)
     """
     client, err = _boot_push_client(store_metadata, headless=headless)
     results = []
     total = len(updates)
 
     for idx, update in enumerate(updates):
+        # ── Rate Limit Safeguard / Batching Delays ──
+        if idx > 0:
+            if batch_size > 0 and idx % batch_size == 0:
+                print(f"[PUSH_BATCH] ⏸️ Jeda batching ({idx}/{total} item terproses). Istirahat {batch_pause_sec} detik untuk mencegah rate limit Shopee...")
+                time.sleep(batch_pause_sec)
+            elif item_delay_ms > 0:
+                time.sleep(item_delay_ms / 1000.0)
+
         dish_id = str(update["item_id"])
         new_price = float(update["new_price"])
         item_name = update.get("item_name") or dish_id
