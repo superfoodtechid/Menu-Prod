@@ -46,7 +46,9 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str):
     
     username = store_metadata.get("username", "allvbadmin")
     password = store_metadata.get("password", "Master!00!")
-    session_file = MENU_DIR / "data" / "session.json"
+    automation_data_dir = AUTOMATION_DIR / "data"
+    automation_data_dir.mkdir(parents=True, exist_ok=True)
+    session_file = automation_data_dir / f"session_{username}.json"
     browser.set_session_file(session_file)
             
     print(f"[*] Membuka browser (headless=True) dan memilih merchant: '{target_name}'...")

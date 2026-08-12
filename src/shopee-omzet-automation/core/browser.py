@@ -591,9 +591,10 @@ def build_img_url(img_id: str) -> str:
 
 # ── Session Persistence ────────────────────────────────────────────────────────
 
-def save_session(tob_token: str, entity_id: str, extra_cookies: dict = None):
+def save_session(tob_token: str, entity_id: str, extra_cookies: dict = None, username: str = None):
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "username": username,
         "shopee_tob_token": tob_token,
         "shopee_tob_entity_id": entity_id,
         "saved_at": datetime.now().isoformat(),
@@ -639,17 +640,42 @@ def extract_tokens_from_driver(driver) -> tuple:
     for c in driver.get_cookies():
         name = c["name"]
         val = c["value"]
-        if name == "shopee_tob_token": 
+        if name in ["shopee_tob_token", "spc_ec", "SPC_EC"]: 
             tob_token = val
         elif name.lower() in ["shopee_tob_entity_id", "shopee_foody_mid", "x-merchant-id", "spc_merchant_id", "merchant_id", "shopid", "shop_id"]:
             if val and not entity_id: entity_id = val
+
+    if not tob_token:
+        try:
+            tob_token = driver.execute_script("""
+                function getCookie(name) {
+                    var v = document.cookie.match('(^|;) ?' + name + '=([^;]*)(;|$)');
+                    return v ? v[2] : null;
+                }
+                return getCookie('shopee_tob_token') ||
+                       getCookie('spc_ec') ||
+                       localStorage.getItem('shopee_tob_token') ||
+                       localStorage.getItem('token') ||
+                       sessionStorage.getItem('shopee_tob_token') || null;
+            """)
+        except: pass
+
+    # Fallback ke saved session file jika cookie driver tidak memberikan token
+    if not tob_token:
+        try:
+            saved = load_session()
+            if saved and saved.get("shopee_tob_token"):
+                tob_token = saved["shopee_tob_token"]
+                if not entity_id:
+                    entity_id = saved.get("shopee_tob_entity_id")
+        except: pass
             
     if not entity_id:
         try: 
             # Try API first (Most accurate) - using full URL and credentials
             api_js = """
             var done = arguments[arguments.length - 1];
-            let token = document.cookie.split('; ').find(row => row.startsWith('shopee_tob_token='))?.split('=')[1];
+            let token = document.cookie.split('; ').find(row => row.startsWith('shopee_tob_token='))?.split('=')[1] || localStorage.getItem('shopee_tob_token');
             fetch('https://api.partner.shopee.co.id/nb/mss/web-api/PartnerAccountServer/GetUserInfo', {
                 method: 'POST',
                 headers: {
@@ -676,7 +702,6 @@ def extract_tokens_from_driver(driver) -> tuple:
                     let v = localStorage.getItem(k);
                     if (/^\\d{6,12}$/.test(v)) ids.push(v);
                 }
-                // ... rest of fallback logic ...
                 let specific = localStorage.getItem('shopee_tob_entity_id') || 
                                localStorage.getItem('shopee_foody_mid') || 
                                localStorage.getItem('merchant_id') || 
@@ -692,10 +717,15 @@ def get_all_cookies_dict(driver) -> dict:
     return {c["name"]: c["value"] for c in driver.get_cookies()}
 
 def _trigger_and_extract_tokens(driver) -> tuple:
-    log.debug("  🔄 Triggering fresh token issuance...")
+    # 1. Cek token langsung dari sesi aktif browser atau file sesi
+    tob_token, entity_id = extract_tokens_from_driver(driver)
+    if tob_token:
+        log.info(f"✅ Token extracted successfully. (entity_id: {entity_id})")
+        return tob_token, entity_id
+
+    # 2. Jika belum ada, baru buka halaman trigger
+    log.info("🔄 Token not found, navigating to trigger page...")
     try:
-        try: driver.delete_cookie("shopee_tob_token")
-        except: pass
         driver.get(TOKEN_TRIGGER_PAGE)
         for _ in range(10):
             tob_token, entity_id = extract_tokens_from_driver(driver)
@@ -817,6 +847,45 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
         # Wait for page to stabilize
         time.sleep(2)
         
+        # Check if page is on 'Lanjutkan dengan Shopee' screen
+        try:
+            body_text = (driver.execute_script("return document.body.innerText || ''") or "").lower()
+            if "lanjutkan dengan shopee" in body_text or "sedang log in ke akun" in body_text:
+                log.info("🔎 [AUTH] Terdeteksi halaman 'Lanjutkan dengan Shopee'...")
+                account_shown = driver.execute_script("""
+                    var els = document.querySelectorAll('div, p, span, h1, h2, h3');
+                    for (var i = 0; i < els.length; i++) {
+                        var txt = (els[i].innerText || '').trim();
+                        if (!txt) continue;
+                        var low = txt.toLowerCase();
+                        if (!low.includes('lanjutkan') && !low.includes('shopee') && !low.includes('bantuan') && 
+                            !low.includes('sedang log in') && !low.includes('merchant') && txt.length > 2 && txt.length < 40) {
+                            return txt;
+                        }
+                    }
+                    return '';
+                """) or ""
+                log.info(f"  👤 Akun di layar: '{account_shown}' | Target: '{username}'")
+
+                if username and account_shown and username.lower() not in account_shown.lower():
+                    log.warning(f"  ⚠️ Akun di layar ({account_shown}) BEDA dengan target ({username}). Resetting cookies...")
+                    try:
+                        driver.delete_all_cookies()
+                        driver.execute_script("try{localStorage.clear();sessionStorage.clear();}catch(e){}")
+                    except: pass
+                    driver.get("https://partner.shopee.co.id/login")
+                    time.sleep(3)
+                else:
+                    try:
+                        btn_el = driver.find_element(By.XPATH, "//button[contains(., 'Lanjutkan') or contains(., 'Continue')] | //a[contains(., 'Lanjutkan') or contains(., 'Continue')]")
+                        if btn_el and btn_el.is_displayed():
+                            log.info("👉 [AUTH] Mengklik tombol 'Lanjutkan'...")
+                            driver.execute_script("arguments[0].click();", btn_el)
+                            time.sleep(3)
+                    except: pass
+        except Exception as _lanjut_err:
+            log.debug(f"  Lanjutkan check error: {_lanjut_err}")
+
         # Robust selectors for login fields
         user_input = None
         # Try finding ANY visible text input first
@@ -826,7 +895,7 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                 p = (inp.get_attribute("placeholder") or "").lower()
                 n = (inp.get_attribute("name") or "").lower()
                 t = (inp.get_attribute("type") or "").lower()
-                if inp.is_displayed() and (t == "text" or "user" in n or "phone" in n or "handphone" in p or "username" in p):
+                if inp.is_displayed() and (t == "text" or "user" in n or "phone" in n or "handphone" in p or "username" in p or "email" in p):
                     user_input = inp
                     break
         except: pass
@@ -923,8 +992,39 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
             """)
 
             if otp_input or is_verification_page:
-                log.error(f"❌ [AUTH] OTP or verification is required for '{username or phone}'. Aborting to prevent triggering OTP.")
-                return False
+                if not interactive:
+                    log.error(f"❌ [AUTH] OTP or verification is required for '{username or phone}'. Aborting in non-interactive mode.")
+                    return False
+
+                log.info(f"🔑 [AUTH] Verifikasi / OTP diperlukan untuk '{username or phone}'. Menunggu input OTP via pop-up...")
+                otp_code = _wait_for_otp(username or "user", phone)
+                if not otp_code:
+                    log.error(f"❌ [AUTH] Timeout atau gagal menerima Kode OTP untuk '{username or phone}'")
+                    return False
+
+                try:
+                    for sel in ["input.shopee-otp-input__input", ".shopee-otp-input input", "input[maxlength='6']"]:
+                        els = driver.find_elements(By.CSS_SELECTOR, sel)
+                        if els:
+                            if len(els) == 6:
+                                for idx_digit, digit in enumerate(otp_code[:6]):
+                                    els[idx_digit].send_keys(digit)
+                                break
+                            else:
+                                for el in els:
+                                    if el.is_displayed():
+                                        el.send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
+                                        human_like_typing(el, otp_code)
+                                        break
+                                break
+                    time.sleep(4)
+                except Exception as otp_err:
+                    log.error(f"❌ Gagal memasukkan Kode OTP: {otp_err}")
+
+                curr_url = driver.current_url.lower()
+                if "onboarding" in curr_url or "merchant-selector" in curr_url or "dashboard" in curr_url:
+                    log.info("✅ [AUTH] Verifikasi OTP berhasil!")
+                    break
         except Exception:
             pass
 
@@ -1466,9 +1566,16 @@ def get_session(username=None, password=None, phone=None, headless=True, close_b
             is_logged_in = False
             current_url = driver.current_url.lower()
             
-            # Check if already logged in (on any attempt)
-            # Note: "onboarding" pages also indicate a valid session (pending merchant invitation)
-            if "dashboard" in current_url or "merchant-selector" in current_url or "onboarding" in current_url:
+            # Check if username is specified and cached session belongs to a different username
+            saved_sess = load_session()
+            if username and saved_sess and saved_sess.get("username") and saved_sess.get("username") != username:
+                log.info(f"🔄 [SESSION] Active session is for '{saved_sess.get('username')}', target user is '{username}'. Resetting cookies for target user login...")
+                try: driver.delete_all_cookies()
+                except: pass
+                driver.get("https://partner.shopee.co.id/login")
+                time.sleep(3)
+                current_url = driver.current_url.lower()
+            elif "dashboard" in current_url or "merchant-selector" in current_url or "onboarding" in current_url:
                 log.info("✅ [SESSION] Browser is already logged in.")
                 is_logged_in = True
             
@@ -1771,7 +1878,7 @@ def get_session(username=None, password=None, phone=None, headless=True, close_b
                 continue
                 
             all_c = get_all_cookies_dict(driver)
-            save_session(t, eid or "", extra_cookies=all_c)
+            save_session(t, eid or "", extra_cookies=all_c, username=username)
             res = {"shopee_tob_token": t, "shopee_tob_entity_id": eid or "", "extra_cookies": all_c}
             if not close_browser: res["driver"] = driver
             session_success = True
