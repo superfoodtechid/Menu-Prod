@@ -115,7 +115,8 @@ class AccountResponse(BaseModel):
     id: uuid.UUID
     platform: str
     username: str
-    portal: Optional[str]
+    password: Optional[str] = None
+    portal: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -146,6 +147,7 @@ class OutletResponse(BaseModel):
     last_sync_at: Optional[datetime]
     created_at: datetime
     platform: Optional[str] = None
+    account: Optional[AccountResponse] = None
 
     class Config:
         from_attributes = True
@@ -291,11 +293,31 @@ def sync_sheets(db: Session = Depends(get_db)):
         password = None
 
         if platform == "shopee":
-            # Username is allvbadmin
-            username = "allvbadmin"
-            # Get Password.1 or Kata Sandi.1
-            pwd_col = "Kata Sandi.1" if "Kata Sandi.1" in df.columns else "Kata Sandi"
-            password = str(row.get(pwd_col, "Master!00!")).strip()
+            user_col_q = "Nama Pengguna"
+            user_col_z = "Nama Pengguna.1"
+            pwd_col_s = "Kata Sandi"
+            pwd_col_ab = "Kata Sandi.1"
+
+            user_q_val = row.get(user_col_q)
+            if pd.notna(user_q_val) and str(user_q_val).strip() not in ("-", "", "nan", "None"):
+                username = str(user_q_val).strip()
+                pwd_s_val = row.get(pwd_col_s)
+                if pd.notna(pwd_s_val) and str(pwd_s_val).strip() not in ("-", "", "nan", "None"):
+                    password = str(pwd_s_val).strip()
+                else:
+                    password = "" # No password used, login directly via OTP
+            else:
+                user_z_val = row.get(user_col_z)
+                if pd.notna(user_z_val) and str(user_z_val).strip() not in ("-", "", "nan", "None"):
+                    username = str(user_z_val).strip()
+                else:
+                    username = "superfoodapp"
+                
+                pwd_ab_val = row.get(pwd_col_ab)
+                if pd.notna(pwd_ab_val) and str(pwd_ab_val).strip() not in ("-", "", "nan", "None"):
+                    password = str(pwd_ab_val).strip()
+                else:
+                    password = "Master@00@"
         elif platform == "grab":
             user_col_sf = "Nama Pengguna.1"
             user_col_mt = "Nama Pengguna"
@@ -329,8 +351,8 @@ def sync_sheets(db: Session = Depends(get_db)):
 
         if not username:
             continue
-        if not password:
-            password = "Master@123" # Default fallback password
+        if password is None:
+            password = ""
 
         # 1. Upsert Account
         db_account = accounts_by_key.get((username, platform))
@@ -394,6 +416,7 @@ def sync_sheets(db: Session = Depends(get_db)):
             outlets_by_fallback[(db_account.id, merchant_name, nama_outlet, cabang)] = db_outlet
             added_outlets += 1
         else:
+            db_outlet.account_id = db_account.id
             db_outlet.store_id = store_id
             db_outlet.owner = owner
             if merchant_name and merchant_name != "-":
@@ -573,8 +596,8 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "cabang": outlet.cabang,
                 "nama_resto_final": outlet.nama_resto_final,
                 "brand": outlet.brand,
-                "username": account.username,
-                "password": account.password,
+                "username": "allvbadmin",
+                "password": "Master!00!",
                 "portal": account.portal
             }
             
@@ -789,7 +812,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
             # Add project root to sys.path
             if str(BASE_DIR) not in sys.path:
                 sys.path.insert(0, str(BASE_DIR))
-            from shopee.core.edit import edit_dish_via_portal
+            from shopee.core.push import push_price_update_dish
 
             store_metadata = {
                 "store_id": outlet.store_id,
@@ -813,7 +836,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                 db.commit()
 
                 try:
-                    success, msg = edit_dish_via_portal(store_metadata, dish_id=item_id, price=new_price, headless=True)
+                    success, msg = push_price_update_dish(store_metadata, dish_id=item_id, new_price=new_price, headless=False)
                     if success:
                         success_count += 1
                         status_str = "SUCCESS"
@@ -3751,4 +3774,75 @@ def get_sessions_status(db: Session = Depends(get_db)):
         result.append(status_info)
         
     return result
+
+
+# ─── SHOPEE OTP ENDPOINTS ───────────────────────────────────────────────────
+
+class ShopeeOTPRequest(BaseModel):
+    username: str
+    code: str
+    channel: Optional[str] = "sms"
+
+@app.get("/api/shopee/otp-status")
+def get_shopee_otp_status(username: Optional[str] = None):
+    """Checks whether Shopee login engine is currently waiting for an OTP for the given username."""
+    shopee_data_dirs = [
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data"
+    ]
+    
+    usernames_to_check = [username] if username else []
+    if not usernames_to_check:
+        for d in shopee_data_dirs:
+            if d.exists():
+                for f in d.glob("otp_request_*.json"):
+                    u = f.stem.replace("otp_request_", "")
+                    if u not in usernames_to_check:
+                        usernames_to_check.append(u)
+    
+    for u in usernames_to_check:
+        for d in shopee_data_dirs:
+            fpath = d / f"otp_request_{u}.json"
+            if fpath.exists():
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if data.get("status") == "WAITING_OTP":
+                            return {
+                                "waiting": True,
+                                "username": u,
+                                "phone": data.get("phone", ""),
+                                "requested_at": data.get("requested_at")
+                            }
+                except Exception: pass
+    return {"waiting": False}
+
+@app.post("/api/shopee/submit-otp")
+def submit_shopee_otp(req: ShopeeOTPRequest):
+    """Submits OTP code to Shopee login engine."""
+    username = req.username.strip()
+    code = req.code.strip()
+    channel = (req.channel or "sms").strip().lower()
+    if not username or not code:
+        raise HTTPException(status_code=400, detail="Username and OTP code are required")
+
+    shopee_data_dirs = [
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data"
+    ]
+    
+    for d in shopee_data_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        fpath = d / f"otp_request_{username}.json"
+        request_data = {
+            "status": "RECEIVED",
+            "code": code,
+            "username": username,
+            "channel": channel,
+            "received_at": datetime.now().isoformat()
+        }
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(request_data, f, indent=2)
+            
+    return {"status": "SUCCESS", "message": f"OTP {code} ({channel.upper()}) berhasil dikirim untuk user {username}."}
 
