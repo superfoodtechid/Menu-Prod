@@ -28,6 +28,16 @@ const TABS = [
       </svg>
     ),
   },
+  {
+    id: "shopee-edit-harga",
+    label: "Edit Harga",
+    badge: "Shopee",
+    icon: (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 11h14a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2z" />
+      </svg>
+    ),
+  },
 ];
 
 export default function NavHeader({ activeTab, onTabChange, theme, onToggleTheme }) {
@@ -77,31 +87,41 @@ export default function NavHeader({ activeTab, onTabChange, theme, onToggleTheme
         </div>
 
         <nav className="-mx-4 flex gap-1 overflow-x-auto px-4 pb-3 sm:mx-0 sm:px-0" aria-label="Menu utama">
-          {TABS.map((tab) => (
-            <button
-              type="button"
-              key={tab.id}
-              onClick={() => onTabChange(tab.id)}
-              aria-current={activeTab === tab.id ? "page" : undefined}
-              className={`
-                group relative flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2 text-[15px] font-semibold transition-all
-                ${activeTab === tab.id
-                  ? "bg-red-700 text-white shadow-md shadow-red-900/15 dark:bg-white dark:text-black dark:shadow-none"
-                  : "text-slate-600 hover:bg-red-50 hover:text-red-700 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-white"
-                }
-              `}
-            >
-              <span className={activeTab === tab.id ? "text-white dark:text-black" : "text-slate-400 group-hover:text-red-600 dark:text-zinc-500 dark:group-hover:text-white"}>
-                {tab.icon}
-              </span>
-              {tab.label}
-              {tab.badge && (
-                <span className={activeTab === tab.id ? "rounded-full bg-white/20 dark:bg-black/10 px-1.5 py-0.5 text-[11px] text-white dark:text-black" : "rounded-full bg-red-50 px-1.5 py-0.5 text-[11px] text-red-600 dark:bg-zinc-800 dark:text-zinc-300"}>
-                  {tab.badge}
+          {TABS.map((tab) => {
+            const isActive = activeTab === tab.id;
+            const isShopee = tab.id === "shopee-edit-harga";
+
+            let activeClasses = "";
+            if (isActive) {
+              if (isShopee) {
+                activeClasses = "bg-orange-600 text-white shadow-md shadow-orange-950/20 dark:bg-orange-600 dark:text-white dark:shadow-lg dark:shadow-orange-950/50";
+              } else {
+                activeClasses = "bg-red-700 text-white shadow-md shadow-red-950/20 dark:bg-zinc-800 dark:text-white dark:border dark:border-zinc-700 dark:shadow-none";
+              }
+            } else {
+              activeClasses = "text-slate-600 hover:bg-red-50 hover:text-red-700 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-white";
+            }
+
+            return (
+              <button
+                type="button"
+                key={tab.id}
+                onClick={() => onTabChange(tab.id)}
+                aria-current={isActive ? "page" : undefined}
+                className={`group relative flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2 text-[15px] font-semibold transition-all ${activeClasses}`}
+              >
+                <span className={isActive ? "text-white" : "text-slate-400 group-hover:text-red-600 dark:text-zinc-500 dark:group-hover:text-white"}>
+                  {tab.icon}
                 </span>
-              )}
-            </button>
-          ))}
+                {tab.label}
+                {tab.badge && (
+                  <span className={isActive ? "rounded-full bg-white/20 px-1.5 py-0.5 text-[11px] text-white" : "rounded-full bg-red-50 px-1.5 py-0.5 text-[11px] text-red-600 dark:bg-zinc-800 dark:text-zinc-300"}>
+                    {tab.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
       </div>
     </header>
