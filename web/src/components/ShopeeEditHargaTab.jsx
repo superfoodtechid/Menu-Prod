@@ -33,6 +33,30 @@ function checkShopeeViolation(oldPrice, newPrice) {
   return { isViolation: false, message: "" };
 }
 
+function formatUserFriendlyError(rawMsg) {
+  if (!rawMsg) return "";
+  const s = String(rawMsg);
+  if (s.includes("1100036") || s.includes("exceed the limit times") || s.includes("edit times exceed")) {
+    return "Batas kuota harian ubah harga ShopeeFood tercapai (maksimal 1x per hari).";
+  }
+  if (s.includes("25") && (s.includes("exceed") || s.includes("limit") || s.includes("%"))) {
+    return "Kenaikan harga melebihi batas maksimal ShopeeFood (25%).";
+  }
+  if (s.includes("promo") || s.includes("campaign")) {
+    return "Menu sedang dalam promo aktif di portal merchant Shopee.";
+  }
+  if (s.includes("lock") || s.includes("permission") || s.includes("unauthorized")) {
+    return "Akses ubah harga dikunci atau memerlukan otorisasi ulang.";
+  }
+  if (s.includes("not found") || s.includes("element") || s.includes("timeout")) {
+    return "Menu tidak ditemukan di portal Shopee atau respon portal lambat.";
+  }
+  if (s.includes("API error:") || s.includes("code=")) {
+    return "Ditolak oleh sistem portal Shopee (detail teknis tersimpan di log backend).";
+  }
+  return s;
+}
+
 function StepLabel({ number, label, active, done, className = "mb-2.5" }) {
   return (
     <div className={`flex items-center gap-2 ${className}`}>
@@ -1111,37 +1135,49 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                             <th className="py-2.5 px-3 text-right">Harga Diminta</th>
                             <th className="py-2.5 px-3 text-right">Harga Baru Live</th>
                             <th className="py-2.5 px-3 text-center">Status</th>
-                            <th className="py-2.5 px-3">Keterangan / Detail Error</th>
+                            <th className="py-2.5 px-3">Keterangan</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800 font-semibold">
-                          {j.result_metadata.items_breakdown.map((item, idx) => (
-                            <tr key={idx} className={item.status === 'SUCCESS' ? 'bg-emerald-50/20 dark:bg-emerald-950/10' : 'bg-red-50/30 dark:bg-red-950/20'}>
-                              <td className="py-2.5 px-3 text-zinc-900 dark:text-zinc-100 font-bold">{item.item_name}</td>
-                              <td className="py-2.5 px-3 text-right font-mono text-zinc-500 dark:text-zinc-400">{item.old_price ? `Rp ${Number(item.old_price).toLocaleString('id-ID')}` : '-'}</td>
-                              <td className="py-2.5 px-3 text-right font-mono text-zinc-900 dark:text-zinc-200">{item.requested_price ? `Rp ${Number(item.requested_price).toLocaleString('id-ID')}` : '-'}</td>
-                              <td className="py-2.5 px-3 text-right font-mono text-emerald-700 dark:text-emerald-400">{item.verified_price ? `Rp ${Number(item.verified_price).toLocaleString('id-ID')}` : '-'}</td>
-                              <td className="py-2.5 px-3 text-center">
-                                <span className={`inline-flex px-2 py-0.5 font-bold rounded-md text-[10px] ${
-                                  item.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' : 'bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300'
-                                }`}>
-                                  {item.status === 'SUCCESS' ? 'SUKSES' : 'GAGAL'}
-                                </span>
-                              </td>
-                              <td className="py-2.5 px-3 text-xs">
-                                {item.error_message ? (
-                                  <span className="text-red-700 dark:text-red-400 font-bold flex items-center gap-1">
-                                    <span>⚠️</span> {item.error_message}
+                          {j.result_metadata.items_breakdown.map((item, idx) => {
+                            const rawName = item.item_name || item.item_id;
+                            const displayName = (/^\d+$/.test(String(rawName).trim()))
+                              ? (items.find(x => String(x.id) === String(rawName).trim())?.name || rawName)
+                              : rawName;
+                            const friendlyErr = formatUserFriendlyError(item.error_message);
+
+                            return (
+                              <tr key={idx} className={item.status === 'SUCCESS' ? 'bg-emerald-50/20 dark:bg-emerald-950/10' : 'bg-red-50/30 dark:bg-red-950/20'}>
+                                <td className="py-2.5 px-3 text-zinc-900 dark:text-zinc-100 font-bold">{displayName}</td>
+                                <td className="py-2.5 px-3 text-right font-mono text-zinc-500 dark:text-zinc-400">{item.old_price ? `Rp ${Number(item.old_price).toLocaleString('id-ID')}` : '-'}</td>
+                                <td className="py-2.5 px-3 text-right font-mono text-zinc-900 dark:text-zinc-200">{item.requested_price ? `Rp ${Number(item.requested_price).toLocaleString('id-ID')}` : '-'}</td>
+                                <td className="py-2.5 px-3 text-right font-mono text-emerald-700 dark:text-emerald-400">{item.verified_price ? `Rp ${Number(item.verified_price).toLocaleString('id-ID')}` : '-'}</td>
+                                <td className="py-2.5 px-3 text-center">
+                                  <span className={`inline-flex px-2 py-0.5 font-bold rounded-md text-[10px] ${
+                                    item.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' : 'bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300'
+                                  }`}>
+                                    {item.status === 'SUCCESS' ? 'SUKSES' : 'GAGAL'}
                                   </span>
-                                ) : (
-                                  <span className="text-emerald-700 dark:text-emerald-400 font-medium">Terverifikasi di Shopee Portal</span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
+                                </td>
+                                <td className="py-2.5 px-3 text-xs">
+                                  {friendlyErr ? (
+                                    <span className="text-red-700 dark:text-red-400 font-bold flex items-center gap-1">
+                                      <span>⚠️</span> {friendlyErr}
+                                    </span>
+                                  ) : (
+                                    <span className="text-emerald-700 dark:text-emerald-400 font-medium">Terverifikasi di Shopee Portal</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 pt-1 font-medium flex items-center gap-1.5">
+                      <span>💡</span>
+                      <span>Catatan: Rincian error teknis lengkap dan jejak API secara detail dapat dilihat pada log backend server.</span>
+                    </p>
                   </div>
                 )}
               </div>

@@ -854,7 +854,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     job_id=job.id,
                     outlet_id=outlet.id,
                     item_id=item_id,
-                    item_name=item_id,
+                    item_name=update.get("item_name") or item_id,
                     change_type="PRICE_UPDATE",
                     field_changed="price",
                     old_value=None,
