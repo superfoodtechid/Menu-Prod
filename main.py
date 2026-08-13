@@ -608,8 +608,9 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "portal": account.portal
             }
             
-            # Run shopee extraction
-            success, result = extract_shopee_menu(store_metadata, str(exports_dir))
+            # Run shopee extraction (headless=True for stability on headless servers/Raspberry Pi)
+            is_headless = True
+            success, result = extract_shopee_menu(store_metadata, str(exports_dir), headless=is_headless)
             
             if not success:
                 raise Exception(f"Shopee extraction failed: {result}")
@@ -800,7 +801,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                 job.progress_pct = int(30 + ((idx + 1) / total) * 60)
                 db.commit()
 
-            results = push_price_update_batch(store_metadata, updates_list, headless=False, on_item_progress=on_progress)
+            # Headless=True for stability on headless servers/Raspberry Pi
+            is_headless = True
+            results = push_price_update_batch(store_metadata, updates_list, headless=is_headless, on_item_progress=on_progress)
 
             for res in results:
                 item_id = res["item_id"]
