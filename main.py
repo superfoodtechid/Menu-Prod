@@ -596,8 +596,8 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "cabang": outlet.cabang,
                 "nama_resto_final": outlet.nama_resto_final,
                 "brand": outlet.brand,
-                "username": "allvbadmin",
-                "password": "Master!00!",
+                "username": account.username,
+                "password": account.password,
                 "portal": account.portal
             }
             
