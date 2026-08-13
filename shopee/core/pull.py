@@ -149,8 +149,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 headless=headless,
                 close_browser=True,
                 target_name=target_name,
-                interactive=True,
-                force_fresh=True
+                interactive=True
             )
 
             if session_data and "shopee_tob_token" in session_data:

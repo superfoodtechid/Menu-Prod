@@ -3811,7 +3811,8 @@ def get_shopee_otp_status(username: Optional[str] = None):
                                 "waiting": True,
                                 "username": u,
                                 "phone": data.get("phone", ""),
-                                "requested_at": data.get("requested_at")
+                                "requested_at": data.get("requested_at"),
+                                "error_msg": data.get("error_msg", "")
                             }
                 except Exception: pass
     return {"waiting": False}

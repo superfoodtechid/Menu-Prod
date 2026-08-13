@@ -192,62 +192,87 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-4 animate-in fade-in duration-200">
-      <div className="w-full max-w-md rounded-3xl bg-white dark:bg-zinc-900 border border-orange-200 dark:border-orange-900/50 shadow-2xl p-6 relative overflow-hidden">
-        <div className="absolute top-0 right-0 left-0 h-2 bg-gradient-to-r from-orange-500 via-amber-500 to-red-500" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-xl p-6 relative">
         
-        <div className="flex items-center gap-3 mb-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-100 dark:bg-orange-950/60 border border-orange-200 dark:border-orange-800 text-orange-600 dark:text-orange-400">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 002-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-orange-50 dark:bg-orange-950/40 border border-orange-200/60 dark:border-orange-900/40 text-orange-600 dark:text-orange-400 shrink-0">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 002-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+            </div>
+            <div>
+              <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Verifikasi OTP Shopee</h3>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Otentikasi akses akun partner</p>
+            </div>
+          </div>
+          <button 
+            type="button" 
+            onClick={onCancel}
+            className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-1 rounded-md transition cursor-pointer"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
-          </div>
-          <div>
-            <h3 className="text-lg font-bold text-zinc-900 dark:text-white">Verifikasi OTP Shopee</h3>
-            <p className="text-xs text-orange-600 dark:text-orange-400 font-medium">Diperlukan untuk login portal partner</p>
-          </div>
+          </button>
         </div>
 
-        <div className="mb-5 p-3.5 rounded-2xl bg-orange-50/80 dark:bg-orange-950/40 border border-orange-200/70 dark:border-orange-900/50 text-xs text-zinc-700 dark:text-zinc-300">
-          <p className="font-semibold text-orange-900 dark:text-orange-300 mb-1">📌 Detail Akun Login Shopee:</p>
-          <div className="flex flex-col gap-1 font-mono text-[13px]">
-            <div><span className="text-zinc-500">Nama Pengguna (Kolom Q):</span> <strong className="text-zinc-900 dark:text-white">{username || "-"}</strong></div>
-            {phone && <div><span className="text-zinc-500">No. HP / Kontak:</span> <strong className="text-zinc-900 dark:text-white">{phone}</strong></div>}
+        {/* Account Info Box */}
+        <div className="mb-4 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-800 text-xs">
+          <div className="text-zinc-500 dark:text-zinc-400 font-medium mb-1.5">Detail Akun Shopee</div>
+          <div className="flex flex-col gap-1 font-mono text-[13px] text-zinc-900 dark:text-zinc-100">
+            <div className="flex justify-between items-center">
+              <span className="text-zinc-500 font-sans text-xs">Username (Kolom Q):</span>
+              <span className="font-semibold">{username || "-"}</span>
+            </div>
+            {phone && (
+              <div className="flex justify-between items-center">
+                <span className="text-zinc-500 font-sans text-xs">Kontak / No. HP:</span>
+                <span className="font-semibold">{phone}</span>
+              </div>
+            )}
           </div>
-          <p className="mt-2 text-[11px] text-zinc-500">Silakan pilih kanal pengiriman OTP dan masukkan Kode OTP 6-Digit.</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-1.5">
+            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
               Metode Pengiriman OTP
             </label>
             <div className="grid grid-cols-2 gap-2 mb-3">
               <button
                 type="button"
                 onClick={() => setOtpChannel("sms")}
-                className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl border text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center justify-center gap-2 py-2 px-3 rounded-lg border text-xs font-medium transition cursor-pointer ${
                   otpChannel === "sms"
-                    ? "border-orange-500 bg-orange-50 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300 ring-2 ring-orange-500/20"
+                    ? "border-orange-600 bg-orange-50 dark:bg-orange-950/40 text-orange-700 dark:text-orange-300 font-semibold"
                     : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800"
                 }`}
               >
-                <span>📱 SMS</span>
+                <svg className="w-4 h-4 text-orange-600 dark:text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                </svg>
+                <span>SMS</span>
               </button>
               <button
                 type="button"
                 onClick={() => setOtpChannel("whatsapp")}
-                className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl border text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center justify-center gap-2 py-2 px-3 rounded-lg border text-xs font-medium transition cursor-pointer ${
                   otpChannel === "whatsapp"
-                    ? "border-emerald-500 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 ring-2 ring-emerald-500/20"
+                    ? "border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 font-semibold"
                     : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800"
                 }`}
               >
-                <span>💬 WhatsApp</span>
+                <svg className="w-4 h-4 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+                <span>WhatsApp</span>
               </button>
             </div>
 
-            <label className="block text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-1.5">
+            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
               Kode OTP (6 Digit)
             </label>
             <input
@@ -256,8 +281,8 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
               autoFocus
               value={otpCode}
               onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
-              placeholder="Contoh: 123456"
-              className="w-full text-center text-2xl font-mono tracking-widest py-3 px-4 rounded-2xl border-2 border-orange-300 dark:border-orange-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:outline-none focus:border-orange-500 focus:ring-4 focus:ring-orange-100 dark:focus:ring-orange-950/50 font-bold"
+              placeholder="000000"
+              className="w-full text-center text-xl font-mono tracking-[0.4em] py-2.5 px-4 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-orange-600 focus:ring-2 focus:ring-orange-600/20 font-semibold placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
             />
           </div>
 
@@ -267,29 +292,29 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
             </p>
           )}
 
-          <div className="flex items-center gap-3 pt-2">
+          <div className="flex items-center justify-end gap-3 pt-2">
             <button
               type="button"
               onClick={onCancel}
-              className="flex-1 py-2.5 px-4 text-xs font-bold text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-xl transition cursor-pointer"
+              className="py-2 px-4 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition cursor-pointer"
             >
               Batal
             </button>
             <button
               type="submit"
               disabled={submitting || otpCode.trim().length < 4}
-              className="flex-1 py-2.5 px-4 text-xs font-bold text-white bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 disabled:opacity-50 rounded-xl shadow-md shadow-orange-900/20 transition flex items-center justify-center gap-2 cursor-pointer"
+              className="py-2 px-4 text-xs font-medium text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50 rounded-lg transition flex items-center justify-center gap-2 cursor-pointer shadow-sm"
             >
               {submitting ? (
                 <>
-                  <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                  <svg className="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                   </svg>
                   <span>Mengirim...</span>
                 </>
               ) : (
-                <span>Kirim OTP ({otpChannel.toUpperCase()})</span>
+                <span>Kirim Kode OTP</span>
               )}
             </button>
           </div>
@@ -408,14 +433,15 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         .then(data => {
           if (data && data.waiting) {
             setOtpModal(prev => {
-              if (prev.isOpen && prev.username === data.username) return prev; // sudah terbuka
+              const newErrMsg = data.error_msg || "";
+              if (prev.isOpen && prev.username === data.username && prev.statusMsg === newErrMsg) return prev;
               return {
                 ...prev,
                 isOpen: true,
                 username: data.username || "",
                 phone: data.phone || "",
                 submitting: false,
-                statusMsg: ""
+                statusMsg: newErrMsg
               };
             });
           }
