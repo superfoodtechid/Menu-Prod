@@ -3,6 +3,7 @@ import NavHeader from "./components/NavHeader";
 import MenuPullTab from "./components/MenuPullTab";
 import MenuPushTab from "./components/MenuPushTab";
 import EditHargaTab from "./components/EditHargaTab";
+import ShopeeEditHargaTab from "./components/ShopeeEditHargaTab";
 import SessionTab from "./components/SessionTab";
 import StarField from "./components/StarField";
 import { useTheme } from "./hooks/useTheme";
@@ -15,7 +16,7 @@ export default function Home() {
     if (isSessionPath || requestedTab === "session") {
       return "session";
     }
-    return ["pull", "push", "edit-harga"].includes(requestedTab) ? requestedTab : "pull";
+    return ["pull", "push", "edit-harga", "shopee-edit-harga"].includes(requestedTab) ? requestedTab : "pull";
   });
   const getApiBaseUrl = () => {
     if (import.meta.env.VITE_API_URL) {
@@ -52,6 +53,7 @@ export default function Home() {
         <div className={activeTab === "pull" ? "" : "hidden"}><MenuPullTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
         <div className={activeTab === "push" ? "" : "hidden"}><MenuPushTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
         <div className={activeTab === "edit-harga" ? "" : "hidden"}><EditHargaTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
+        <div className={activeTab === "shopee-edit-harga" ? "" : "hidden"}><ShopeeEditHargaTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
         <div className={activeTab === "session" ? "" : "hidden"}><SessionTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
       </main>
     </div>

@@ -51,21 +51,7 @@ def get_session_file() -> Path:
         _thread_local.session_file = Path(__file__).resolve().parent.parent / "data" / "session.json"
     return _thread_local.session_file
 
-def get_otp_code(username: str, phone: str) -> str:
-    discord_mode = os.getenv("OFD_DISCORD_MODE") == "1"
-    if not discord_mode:
-        if not sys.stdin.isatty():
-            log.warning("⚠️ [OTP] Stdin is not a TTY (running in background/Docker). Cannot prompt for OTP via terminal. Waiting 10 seconds...")
-            time.sleep(10)
-            return ""
-        try:
-            return input(f"🔑 Masukkan 6-digit OTP (atau tekan Enter jika Anda mengisinya langsung di browser): ").strip()
-        except EOFError:
-            log.warning("⚠️ [OTP] Stdin reached EOF. Waiting 10 seconds...")
-            time.sleep(10)
-            return ""
-
-    
+def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: str = "") -> str:
     script_dir = Path(__file__).resolve().parent.parent
     data_dir = script_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -74,35 +60,34 @@ def get_otp_code(username: str, phone: str) -> str:
     request_data = {
         "status": "WAITING_OTP",
         "username": username,
-        "phone": phone,
+        "phone": phone or "",
+        "error_msg": error_msg or "",
         "requested_at": datetime.now().isoformat()
     }
     
     try:
         otp_file.write_text(json.dumps(request_data, indent=2))
+        log.info(f"🔑 [OTP] File request OTP dibuat untuk '{username}': {otp_file.name} (error='{error_msg}'). Menunggu input OTP via Web UI / API (timeout {timeout}s)...")
         print(f"DISCORD_OTP_REQUEST: {json.dumps(request_data)}", flush=True)
-        log.info(f"Sent OTP request to Discord for: {username}")
     except Exception as e:
         log.error(f"Gagal menulis file request OTP: {e}")
         return ""
     
-    log.info(f"⏳ [DISCORD] Menunggu input OTP dari Discord untuk akun {username}...")
-    
     start_wait = time.time()
-    while time.time() - start_wait < 86400:
+    while time.time() - start_wait < timeout:
         if otp_file.exists():
             try:
                 data = json.loads(otp_file.read_text())
                 if data.get("status") == "RECEIVED" and data.get("code"):
                     otp_code = str(data["code"]).strip()
-                    log.info(f"✅ [DISCORD] OTP diterima dari Discord: {otp_code}")
+                    log.info(f"✅ [OTP] Kode OTP diterima: {otp_code}")
                     otp_file.unlink(missing_ok=True)
                     return otp_code
             except Exception as e:
                 log.error(f"Error membaca file OTP: {e}")
         time.sleep(2)
         
-    log.warning(f"❌ [DISCORD] Timeout menunggu OTP untuk {username}")
+    log.warning(f"❌ [OTP] Timeout ({timeout}s) menunggu OTP untuk '{username}'")
     otp_file.unlink(missing_ok=True)
     return ""
 
@@ -591,9 +576,10 @@ def build_img_url(img_id: str) -> str:
 
 # ── Session Persistence ────────────────────────────────────────────────────────
 
-def save_session(tob_token: str, entity_id: str, extra_cookies: dict = None):
+def save_session(tob_token: str, entity_id: str, extra_cookies: dict = None, username: str = None):
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "username": username,
         "shopee_tob_token": tob_token,
         "shopee_tob_entity_id": entity_id,
         "saved_at": datetime.now().isoformat(),
@@ -639,17 +625,42 @@ def extract_tokens_from_driver(driver) -> tuple:
     for c in driver.get_cookies():
         name = c["name"]
         val = c["value"]
-        if name == "shopee_tob_token": 
+        if name in ["shopee_tob_token", "spc_ec", "SPC_EC"]: 
             tob_token = val
         elif name.lower() in ["shopee_tob_entity_id", "shopee_foody_mid", "x-merchant-id", "spc_merchant_id", "merchant_id", "shopid", "shop_id"]:
             if val and not entity_id: entity_id = val
+
+    if not tob_token:
+        try:
+            tob_token = driver.execute_script("""
+                function getCookie(name) {
+                    var v = document.cookie.match('(^|;) ?' + name + '=([^;]*)(;|$)');
+                    return v ? v[2] : null;
+                }
+                return getCookie('shopee_tob_token') ||
+                       getCookie('spc_ec') ||
+                       localStorage.getItem('shopee_tob_token') ||
+                       localStorage.getItem('token') ||
+                       sessionStorage.getItem('shopee_tob_token') || null;
+            """)
+        except: pass
+
+    # Fallback ke saved session file jika cookie driver tidak memberikan token
+    if not tob_token:
+        try:
+            saved = load_session()
+            if saved and saved.get("shopee_tob_token"):
+                tob_token = saved["shopee_tob_token"]
+                if not entity_id:
+                    entity_id = saved.get("shopee_tob_entity_id")
+        except: pass
             
     if not entity_id:
         try: 
             # Try API first (Most accurate) - using full URL and credentials
             api_js = """
             var done = arguments[arguments.length - 1];
-            let token = document.cookie.split('; ').find(row => row.startsWith('shopee_tob_token='))?.split('=')[1];
+            let token = document.cookie.split('; ').find(row => row.startsWith('shopee_tob_token='))?.split('=')[1] || localStorage.getItem('shopee_tob_token');
             fetch('https://api.partner.shopee.co.id/nb/mss/web-api/PartnerAccountServer/GetUserInfo', {
                 method: 'POST',
                 headers: {
@@ -676,7 +687,6 @@ def extract_tokens_from_driver(driver) -> tuple:
                     let v = localStorage.getItem(k);
                     if (/^\\d{6,12}$/.test(v)) ids.push(v);
                 }
-                // ... rest of fallback logic ...
                 let specific = localStorage.getItem('shopee_tob_entity_id') || 
                                localStorage.getItem('shopee_foody_mid') || 
                                localStorage.getItem('merchant_id') || 
@@ -692,10 +702,15 @@ def get_all_cookies_dict(driver) -> dict:
     return {c["name"]: c["value"] for c in driver.get_cookies()}
 
 def _trigger_and_extract_tokens(driver) -> tuple:
-    log.debug("  🔄 Triggering fresh token issuance...")
+    # 1. Cek token langsung dari sesi aktif browser atau file sesi
+    tob_token, entity_id = extract_tokens_from_driver(driver)
+    if tob_token:
+        log.info(f"✅ Token extracted successfully. (entity_id: {entity_id})")
+        return tob_token, entity_id
+
+    # 2. Jika belum ada, baru buka halaman trigger
+    log.info("🔄 Token not found, navigating to trigger page...")
     try:
-        try: driver.delete_cookie("shopee_tob_token")
-        except: pass
         driver.get(TOKEN_TRIGGER_PAGE)
         for _ in range(10):
             tob_token, entity_id = extract_tokens_from_driver(driver)
@@ -798,7 +813,7 @@ def _init_driver(headless: bool):
 
 # ── Login Logic ────────────────────────────────────────────────────────────────
 
-def _perform_login(driver, wait, username: str = None, password: str = None, phone: str = None, is_retry: bool = False) -> bool:
+def _perform_login(driver, wait, username: str = None, password: str = None, phone: str = None, is_retry: bool = False, interactive: bool = True) -> bool:
     log.info("➡️  [AUTH] Starting login sequence...")
     if not phone and (not username or not password):
         raise Exception("Shopee credentials are not configured! Please configure them in 'credentials.json' at the project root directory.")
@@ -817,6 +832,45 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
         # Wait for page to stabilize
         time.sleep(2)
         
+        # Check if page is on 'Lanjutkan dengan Shopee' screen
+        try:
+            body_text = (driver.execute_script("return document.body.innerText || ''") or "").lower()
+            if "lanjutkan dengan shopee" in body_text or "sedang log in ke akun" in body_text:
+                log.info("🔎 [AUTH] Terdeteksi halaman 'Lanjutkan dengan Shopee'...")
+                account_shown = driver.execute_script("""
+                    var els = document.querySelectorAll('div, p, span, h1, h2, h3');
+                    for (var i = 0; i < els.length; i++) {
+                        var txt = (els[i].innerText || '').trim();
+                        if (!txt) continue;
+                        var low = txt.toLowerCase();
+                        if (!low.includes('lanjutkan') && !low.includes('shopee') && !low.includes('bantuan') && 
+                            !low.includes('sedang log in') && !low.includes('merchant') && txt.length > 2 && txt.length < 40) {
+                            return txt;
+                        }
+                    }
+                    return '';
+                """) or ""
+                log.info(f"  👤 Akun di layar: '{account_shown}' | Target: '{username}'")
+
+                if username and account_shown and username.lower() not in account_shown.lower():
+                    log.warning(f"  ⚠️ Akun di layar ({account_shown}) BEDA dengan target ({username}). Resetting cookies...")
+                    try:
+                        driver.delete_all_cookies()
+                        driver.execute_script("try{localStorage.clear();sessionStorage.clear();}catch(e){}")
+                    except: pass
+                    driver.get("https://partner.shopee.co.id/login")
+                    time.sleep(3)
+                else:
+                    try:
+                        btn_el = driver.find_element(By.XPATH, "//button[contains(., 'Lanjutkan') or contains(., 'Continue')] | //a[contains(., 'Lanjutkan') or contains(., 'Continue')]")
+                        if btn_el and btn_el.is_displayed():
+                            log.info("👉 [AUTH] Mengklik tombol 'Lanjutkan'...")
+                            driver.execute_script("arguments[0].click();", btn_el)
+                            time.sleep(3)
+                    except: pass
+        except Exception as _lanjut_err:
+            log.debug(f"  Lanjutkan check error: {_lanjut_err}")
+
         # Robust selectors for login fields
         user_input = None
         # Try finding ANY visible text input first
@@ -826,7 +880,7 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                 p = (inp.get_attribute("placeholder") or "").lower()
                 n = (inp.get_attribute("name") or "").lower()
                 t = (inp.get_attribute("type") or "").lower()
-                if inp.is_displayed() and (t == "text" or "user" in n or "phone" in n or "handphone" in p or "username" in p):
+                if inp.is_displayed() and (t == "text" or "user" in n or "phone" in n or "handphone" in p or "username" in p or "email" in p):
                     user_input = inp
                     break
         except: pass
@@ -861,19 +915,36 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
 
         user_input.send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
         human_like_typing(user_input, username)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true })); arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", user_input)
+        
         pass_input.send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
         human_like_typing(pass_input, password)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true })); arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", pass_input)
         
+        time.sleep(1)
+
         # Click login button
         login_btn = None
-        for btn_sel in ["//button[contains(., 'Masuk') or contains(., 'Log In')]", "//button[@type='submit']"]:
+        for btn_sel in [
+            "//button[contains(., 'Masuk') or contains(., 'Log In')]",
+            "//button[@type='submit']",
+            "//button[contains(@class, 'shopee-button')]"
+        ]:
             try:
                 btn = wait.until(EC.element_to_be_clickable((By.XPATH, btn_sel)))
                 if btn.is_displayed(): login_btn = btn; break
             except: continue
 
-        if login_btn: login_btn.click()
-        else: raise Exception("Could not find Login button")
+        if login_btn:
+            try:
+                driver.execute_script("arguments[0].click();", login_btn)
+            except Exception:
+                login_btn.click()
+        else:
+            try:
+                pass_input.send_keys(Keys.ENTER)
+            except Exception:
+                raise Exception("Could not find Login button")
 
     # Check for immediate credential errors
     time.sleep(3)
@@ -923,10 +994,176 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
             """)
 
             if otp_input or is_verification_page:
-                log.error(f"❌ [AUTH] OTP or verification is required for '{username or phone}'. Aborting to prevent triggering OTP.")
-                return False
-        except Exception:
-            pass
+                if not interactive:
+                    log.error(f"❌ [AUTH] OTP or verification is required for '{username or phone}'. Aborting in non-interactive mode.")
+                    return False
+
+                otp_error_msg = ""
+                for otp_attempt in range(3):  # Maksimal 3x percobaan masukan OTP
+                    log.info(f"🔑 [AUTH] Verifikasi / OTP diperlukan untuk '{username or phone}' (Percobaan {otp_attempt + 1}/3)...")
+                    otp_code = get_otp_code(username or "user", phone or "", error_msg=otp_error_msg)
+                    if not otp_code:
+                        log.error(f"❌ [AUTH] Timeout atau gagal menerima Kode OTP untuk '{username or phone}'")
+                        return False
+
+                    try:
+                        # 1. Find OTP input fields robustly
+                        otp_fields = []
+                        for otp_sel in [
+                            "input.shopee-otp-input__input",
+                            ".shopee-otp-input input",
+                            "input[maxlength='1']",
+                            "input[maxlength='6']",
+                            "input[autocomplete='one-time-code']"
+                        ]:
+                            els = driver.find_elements(By.CSS_SELECTOR, otp_sel)
+                            visible = [e for e in els if e.is_displayed()]
+                            if visible:
+                                otp_fields = visible
+                                break
+
+                        log.info(f"  🔢 OTP fields ditemukan: {len(otp_fields)}")
+                        if len(otp_fields) >= 6:
+                            for idx_digit, digit in enumerate(otp_code[:6]):
+                                try:
+                                    otp_fields[idx_digit].click()
+                                    time.sleep(0.05)
+                                except Exception: pass
+                                otp_fields[idx_digit].send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
+                                otp_fields[idx_digit].send_keys(digit)
+                                driver.execute_script(
+                                    "arguments[0].dispatchEvent(new Event('input', { bubbles: true })); "
+                                    "arguments[0].dispatchEvent(new Event('change', { bubbles: true })); "
+                                    "arguments[0].dispatchEvent(new KeyboardEvent('keyup', { key: arguments[1], bubbles: true }));",
+                                    otp_fields[idx_digit], digit
+                                )
+                                time.sleep(0.1)
+                        elif len(otp_fields) >= 1:
+                            for el in otp_fields:
+                                if el.is_displayed():
+                                    try: el.click()
+                                    except Exception: pass
+                                    el.send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
+                                    human_like_typing(el, otp_code)
+                                    driver.execute_script(
+                                        "arguments[0].dispatchEvent(new Event('input', { bubbles: true })); "
+                                        "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+                                        el
+                                    )
+                                    try: el.send_keys(Keys.ENTER)
+                                    except Exception: pass
+                                    break
+
+                        time.sleep(1)
+                        # 2. Click verification / confirm / submit button if present
+                        try:
+                            verify_btns = driver.find_elements(By.XPATH,
+                                "//button[contains(.,'Verifikasi') or contains(.,'Verify') "
+                                "or contains(.,'Konfirmasi') or contains(.,'Confirm') "
+                                "or contains(.,'Kirim') or contains(.,'Submit') "
+                                "or contains(.,'Selanjutnya') or contains(.,'Next') "
+                                "or contains(.,'Log In') or contains(.,'Masuk')]"
+                            )
+                            for vbtn in verify_btns:
+                                if vbtn.is_displayed():
+                                    log.info(f"  👆 Klik tombol verifikasi: '{vbtn.text.strip()}'")
+                                    driver.execute_script("arguments[0].click();", vbtn)
+                                    break
+                        except Exception as btn_err:
+                            log.debug(f"  Verification button click error: {btn_err}")
+
+                        # 3. Check for immediate error message on Shopee page
+                        time.sleep(2)
+                        detected_error = driver.execute_script("""
+                            var selectors = [
+                                '.shopee-form-item__error-message', 
+                                '.ant-message-custom-content', 
+                                '[class*="error"]', 
+                                '[class*="invalid"]',
+                                '.shopee-alert__title',
+                                '.shopee-alert__description'
+                            ];
+                            for (var s of selectors) {
+                                var els = document.querySelectorAll(s);
+                                for (var el of els) {
+                                    var txt = (el.innerText || '').trim();
+                                    var low = txt.toLowerCase();
+                                    if (txt && (low.includes('salah') || low.includes('invalid') || low.includes('incorrect') || low.includes('kedaluwarsa') || low.includes('expired') || low.includes('gagal'))) {
+                                        return txt;
+                                    }
+                                }
+                            }
+                            return '';
+                        """)
+
+                        if detected_error:
+                            log.warning(f"  ⚠️ Terdeteksi error OTP di layar Shopee: '{detected_error}'")
+                            otp_error_msg = f"Kode OTP salah: {detected_error}. Silakan masukkan kembali."
+                            for fld in otp_fields:
+                                try:
+                                    fld.click()
+                                    fld.send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
+                                except Exception: pass
+                            continue
+
+                        # 4. Wait up to 15 seconds for page navigation after OTP submission
+                        log.info("  ⏳ Menunggu pengalihan halaman setelah verifikasi OTP...")
+                        for wait_nav in range(15):
+                            time.sleep(1)
+                            try:
+                                _lanjut_btn = driver.find_element(By.XPATH, "//button[contains(., 'Lanjutkan') or contains(., 'Continue')] | //*[text()='Lanjutkan' or text()='Continue']")
+                                if _lanjut_btn.is_displayed():
+                                    log.info("  👉 Menemukan tombol 'Lanjutkan' setelah OTP, mengklik...")
+                                    driver.execute_script("arguments[0].click();", _lanjut_btn)
+                            except Exception: pass
+
+                            import urllib.parse
+                            parsed_url = urllib.parse.urlparse(driver.current_url)
+                            url_path = parsed_url.path.lower()
+                            url_full = driver.current_url.lower()
+
+                            # Check if page is post-login page (e.g. /account/onboarding, /merchant-selector, /dashboard)
+                            is_on_post_login = (
+                                any(kw in url_path for kw in ["onboarding", "merchant-selector", "dashboard", "shopee-pos", "analytics", "settings"])
+                                or ("login" not in url_path and "authenticate" not in url_path and "partner.shopee.co.id" in url_full)
+                            )
+
+                            if is_on_post_login:
+                                log.info(f"✅ [AUTH] Verifikasi OTP berhasil! Redirect ke '{url_path}' terdeteksi.")
+                                return True
+                        
+                        # Re-check error after wait
+                        detected_error_after = driver.execute_script("""
+                            var selectors = ['.shopee-form-item__error-message', '.ant-message-custom-content', '[class*="error"]', '.shopee-alert__title'];
+                            for (var s of selectors) {
+                                var els = document.querySelectorAll(s);
+                                for (var el of els) {
+                                    var txt = (el.innerText || '').trim();
+                                    var low = txt.toLowerCase();
+                                    if (txt && (low.includes('salah') || low.includes('invalid') || low.includes('incorrect') || low.includes('kedaluwarsa') || low.includes('expired'))) {
+                                        return txt;
+                                    }
+                                }
+                            }
+                            return '';
+                        """)
+                        if detected_error_after:
+                            log.warning(f"  ⚠️ Terdeteksi error OTP setelah menunggu: '{detected_error_after}'")
+                            otp_error_msg = f"Kode OTP salah/kedaluwarsa: {detected_error_after}. Silakan coba lagi."
+                            for fld in otp_fields:
+                                try:
+                                    fld.click()
+                                    fld.send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
+                                except Exception: pass
+                            continue
+
+                        log.warning(f"  ⚠️ Setelah verifikasi OTP, URL masih di: {driver.current_url}")
+                        otp_error_msg = "Kode OTP tidak valid atau tidak direspon oleh Shopee. Silakan coba masukkan lagi."
+                    except Exception as otp_err:
+                        log.error(f"❌ Gagal memasukkan Kode OTP: {otp_err}")
+                        otp_error_msg = f"Gagal memproses OTP: {otp_err}"
+        except Exception as _check_err:
+            log.debug(f"  OTP / login check loop exception: {_check_err}")
 
         # Cek dan klik tombol Lanjutkan/Continue jika ada di halaman konfirmasi setelah login
         try:
@@ -944,9 +1181,18 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
         time.sleep(1)
 
     # Re-verify that we successfully navigated away from login/authenticate pages
-    current_url = driver.current_url.lower()
-    if "onboarding" not in current_url and "merchant-selector" not in current_url and "dashboard" not in current_url:
-        log.error(f"❌ [AUTH] Login did not redirect to dashboard and is still on: {current_url}. Aborting.")
+    import urllib.parse
+    parsed_url = urllib.parse.urlparse(driver.current_url)
+    url_path = parsed_url.path.lower()
+    url_full = driver.current_url.lower()
+
+    is_on_post_login = (
+        any(kw in url_path for kw in ["onboarding", "merchant-selector", "dashboard", "shopee-pos", "analytics", "settings"])
+        or ("login" not in url_path and "authenticate" not in url_path and "partner.shopee.co.id" in url_full)
+    )
+
+    if not is_on_post_login:
+        log.error(f"❌ [AUTH] Login did not redirect to dashboard and is still on: {url_full}. Aborting.")
         return False
 
     return True
@@ -1466,9 +1712,16 @@ def get_session(username=None, password=None, phone=None, headless=True, close_b
             is_logged_in = False
             current_url = driver.current_url.lower()
             
-            # Check if already logged in (on any attempt)
-            # Note: "onboarding" pages also indicate a valid session (pending merchant invitation)
-            if "dashboard" in current_url or "merchant-selector" in current_url or "onboarding" in current_url:
+            # Check if username is specified and cached session belongs to a different username
+            saved_sess = load_session()
+            if username and saved_sess and saved_sess.get("username") and saved_sess.get("username") != username:
+                log.info(f"🔄 [SESSION] Active session is for '{saved_sess.get('username')}', target user is '{username}'. Resetting cookies for target user login...")
+                try: driver.delete_all_cookies()
+                except: pass
+                driver.get("https://partner.shopee.co.id/login")
+                time.sleep(3)
+                current_url = driver.current_url.lower()
+            elif "dashboard" in current_url or "merchant-selector" in current_url or "onboarding" in current_url:
                 log.info("✅ [SESSION] Browser is already logged in.")
                 is_logged_in = True
             
@@ -1527,7 +1780,7 @@ def get_session(username=None, password=None, phone=None, headless=True, close_b
                 
                 current_url = driver.current_url.lower()
                 if "login" in current_url or "authenticate" in current_url or "about:blank" in current_url:
-                    success = _perform_login(driver, wait, username, password, phone, is_retry=(attempt == 2))
+                    success = _perform_login(driver, wait, username, password, phone, is_retry=(attempt == 2), interactive=interactive)
                     if not success:
                         log.error("❌ [AUTH] _perform_login failed.")
                         driver.quit()
@@ -1771,7 +2024,7 @@ def get_session(username=None, password=None, phone=None, headless=True, close_b
                 continue
                 
             all_c = get_all_cookies_dict(driver)
-            save_session(t, eid or "", extra_cookies=all_c)
+            save_session(t, eid or "", extra_cookies=all_c, username=username)
             res = {"shopee_tob_token": t, "shopee_tob_entity_id": eid or "", "extra_cookies": all_c}
             if not close_browser: res["driver"] = driver
             session_success = True

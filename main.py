@@ -115,7 +115,8 @@ class AccountResponse(BaseModel):
     id: uuid.UUID
     platform: str
     username: str
-    portal: Optional[str]
+    password: Optional[str] = None
+    portal: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -146,6 +147,7 @@ class OutletResponse(BaseModel):
     last_sync_at: Optional[datetime]
     created_at: datetime
     platform: Optional[str] = None
+    account: Optional[AccountResponse] = None
 
     class Config:
         from_attributes = True
@@ -291,11 +293,31 @@ def sync_sheets(db: Session = Depends(get_db)):
         password = None
 
         if platform == "shopee":
-            # Username is allvbadmin
-            username = "allvbadmin"
-            # Get Password.1 or Kata Sandi.1
-            pwd_col = "Kata Sandi.1" if "Kata Sandi.1" in df.columns else "Kata Sandi"
-            password = str(row.get(pwd_col, "Master!00!")).strip()
+            user_col_q = "Nama Pengguna"
+            user_col_z = "Nama Pengguna.1"
+            pwd_col_s = "Kata Sandi"
+            pwd_col_ab = "Kata Sandi.1"
+
+            user_q_val = row.get(user_col_q)
+            if pd.notna(user_q_val) and str(user_q_val).strip() not in ("-", "", "nan", "None"):
+                username = str(user_q_val).strip()
+                pwd_s_val = row.get(pwd_col_s)
+                if pd.notna(pwd_s_val) and str(pwd_s_val).strip() not in ("-", "", "nan", "None"):
+                    password = str(pwd_s_val).strip()
+                else:
+                    password = "" # No password used, login directly via OTP
+            else:
+                user_z_val = row.get(user_col_z)
+                if pd.notna(user_z_val) and str(user_z_val).strip() not in ("-", "", "nan", "None"):
+                    username = str(user_z_val).strip()
+                else:
+                    username = "superfoodapp"
+                
+                pwd_ab_val = row.get(pwd_col_ab)
+                if pd.notna(pwd_ab_val) and str(pwd_ab_val).strip() not in ("-", "", "nan", "None"):
+                    password = str(pwd_ab_val).strip()
+                else:
+                    password = "Master@00@"
         elif platform == "grab":
             user_col_sf = "Nama Pengguna.1"
             user_col_mt = "Nama Pengguna"
@@ -329,8 +351,8 @@ def sync_sheets(db: Session = Depends(get_db)):
 
         if not username:
             continue
-        if not password:
-            password = "Master@123" # Default fallback password
+        if password is None:
+            password = ""
 
         # 1. Upsert Account
         db_account = accounts_by_key.get((username, platform))
@@ -394,6 +416,7 @@ def sync_sheets(db: Session = Depends(get_db)):
             outlets_by_fallback[(db_account.id, merchant_name, nama_outlet, cabang)] = db_outlet
             added_outlets += 1
         else:
+            db_outlet.account_id = db_account.id
             db_outlet.store_id = store_id
             db_outlet.owner = owner
             if merchant_name and merchant_name != "-":
@@ -565,6 +588,13 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             job.current_step = "Membuka browser dan login portal Shopee Partner..."
             db.commit()
             
+            # Add project root to sys.path to resolve shopee.* absolute imports correctly
+            if str(BASE_DIR) not in sys.path:
+                sys.path.insert(0, str(BASE_DIR))
+                
+            from shopee.core.pull import extract_shopee_menu, get_shopee_master_credentials
+            master_user, master_pass = get_shopee_master_credentials()
+
             # Setup store_metadata payload for shopee.core.pull
             store_metadata = {
                 "store_id": outlet.store_id,
@@ -573,16 +603,10 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "cabang": outlet.cabang,
                 "nama_resto_final": outlet.nama_resto_final,
                 "brand": outlet.brand,
-                "username": account.username,
-                "password": account.password,
+                "username": master_user,
+                "password": master_pass,
                 "portal": account.portal
             }
-            
-            # Add project root to sys.path to resolve shopee.* absolute imports correctly
-            if str(BASE_DIR) not in sys.path:
-                sys.path.insert(0, str(BASE_DIR))
-                
-            from shopee.core.pull import extract_shopee_menu
             
             # Run shopee extraction
             success, result = extract_shopee_menu(store_metadata, str(exports_dir))
@@ -599,16 +623,6 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                     outlet.store_id = resolved_store_id
                     logger.info(f"💾 Dynamically updated store_id to {resolved_store_id} for outlet {outlet.merchant_name}")
             
-            from upload_drive import upload_combined_to_drive
-            owner_label = outlet.owner or outlet.merchant_name or outlet.nama_outlet or "Outlet"
-            excel_file_path = result.get("excel")
-            drive_url = None
-            if excel_file_path and os.path.exists(excel_file_path):
-                try:
-                    drive_url = upload_combined_to_drive(excel_file_path, owner_label)
-                except Exception as drive_err:
-                    logger.warning(f"Failed uploading file to Google Drive: {drive_err}")
-
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu selesai!"
@@ -618,8 +632,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "mods_csv_path": result.get("mods_csv"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
-                "completed_at": datetime.utcnow().isoformat(),
-                "gspread_url": drive_url
+                "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
             outlet.last_sync_at = datetime.utcnow()
@@ -651,16 +664,6 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             if not success:
                 raise Exception(f"GoFood extraction failed: {result}")
                 
-            from upload_drive import upload_combined_to_drive
-            owner_label = outlet.owner or outlet.merchant_name or outlet.nama_outlet or "Outlet"
-            excel_file_path = result.get("excel")
-            drive_url = None
-            if excel_file_path and os.path.exists(excel_file_path):
-                try:
-                    drive_url = upload_combined_to_drive(excel_file_path, owner_label)
-                except Exception as drive_err:
-                    logger.warning(f"Failed uploading file to Google Drive: {drive_err}")
-
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu GoFood selesai!"
@@ -668,8 +671,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "excel_path": result.get("excel"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
-                "completed_at": datetime.utcnow().isoformat(),
-                "gspread_url": drive_url
+                "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
             outlet.last_sync_at = datetime.utcnow()
@@ -701,16 +703,6 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             if not success:
                 raise Exception(f"Grab extraction failed: {result}")
                 
-            from upload_drive import upload_combined_to_drive
-            owner_label = outlet.owner or outlet.merchant_name or outlet.nama_outlet or "Outlet"
-            excel_file_path = result.get("excel")
-            drive_url = None
-            if excel_file_path and os.path.exists(excel_file_path):
-                try:
-                    drive_url = upload_combined_to_drive(excel_file_path, owner_label)
-                except Exception as drive_err:
-                    logger.warning(f"Failed uploading file to Google Drive: {drive_err}")
-
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu GrabFood selesai!"
@@ -718,8 +710,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "excel_path": result.get("excel"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
-                "completed_at": datetime.utcnow().isoformat(),
-                "gspread_url": drive_url
+                "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
             outlet.last_sync_at = datetime.utcnow()
@@ -789,7 +780,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
             # Add project root to sys.path
             if str(BASE_DIR) not in sys.path:
                 sys.path.insert(0, str(BASE_DIR))
-            from shopee.core.edit import edit_dish_via_portal
+            from shopee.core.push import push_price_update_batch
 
             store_metadata = {
                 "store_id": outlet.store_id,
@@ -801,37 +792,35 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
             }
 
             job.progress_pct = 30
-            job.current_step = "Membuka browser Shopee..."
+            job.current_step = "Membuka browser Shopee & mengautentikasi sesi..."
             db.commit()
 
-            for idx, update in enumerate(updates_list):
-                item_id = update["item_id"]
-                new_price = update["new_price"]
-                
-                job.current_step = f"Memproses update harga item {item_id} ke Rp {new_price}..."
-                job.progress_pct = int(30 + (idx / total_updates) * 60)
+            def on_progress(idx, total, name, price):
+                job.current_step = f"Memproses update harga '{name}' ({idx + 1}/{total}) ke Rp {price:,.0f}..."
+                job.progress_pct = int(30 + ((idx + 1) / total) * 60)
                 db.commit()
 
-                try:
-                    success, msg = edit_dish_via_portal(store_metadata, dish_id=item_id, price=new_price, headless=True)
-                    if success:
-                        success_count += 1
-                        status_str = "SUCCESS"
-                        err_msg = None
-                    else:
-                        fail_count += 1
-                        status_str = "FAILED"
-                        err_msg = msg
-                except Exception as ex:
+            results = push_price_update_batch(store_metadata, updates_list, headless=False, on_item_progress=on_progress)
+
+            for res in results:
+                item_id = res["item_id"]
+                item_name = res["item_name"]
+                new_price = res["new_price"]
+                
+                if res["success"]:
+                    success_count += 1
+                    status_str = "SUCCESS"
+                    err_msg = None
+                else:
                     fail_count += 1
                     status_str = "FAILED"
-                    err_msg = str(ex)
+                    err_msg = res["error_message"]
 
                 trail = AuditTrail(
                     job_id=job.id,
                     outlet_id=outlet.id,
                     item_id=item_id,
-                    item_name=item_id,
+                    item_name=item_name,
                     change_type="PRICE_UPDATE",
                     field_changed="price",
                     old_value=None,
@@ -3751,4 +3740,76 @@ def get_sessions_status(db: Session = Depends(get_db)):
         result.append(status_info)
         
     return result
+
+
+# ─── SHOPEE OTP ENDPOINTS ───────────────────────────────────────────────────
+
+class ShopeeOTPRequest(BaseModel):
+    username: str
+    code: str
+    channel: Optional[str] = "sms"
+
+@app.get("/api/shopee/otp-status")
+def get_shopee_otp_status(username: Optional[str] = None):
+    """Checks whether Shopee login engine is currently waiting for an OTP for the given username."""
+    shopee_data_dirs = [
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data"
+    ]
+    
+    usernames_to_check = [username] if username else []
+    if not usernames_to_check:
+        for d in shopee_data_dirs:
+            if d.exists():
+                for f in d.glob("otp_request_*.json"):
+                    u = f.stem.replace("otp_request_", "")
+                    if u not in usernames_to_check:
+                        usernames_to_check.append(u)
+    
+    for u in usernames_to_check:
+        for d in shopee_data_dirs:
+            fpath = d / f"otp_request_{u}.json"
+            if fpath.exists():
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if data.get("status") == "WAITING_OTP":
+                            return {
+                                "waiting": True,
+                                "username": u,
+                                "phone": data.get("phone", ""),
+                                "requested_at": data.get("requested_at"),
+                                "error_msg": data.get("error_msg", "")
+                            }
+                except Exception: pass
+    return {"waiting": False}
+
+@app.post("/api/shopee/submit-otp")
+def submit_shopee_otp(req: ShopeeOTPRequest):
+    """Submits OTP code to Shopee login engine."""
+    username = req.username.strip()
+    code = req.code.strip()
+    channel = (req.channel or "sms").strip().lower()
+    if not username or not code:
+        raise HTTPException(status_code=400, detail="Username and OTP code are required")
+
+    shopee_data_dirs = [
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data"
+    ]
+    
+    for d in shopee_data_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        fpath = d / f"otp_request_{username}.json"
+        request_data = {
+            "status": "RECEIVED",
+            "code": code,
+            "username": username,
+            "channel": channel,
+            "received_at": datetime.now().isoformat()
+        }
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(request_data, f, indent=2)
+            
+    return {"status": "SUCCESS", "message": f"OTP {code} ({channel.upper()}) berhasil dikirim untuk user {username}."}
 

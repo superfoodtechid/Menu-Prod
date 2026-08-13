@@ -16,7 +16,7 @@ def _build_dish_payload(
     price: float,
     description: str,
     available: bool,
-    catalog_id: int,
+    catalog_id: int | str,
     picture: str = "",
     opt_groups: list = None,
     rank: int = 1,
@@ -26,28 +26,34 @@ def _build_dish_payload(
     time_for_sales = [{"sale_start_time": 0, "sale_end_time": 86399}]
     
     if existing_dish:
-        time_for_sales = existing_dish.get("time_for_sales", time_for_sales)
-        rank = existing_dish.get("rank", rank)
+        dish_copy = existing_dish.copy()
+        dish_copy["price"] = str(price_cents)
+        dish_copy["list_price"] = price_cents
+        dish_copy["available"] = available
+        if name: dish_copy["name"] = name
+        if description is not None: dish_copy["description"] = description
+        if picture is not None: dish_copy["picture"] = picture
+        if catalog_id: dish_copy["catalog_id"] = str(catalog_id)
+        if "id" in dish_copy: dish_copy["id"] = str(dish_copy["id"])
+        if "store_id" in dish_copy: dish_copy["store_id"] = str(dish_copy["store_id"])
+        return {"dish": {k: v for k, v in dish_copy.items() if v is not None}}
 
     payload = {
         "name":           name,
         "price":          str(price_cents),
-        "list_price":     str(price_cents),
+        "list_price":     price_cents,
         "picture":        picture,
         "description":    description,
         "available":      available,
         "listing_status": 1,
         "sale_status":    1,
+        "sale_week_bit":  127,
         "time_for_sales": time_for_sales,
         "rank":           rank,
-        "catalog_id":     catalog_id,
+        "catalog_id":     str(catalog_id),
         "option_groups":  opt_groups or []
     }
-    
-    if existing_dish and "id" in existing_dish:
-        payload["id"] = existing_dish["id"]
-        
-    return payload
+    return {"dish": payload}
 
 def create_dish(
     client: ShopeeModifyClient,

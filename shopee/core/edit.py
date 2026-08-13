@@ -21,11 +21,12 @@ def _resolve_target_merchant_name(username: str, merchant_name: str, store_metad
 
 def _boot_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeModifyClient | None, str]:
     store_id = store_metadata["store_id"]
-    username = store_metadata.get("username", "allvbadmin")
-    password = store_metadata.get("password", "Master!00!")
+    username = store_metadata.get("username") or "superfoodapp"
+    password = store_metadata.get("password") or "Master@00@"
+        
     target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
     
-    session_file = WORKSPACE_DIR / "shopee" / "data" / "session.json"
+    session_file = WORKSPACE_DIR / "shopee" / "data" / f"session_{username}.json"
     browser.set_session_file(session_file)
     
     session_data = browser.get_session(
@@ -87,11 +88,12 @@ def _dismiss_popups(driver) -> None:
 
 def edit_dish_upload_image(store_metadata: dict, dish_id: str, image_path: str, headless: bool = True) -> bool:
     store_id = store_metadata["store_id"]
-    username = store_metadata.get("username", "allvbadmin")
-    password = store_metadata.get("password", "Master!00!")
+    username = store_metadata.get("username") or "superfoodapp"
+    password = store_metadata.get("password") or "Master@00@"
+
     target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
     
-    session_file = WORKSPACE_DIR / "shopee" / "data" / "session.json"
+    session_file = WORKSPACE_DIR / "shopee" / "data" / f"session_{username}.json"
     browser.set_session_file(session_file)
     
     session_data = browser.get_session(
@@ -134,8 +136,8 @@ def edit_dish_upload_image(store_metadata: dict, dish_id: str, image_path: str, 
 def update_dish(
     client: ShopeeModifyClient,
     store_id: str,
-    catalog_id: int,
-    dish_id: int,
+    catalog_id: int | str,
+    dish_id: int | str,
     name: str,
     price: float,
     description: str = "",
@@ -145,7 +147,8 @@ def update_dish(
     existing_dish: dict = None
 ) -> bool:
     from .create import _build_dish_payload
-    url = f"https://foody.shopee.co.id/api/seller/store/dish/update"
+    dish_str_id = str(dish_id)
+    url = f"https://foody.shopee.co.id/api/seller/store/dishes/{dish_str_id}"
     payload = _build_dish_payload(
         name=name,
         price=price,
@@ -156,7 +159,6 @@ def update_dish(
         opt_groups=opt_groups,
         existing_dish=existing_dish
     )
-    payload["id"] = dish_id
     try:
         resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
         data = resp.json()

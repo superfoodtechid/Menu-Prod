@@ -73,21 +73,31 @@ class ShopeeClient:
         return []
 
 class ShopeeModifyClient:
-    def __init__(self, tob_token: str, entity_id: str, extra_cookies: dict = None):
+    def __init__(self, tob_token: str, entity_id: str, extra_cookies: dict = None, merchant_id: str = None, username: str = None):
         self.tob_token     = tob_token
         self.entity_id     = entity_id
+        self.merchant_id   = merchant_id or entity_id
+        self.username      = username or ""
         self.extra_cookies = extra_cookies or {}
         self.session       = requests.Session()
         self.uploaded_image_hash = ""
         self.last_error = ""
 
     def _seller_headers(self, override_entity_id: str = None) -> dict:
-        eid = override_entity_id or self.entity_id
+        eid = str(override_entity_id or self.entity_id or "")
+        mid = str(self.merchant_id or eid)
         cookies = self.extra_cookies.copy()
-        cookies["shopee_tob_token"]     = self.tob_token
-        cookies["shopee_tob_entity_id"] = eid
-        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-        return {
+        if self.tob_token:
+            cookies["shopee_tob_token"] = self.tob_token
+        if self.username:
+            cookies["shopee_user_name"] = self.username
+        cookies["shopee_request_from"] = "partner_web"
+        if mid:
+            cookies["shopee_foody_mid"] = mid
+        if eid:
+            cookies["shopee_tob_entity_id"] = eid
+        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items() if v)
+        headers = {
             "Host":           "foody.shopee.co.id",
             "Accept":         "application/json, text/plain, */*",
             "Content-Type":   "application/json",
@@ -98,12 +108,20 @@ class ShopeeModifyClient:
             "Origin":         "https://partner.shopee.co.id",
             "Referer":        "https://partner.shopee.co.id/",
         }
+        if self.tob_token:
+            headers["x-merchant-token"] = self.tob_token
+        if mid:
+            headers["x-merchant-id"] = mid
+        if eid:
+            headers["shopee_tob_entity_id"] = eid
+        return headers
 
     def _mms_headers(self) -> dict:
         cookies = self.extra_cookies.copy()
-        cookies["shopee_tob_token"] = self.tob_token
-        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-        return {
+        if self.tob_token:
+            cookies["shopee_tob_token"] = self.tob_token
+        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items() if v)
+        headers = {
             "Host":           "api.mms.shopee.co.id",
             "Accept":         "application/json, text/plain, */*",
             "Content-Type":   "application/json",
@@ -114,6 +132,9 @@ class ShopeeModifyClient:
             "Origin":         "https://partner.shopee.co.id",
             "Referer":        "https://partner.shopee.co.id/",
         }
+        if self.tob_token:
+            headers["x-merchant-token"] = self.tob_token
+        return headers
 
     @staticmethod
     def _make_request_id() -> str:
@@ -137,6 +158,8 @@ class ShopeeModifyClient:
             data = resp.json()
             if data.get("code") == 0:
                 return data.get("data", {}).get("stores", [])
+            else:
+                self.last_error = f"API error get_stores: code={data.get('code')} msg={data.get('msg')}"
         except Exception as e:
             self.last_error = str(e)
         return []
@@ -148,6 +171,8 @@ class ShopeeModifyClient:
             data = resp.json()
             if data.get("code") == 0:
                 return data.get("data", {}).get("catalogs", [])
+            else:
+                self.last_error = f"API error get_store_dishes: code={data.get('code')} msg={data.get('msg')}"
         except Exception as e:
             self.last_error = str(e)
         return []
@@ -162,6 +187,8 @@ class ShopeeModifyClient:
             data = resp.json()
             if data.get("code") == 0:
                 return data.get("data", {}).get("option_groups", [])
+            else:
+                self.last_error = f"API error get_store_option_groups: code={data.get('code')} msg={data.get('msg')}"
         except Exception as e:
             self.last_error = str(e)
         return []
@@ -173,7 +200,8 @@ class ShopeeModifyClient:
             for dish in cat.get("dishes", []):
                 if str(dish.get("id")) == str(dish_id):
                     return dish
-        self.last_error = f"Item ID {dish_id} tidak ditemukan di daftar menu toko."
+        if not self.last_error:
+            self.last_error = f"Item ID {dish_id} tidak ditemukan di daftar menu toko (total katalog: {len(catalogs)})."
         return None
 
     def _preupload_image(self) -> dict | None:

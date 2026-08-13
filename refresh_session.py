@@ -14,8 +14,8 @@ def main():
     browser.set_session_file(session_file)
     
     # Load credentials from weekly/credentials.json if exists
-    username = "allvbadmin"
-    password = "Master!00!"
+    username = "superfoodapp"
+    password = "Master@00@"
     
     import json
     creds_file = WEEKLY_DIR / "credentials.json"
