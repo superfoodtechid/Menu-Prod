@@ -930,19 +930,36 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
 
         user_input.send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
         human_like_typing(user_input, username)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true })); arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", user_input)
+        
         pass_input.send_keys(Keys.CONTROL + "a", Keys.BACKSPACE)
         human_like_typing(pass_input, password)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true })); arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", pass_input)
         
+        time.sleep(1)
+
         # Click login button
         login_btn = None
-        for btn_sel in ["//button[contains(., 'Masuk') or contains(., 'Log In')]", "//button[@type='submit']"]:
+        for btn_sel in [
+            "//button[contains(., 'Masuk') or contains(., 'Log In')]",
+            "//button[@type='submit']",
+            "//button[contains(@class, 'shopee-button')]"
+        ]:
             try:
                 btn = wait.until(EC.element_to_be_clickable((By.XPATH, btn_sel)))
                 if btn.is_displayed(): login_btn = btn; break
             except: continue
 
-        if login_btn: login_btn.click()
-        else: raise Exception("Could not find Login button")
+        if login_btn:
+            try:
+                driver.execute_script("arguments[0].click();", login_btn)
+            except Exception:
+                login_btn.click()
+        else:
+            try:
+                pass_input.send_keys(Keys.ENTER)
+            except Exception:
+                raise Exception("Could not find Login button")
 
     # Check for immediate credential errors
     time.sleep(3)

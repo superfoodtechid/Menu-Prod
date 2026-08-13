@@ -588,6 +588,13 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             job.current_step = "Membuka browser dan login portal Shopee Partner..."
             db.commit()
             
+            # Add project root to sys.path to resolve shopee.* absolute imports correctly
+            if str(BASE_DIR) not in sys.path:
+                sys.path.insert(0, str(BASE_DIR))
+                
+            from shopee.core.pull import extract_shopee_menu, get_shopee_master_credentials
+            master_user, master_pass = get_shopee_master_credentials()
+
             # Setup store_metadata payload for shopee.core.pull
             store_metadata = {
                 "store_id": outlet.store_id,
@@ -596,16 +603,10 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "cabang": outlet.cabang,
                 "nama_resto_final": outlet.nama_resto_final,
                 "brand": outlet.brand,
-                "username": account.username,
-                "password": account.password,
+                "username": master_user,
+                "password": master_pass,
                 "portal": account.portal
             }
-            
-            # Add project root to sys.path to resolve shopee.* absolute imports correctly
-            if str(BASE_DIR) not in sys.path:
-                sys.path.insert(0, str(BASE_DIR))
-                
-            from shopee.core.pull import extract_shopee_menu
             
             # Run shopee extraction
             success, result = extract_shopee_menu(store_metadata, str(exports_dir))

@@ -21,11 +21,8 @@ def _resolve_target_merchant_name(username: str, merchant_name: str, store_metad
 
 def _boot_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeModifyClient | None, str]:
     store_id = store_metadata["store_id"]
-    username = store_metadata.get("username")
-    password = store_metadata.get("password")
-    
-    if not username:
-        return None, "Username Shopee tidak ditemukan pada store_metadata outlet"
+    username = store_metadata.get("username") or "superfoodapp"
+    password = store_metadata.get("password") or "Master@00@"
         
     target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
     
@@ -91,10 +88,8 @@ def _dismiss_popups(driver) -> None:
 
 def edit_dish_upload_image(store_metadata: dict, dish_id: str, image_path: str, headless: bool = True) -> bool:
     store_id = store_metadata["store_id"]
-    username = store_metadata.get("username")
-    password = store_metadata.get("password")
-    if not username:
-        raise ValueError("Username Shopee tidak ditemukan pada store_metadata outlet.")
+    username = store_metadata.get("username") or "superfoodapp"
+    password = store_metadata.get("password") or "Master@00@"
 
     target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
     

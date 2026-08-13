@@ -26,10 +26,8 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
     if not store_id or store_id == '-' or str(store_id).lower() == 'nan':
         store_id = None
 
-    username = store_metadata.get("username")
-    password = store_metadata.get("password")
-    if not username:
-        return None, "Username Shopee tidak ditemukan pada store_metadata outlet"
+    username = store_metadata.get("username") or "superfoodapp"
+    password = store_metadata.get("password") or "Master@00@"
     
     m_name = store_metadata.get('merchant_name', '')
     if not m_name or m_name.lower() == 'nan' or m_name == '-':

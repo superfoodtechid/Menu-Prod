@@ -28,7 +28,33 @@ def list_menu_shopee(store_metadata: dict) -> tuple[bool, list | str]:
     catalogs = client.get_store_dishes(store_id)
     return True, catalogs
 
-def extract_shopee_menu(store_metadata: dict, output_dir: str):
+def get_shopee_master_credentials() -> tuple[str, str]:
+    """
+    Membaca kredensial master Shopee dari environment variable (.env)
+    atau dari file credentials.json di root project.
+    """
+    user = os.getenv("SHOPEE_MASTER_USERNAME") or os.getenv("SHOPEE_USERNAME")
+    pwd = os.getenv("SHOPEE_MASTER_PASSWORD") or os.getenv("SHOPEE_PASSWORD")
+    if user and pwd:
+        return user.strip(), pwd.strip()
+
+    cred_file = WORKSPACE_DIR / "credentials.json"
+    if cred_file.exists():
+        try:
+            with open(cred_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                s_cred = data.get("shopee", {})
+                u = s_cred.get("master_username") or s_cred.get("username")
+                p = s_cred.get("master_password") or s_cred.get("password")
+                if u and p:
+                    return str(u).strip(), str(p).strip()
+        except Exception:
+            pass
+
+    return "allvbadmin", "Master!00!"
+
+
+def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = False):
     store_id = store_metadata.get('store_id', '')
     if isinstance(store_id, str):
         store_id = store_id.strip().split('.')[0]
@@ -44,21 +70,22 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str):
     nama_panjang = store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or target_name
     nama_pendek = store_metadata.get('brand') or store_metadata.get('nama_pendek') or store_metadata.get('nama_outlet') or target_name
     
-    username = store_metadata.get("username", "allvbadmin")
-    password = store_metadata.get("password", "Master!00!")
+    master_user, master_pass = get_shopee_master_credentials()
+    username = store_metadata.get("username") or master_user
+    password = store_metadata.get("password") or master_pass
     automation_data_dir = AUTOMATION_DIR / "data"
     automation_data_dir.mkdir(parents=True, exist_ok=True)
     session_file = automation_data_dir / f"session_{username}.json"
     browser.set_session_file(session_file)
             
-    print(f"[*] Membuka browser (headless=True) dan memilih merchant: '{target_name}'...")
+    print(f"[*] Membuka browser (headless={headless}) dan memilih merchant: '{target_name}'...")
     session_data = browser.get_session(
         username=username,
         password=password,
-        headless=True,
+        headless=headless,
         close_browser=True,
         target_name=target_name,
-        interactive=False
+        interactive=True
     )
     
     if not session_data or "shopee_tob_token" not in session_data:
@@ -108,7 +135,37 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str):
         print(f"[*] Menarik data menu ShopeeFood untuk: {target_name} ({store_id})...")
         catalogs = client.get_store_dishes(store_id)
         if not catalogs:
-            return False, "Tidak ada data catalog/dishes yang ditemukan. Periksa session."
+            print(f"[WARN] Sesi token Shopee kedaluwarsa atau invalid untuk '{username}'. Menghapus session cache dan membuka browser ulang...")
+            try:
+                if session_file.exists():
+                    session_file.unlink()
+                    print(f"[+] Session file cache '{session_file.name}' berhasil dihapus.")
+            except Exception as del_err:
+                print(f"[-] Gagal menghapus session file: {del_err}")
+
+            session_data = browser.get_session(
+                username=username,
+                password=password,
+                headless=headless,
+                close_browser=True,
+                target_name=target_name,
+                interactive=True,
+                force_fresh=True
+            )
+
+            if session_data and "shopee_tob_token" in session_data:
+                tob_token = session_data["shopee_tob_token"]
+                extra_cookies = session_data.get("extra_cookies", {})
+                client = ShopeeClient(
+                    tob_token=tob_token,
+                    entity_id=store_id,
+                    extra_cookies=extra_cookies
+                )
+                print(f"[*] Mencoba ulang menarik data menu ShopeeFood dengan token baru...")
+                catalogs = client.get_store_dishes(store_id)
+
+        if not catalogs:
+            return False, "Tidak ada data catalog/dishes yang ditemukan. Sesi token Shopee kedaluwarsa atau invalid."
             
         print(f"[*] Ditemukan {len(catalogs)} kategori menu.")
         all_dishes = []
