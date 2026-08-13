@@ -801,13 +801,17 @@ def _init_driver(headless: bool):
                     cmd.append("--headless=new")
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(2.5)
-                options.add_experimental_option("debuggerAddress", f"127.0.0.1:{cdp_port}")
+                
+                # Use clean options instance for CDP attach mode to prevent capability parsing errors
+                cdp_options = Options()
+                cdp_options.add_experimental_option("debuggerAddress", f"127.0.0.1:{cdp_port}")
                 if chromedriver_path:
-                    driver = webdriver.Chrome(service=Service(chromedriver_path), options=options)
+                    driver = webdriver.Chrome(service=Service(chromedriver_path), options=cdp_options)
                 else:
-                    driver = webdriver.Chrome(options=options)
+                    driver = webdriver.Chrome(options=cdp_options)
 
-    driver.set_page_load_timeout(60)
+    if driver:
+        driver.set_page_load_timeout(60)
     return driver
 
 

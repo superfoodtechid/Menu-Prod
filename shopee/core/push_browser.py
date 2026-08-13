@@ -102,10 +102,44 @@ def _init_push_driver(username: str, headless: bool = True) -> webdriver.Chrome:
             log.warning(f"⚠️ System ChromeDriver failed: {e}")
 
     if not driver:
-        log.info("🌐 [PUSH_BROWSER] Falling back to native Selenium Manager...")
-        driver = webdriver.Chrome(options=options)
+        try:
+            log.info("🌐 [PUSH_BROWSER] Falling back to native Selenium Manager...")
+            driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            log.warning(f"⚠️ Native Chrome init failed: {e}. Trying CDP mode fallback...")
+            try:
+                import socket, subprocess
+                s = socket.socket()
+                s.bind(('', 0))
+                cdp_port = s.getsockname()[1]
+                s.close()
 
-    driver.set_page_load_timeout(60)
+                cmd = [
+                    chromium_path or "chromium",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    f"--remote-debugging-port={cdp_port}",
+                    f"--user-data-dir={profile_dir.resolve()}",
+                    f"--profile-directory=profile_{username}"
+                ]
+                if headless:
+                    cmd.append("--headless=new")
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(2.5)
+
+                # Use clean options instance for CDP attach mode to avoid unrecognized option errors
+                cdp_options = Options()
+                cdp_options.add_experimental_option("debuggerAddress", f"127.0.0.1:{cdp_port}")
+                if chromedriver_path:
+                    driver = webdriver.Chrome(service=Service(chromedriver_path), options=cdp_options)
+                else:
+                    driver = webdriver.Chrome(options=cdp_options)
+            except Exception as cdp_err:
+                log.error(f"❌ CDP mode fallback failed: {cdp_err}")
+                raise cdp_err
+
+    if driver:
+        driver.set_page_load_timeout(60)
     return driver
 
 
