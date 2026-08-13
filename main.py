@@ -623,16 +623,6 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                     outlet.store_id = resolved_store_id
                     logger.info(f"💾 Dynamically updated store_id to {resolved_store_id} for outlet {outlet.merchant_name}")
             
-            from upload_drive import upload_combined_to_drive
-            owner_label = outlet.owner or outlet.merchant_name or outlet.nama_outlet or "Outlet"
-            excel_file_path = result.get("excel")
-            drive_url = None
-            if excel_file_path and os.path.exists(excel_file_path):
-                try:
-                    drive_url = upload_combined_to_drive(excel_file_path, owner_label)
-                except Exception as drive_err:
-                    logger.warning(f"Failed uploading file to Google Drive: {drive_err}")
-
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu selesai!"
@@ -642,8 +632,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "mods_csv_path": result.get("mods_csv"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
-                "completed_at": datetime.utcnow().isoformat(),
-                "gspread_url": drive_url
+                "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
             outlet.last_sync_at = datetime.utcnow()
@@ -675,16 +664,6 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             if not success:
                 raise Exception(f"GoFood extraction failed: {result}")
                 
-            from upload_drive import upload_combined_to_drive
-            owner_label = outlet.owner or outlet.merchant_name or outlet.nama_outlet or "Outlet"
-            excel_file_path = result.get("excel")
-            drive_url = None
-            if excel_file_path and os.path.exists(excel_file_path):
-                try:
-                    drive_url = upload_combined_to_drive(excel_file_path, owner_label)
-                except Exception as drive_err:
-                    logger.warning(f"Failed uploading file to Google Drive: {drive_err}")
-
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu GoFood selesai!"
@@ -692,8 +671,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "excel_path": result.get("excel"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
-                "completed_at": datetime.utcnow().isoformat(),
-                "gspread_url": drive_url
+                "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
             outlet.last_sync_at = datetime.utcnow()
@@ -725,16 +703,6 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             if not success:
                 raise Exception(f"Grab extraction failed: {result}")
                 
-            from upload_drive import upload_combined_to_drive
-            owner_label = outlet.owner or outlet.merchant_name or outlet.nama_outlet or "Outlet"
-            excel_file_path = result.get("excel")
-            drive_url = None
-            if excel_file_path and os.path.exists(excel_file_path):
-                try:
-                    drive_url = upload_combined_to_drive(excel_file_path, owner_label)
-                except Exception as drive_err:
-                    logger.warning(f"Failed uploading file to Google Drive: {drive_err}")
-
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu GrabFood selesai!"
@@ -742,8 +710,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "excel_path": result.get("excel"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
-                "completed_at": datetime.utcnow().isoformat(),
-                "gspread_url": drive_url
+                "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
             outlet.last_sync_at = datetime.utcnow()
