@@ -333,6 +333,12 @@ def get_push_session(
         None jika gagal
     """
     log.info(f"🚀 [PUSH_BROWSER] Memulai sesi PUSH untuk '{username}' (headless={headless})")
+    
+    # Cleanup any stale OTP request files from previous runs
+    for d in [AUTOMATION_DIR / "data", WORKSPACE_DIR / "shopee" / "data"]:
+        if d.exists():
+            (d / f"otp_request_{username}.json").unlink(missing_ok=True)
+
     driver = None
     try:
         driver = _init_push_driver(username=username, headless=headless)
@@ -352,6 +358,33 @@ def get_push_session(
         if is_logged_in:
             log.info("✅ [PUSH_BROWSER] Sudah login (sesi tersimpan di profil Chrome).")
         else:
+            # Try restoring session from saved token file before initiating fresh login
+            session_file = AUTOMATION_DIR / "data" / f"session_{username}.json"
+            if not session_file.exists():
+                session_file = AUTOMATION_DIR / "data" / "session.json"
+
+            if session_file.exists():
+                try:
+                    saved = json.loads(session_file.read_text())
+                    if saved.get("shopee_tob_token"):
+                        log.info(f"🔍 [PUSH_BROWSER] Restoring session from {session_file.name}...")
+                        driver.add_cookie({"name": "shopee_tob_token", "value": saved["shopee_tob_token"]})
+                        if saved.get("shopee_tob_entity_id"):
+                            driver.add_cookie({"name": "shopee_tob_entity_id", "value": saved["shopee_tob_entity_id"]})
+                        for n, v in saved.get("extra_cookies", {}).items():
+                            try: driver.add_cookie({"name": n, "value": v})
+                            except: pass
+
+                        driver.get(PARTNER_DASHBOARD)
+                        time.sleep(4)
+                        current_url = driver.current_url.lower()
+                        is_logged_in = any(kw in current_url for kw in ["dashboard", "merchant-selector", "onboarding"])
+                        if is_logged_in:
+                            log.info("✅ [PUSH_BROWSER] Restored session successfully from file.")
+                except Exception as sf_err:
+                    log.warning(f"⚠️ [PUSH_BROWSER] Failed to restore session from file: {sf_err}")
+
+        if not is_logged_in:
             # ── Step 2: Login dengan username + password ─────────────────────
             log.info(f"🔐 [PUSH_BROWSER] Belum login, membuka halaman login...")
             driver.get(PARTNER_LOGIN_URL)
@@ -550,11 +583,13 @@ def get_push_session(
                                 # Cek jika pengguna memilih saluran WhatsApp via Web UI
                                 req_channel = (data.get("requested_channel") or "").lower()
                                 if req_channel == "whatsapp" and not whatsapp_triggered:
-                                    whatsapp_triggered = True
                                     log.info(f"📲 [PUSH_BROWSER] Pengguna memilih WhatsApp di Web UI! Menjalankan 'metode verifikasi lainnya'...")
                                     try:
                                         from core.browser import _handle_verification_method_selection
-                                        _handle_verification_method_selection(driver, target_method="whatsapp")
+                                        success = _handle_verification_method_selection(driver, target_method="whatsapp")
+                                        if success:
+                                            whatsapp_triggered = True
+                                            log.info("✅ [PUSH_BROWSER] Pemicuan WhatsApp OTP sukses!")
                                     except Exception as ch_err:
                                         log.error(f"Gagal memproses pemicuan WhatsApp OTP: {ch_err}")
 

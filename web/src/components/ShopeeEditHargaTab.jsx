@@ -178,7 +178,7 @@ function AdjustBar({ onApply, buttonText = "OK", extraActions = null }) {
 }
 
 // ─── Shopee Interactive OTP Modal ────────────────────────────────────────────
-function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submitting, statusMsg }) {
+function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submitting, statusMsg, apiBaseUrl, apiKey }) {
   const [step, setStep] = useState(1); // 1: Select Channel, 2: 60s Timer (WhatsApp), 3: Enter OTP
   const [otpCode, setOtpCode] = useState("");
   const [otpChannel, setOtpChannel] = useState("sms"); // "sms" | "whatsapp"
@@ -215,9 +215,13 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       setTimer60(60);
       setStep(2); // Start 60-second countdown timer phase
       try {
-        await fetch(`${API_BASE_URL}/api/shopee/select-otp-channel`, {
+        const baseUrl = apiBaseUrl || "";
+        await fetch(`${baseUrl}/api/shopee/select-otp-channel`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-API-Key": apiKey || ""
+          },
           body: JSON.stringify({ username, channel: "whatsapp" })
         });
       } catch (err) {
@@ -1617,6 +1621,8 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         phone={otpModal.phone}
         submitting={otpModal.submitting}
         statusMsg={otpModal.statusMsg}
+        apiBaseUrl={API_BASE_URL}
+        apiKey={API_SECRET_KEY}
         onSubmitOTP={handleSubmittedOTP}
         onCancel={() => setOtpModal(p => ({ ...p, isOpen: false }))}
       />

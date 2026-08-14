@@ -332,21 +332,20 @@ def sync_sheets(db: Session = Depends(get_db)):
             if pd.notna(pwd_val) and str(pwd_val).strip() != "":
                 password = str(pwd_val).strip()
         elif platform == "gofood":
-            # GoFood uses Email Login Go 1 or Email Login Go 2 (No phone login)
+            # GoFood strictly uses Email Login Go 1 (Kolom Y), Email Login Go 2 (Kolom Z), or Email (Kolom P)
             email_1 = row.get("Email Login Go 1")
             email_2 = row.get("Email Login Go 2")
-            user_val = email_1 if pd.notna(email_1) and "@" in str(email_1) else email_2
+            email_p = row.get("Email")
+            email_o = row.get("Nama Akses Mitra")
 
-            if pd.notna(user_val) and "@" in str(user_val):
-                username = str(user_val).strip()
-            else:
-                # Fallback to username.1 if email not found
-                user_1 = row.get("Nama Pengguna.1")
-                if pd.notna(user_1) and str(user_1).strip() != "" and str(user_1).strip() != "-":
-                    username = str(user_1).strip()
+            for candidate in [email_1, email_2, email_p, email_o]:
+                if pd.notna(candidate) and "@" in str(candidate) and str(candidate).strip() not in ("-", "", "nan", "None"):
+                    username = str(candidate).strip()
+                    break
 
-            pwd_val = row.get("Kata Sandi.1") if pd.notna(row.get("Kata Sandi.1")) else row.get("Kata Sandi")
-            if pd.notna(pwd_val) and str(pwd_val).strip() != "" and str(pwd_val).strip() != "-":
+            # Never fallback to Shopee staff 'allvbadmin' (Nama Pengguna.1) for GoFood!
+            pwd_val = row.get("Kata Sandi") if pd.notna(row.get("Kata Sandi")) else row.get("Kata Sandi.1")
+            if pd.notna(pwd_val) and str(pwd_val).strip() not in ("-", "", "nan", "None"):
                 password = str(pwd_val).strip()
 
         if not username:
@@ -422,6 +421,8 @@ def sync_sheets(db: Session = Depends(get_db)):
             if merchant_name and merchant_name != "-":
                 db_outlet.merchant_name = merchant_name
             db_outlet.nama_outlet = nama_outlet or db_outlet.nama_resto_final or db_outlet.merchant_name
+            if cabang:
+                db_outlet.cabang = cabang
             db_outlet.nama_resto_final = nama_resto_final
             db_outlet.brand = brand
             db_outlet.is_active = True

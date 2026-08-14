@@ -1126,88 +1126,93 @@ def login_outlet(outlet_info, proxy_config=None):
                         print(f"   🤖 Langsung navigasi ke halaman menu outlet {store_id_clean}...")
                         safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/", wait_until="domcontentloaded")
                             
-                    # Tunggu 15 detik pertama hingga captured_menu terisi
-                    print("   🤖 Menunggu response API Menu ditangkap (15 detik)...")
-                    start_wait = time.time()
-                    while captured_menu is None and (time.time() - start_wait) < 15:
-                        page.wait_for_timeout(500)
+                    # Retry mechanism: Tunggu dan lakukan re-navigasi / reload up to 3x jika captured_menu belum terisi
+                    max_menu_retries = 3
+                    for menu_attempt in range(1, max_menu_retries + 1):
+                        if captured_menu is not None:
+                            break
 
-                    # Reload halaman jika 15 detik pertama tidak ada respon
-                    if captured_menu is None:
-                        print("   🔄 15 detik tanpa respons, melakukan Reload halaman menu...")
-                        try:
-                            page.reload(wait_until="domcontentloaded", timeout=15000)
-                            tutup_semua_popup(page)
-                        except Exception as reload_err:
-                            print(f"   ⚠️ Reload halaman warning: {reload_err}")
-
+                        print(f"   🤖 [Retry Mechanism {menu_attempt}/{max_menu_retries}] Menunggu response API Menu ditangkap (15 detik)...")
                         start_wait = time.time()
                         while captured_menu is None and (time.time() - start_wait) < 15:
                             page.wait_for_timeout(500)
 
-                    # Direct Fetch Fallback jika listener belum menangkap data menu setelah reload
-                    if captured_menu is None and access_token:
-                        print("   🤖 [Direct Fetch Fallback] Listener belum menangkap menu, mencoba fetch langsung via API Gojek...")
-                        token_for_fetch = access_token if str(access_token).lower().startswith("bearer ") else f"Bearer {access_token}"
-                        target_ids = [i for i in [captured_restaurant_id] if i and len(str(i)) == 36 and "-" in str(i)]
-                        try:
-                            storage_uuid = page.evaluate("""() => {
-                                const re = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-                                const fromUrl = re.exec(window.location.href || '');
-                                if (fromUrl) return fromUrl[0];
-                                for (let i = 0; i < localStorage.length; i++) {
-                                    const v = localStorage.getItem(localStorage.key(i)) || '';
-                                    const m = re.exec(v);
-                                    if (m) return m[0];
-                                }
-                                for (let i = 0; i < sessionStorage.length; i++) {
-                                    const v = sessionStorage.getItem(sessionStorage.key(i)) || '';
-                                    const m = re.exec(v);
-                                    if (m) return m[0];
-                                }
-                                return null;
-                            }""")
-                            if storage_uuid and storage_uuid not in target_ids:
-                                target_ids.append(storage_uuid)
-                        except Exception:
-                            pass
-                        try:
-                            direct_menu = page.evaluate("""async ({token, targetIds}) => {
-                                for (const restId of targetIds) {
-                                    const endpoints = [
-                                        `https://api.gojekapi.com/gofood/merchant/v1/restaurants/${restId}/menus`,
-                                        `https://api.gobiz.co.id/gofood/merchant/v1/restaurants/${restId}/menus`,
-                                        `https://api.gojekapi.com/gofood/merchant/v2/restaurants/${restId}/menus`
-                                    ];
-                                    for (const ep of endpoints) {
-                                        try {
-                                            const res = await fetch(ep, {
-                                                headers: {
-                                                    "Authorization": "Bearer " + token,
-                                                    "Authentication-Type": "go-id",
-                                                    "Gojek-Country-Code": "ID",
-                                                    "Accept": "application/json"
-                                                }
-                                            });
-                                            if (res.ok) {
-                                                const d = await res.json();
-                                                if (d && (d.menus || d.categories)) return d;
-                                            }
-                                        } catch (e) {}
-                                    }
-                                }
-                                return null;
-                            }""", {"token": access_token, "targetIds": target_ids})
+                        if captured_menu is None and menu_attempt < max_menu_retries:
+                            print(f"   🔄 [Retry Mechanism {menu_attempt}/{max_menu_retries}] Menu belum tertangkap, melakukan reload / re-navigasi...")
+                            try:
+                                if menu_attempt == 1:
+                                    page.reload(wait_until="domcontentloaded", timeout=15000)
+                                else:
+                                    safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/", wait_until="domcontentloaded")
+                                tutup_semua_popup(page)
+                            except Exception as reload_err:
+                                print(f"   ⚠️ Reload/re-navigasi warning: {reload_err}")
 
-                            if direct_menu:
-                                captured_menu = direct_menu
-                                print(f"   ✅ [Direct Fetch Fallback] Berhasil mengambil menu GoFood langsung dari API! Total kategori: {len(direct_menu.get('menus', []))}")
-                        except Exception as err:
-                            print(f"   ⚠️ [Direct Fetch Fallback] Error: {err}")
+                    # Direct Fetch & V2 Menu Groups Fallback jika listener belum menangkap data menu setelah retries
+                    if captured_menu is None:
+                        if access_token:
+                            print("   🤖 [Direct Fetch Fallback] Listener belum menangkap menu, mencoba fetch langsung via API Gojek...")
+                            token_for_fetch = access_token if str(access_token).lower().startswith("bearer ") else f"Bearer {access_token}"
+                            target_ids = [i for i in [captured_restaurant_id] if i and len(str(i)) == 36 and "-" in str(i)]
+                            try:
+                                storage_uuid = page.evaluate("""() => {
+                                    const re = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+                                    const fromUrl = re.exec(window.location.href || '');
+                                    if (fromUrl) return fromUrl[0];
+                                    for (let i = 0; i < localStorage.length; i++) {
+                                        const v = localStorage.getItem(localStorage.key(i)) || '';
+                                        const m = re.exec(v);
+                                        if (m) return m[0];
+                                    }
+                                    for (let i = 0; i < sessionStorage.length; i++) {
+                                        const v = sessionStorage.getItem(sessionStorage.key(i)) || '';
+                                        const m = re.exec(v);
+                                        if (m) return m[0];
+                                    }
+                                    return null;
+                                }""")
+                                if storage_uuid and storage_uuid not in target_ids:
+                                    target_ids.append(storage_uuid)
+                            except Exception:
+                                pass
+                            try:
+                                direct_menu = page.evaluate("""async ({token, targetIds}) => {
+                                    for (const restId of targetIds) {
+                                        const endpoints = [
+                                            `https://api.gojekapi.com/gofood/merchant/v1/restaurants/${restId}/menus`,
+                                            `https://api.gobiz.co.id/gofood/merchant/v1/restaurants/${restId}/menus`,
+                                            `https://api.gojekapi.com/gofood/merchant/v2/restaurants/${restId}/menus`
+                                        ];
+                                        for (const ep of endpoints) {
+                                            try {
+                                                const res = await fetch(ep, {
+                                                    headers: {
+                                                        "Authorization": "Bearer " + token,
+                                                        "Authentication-Type": "go-id",
+                                                        "Gojek-Country-Code": "ID",
+                                                        "Accept": "application/json"
+                                                    }
+                                                });
+                                                if (res.ok) {
+                                                    const d = await res.json();
+                                                    if (d && (d.menus || d.categories)) return d;
+                                                }
+                                            } catch (e) {}
+                                        }
+                                    }
+                                    return null;
+                                }""", {"token": access_token, "targetIds": target_ids})
+
+                                if direct_menu:
+                                    captured_menu = direct_menu
+                                    print(f"   ✅ [Direct Fetch Fallback] Berhasil mengambil menu GoFood langsung dari API! Total kategori: {len(direct_menu.get('menus', []))}")
+                            except Exception as err:
+                                print(f"   ⚠️ [Direct Fetch Fallback] Error: {err}")
 
                         if captured_menu is None and captured_v2_group_id:
                             try:
                                 from Gofood.GO.actions import _menu_api as go_api
+                                token_for_fetch = access_token if str(access_token).lower().startswith("bearer ") else f"Bearer {access_token}"
                                 v2_menu = go_api.fetch_menus_v2(page, token_for_fetch, captured_v2_group_id, passkey=captured_x_passkey)
                                 if v2_menu:
                                     captured_menu = {"menus": v2_menu} if isinstance(v2_menu, list) else v2_menu

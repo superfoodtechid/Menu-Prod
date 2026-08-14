@@ -58,13 +58,25 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         except RuntimeError:
             in_event_loop = False
 
-        if in_event_loop:
-            login_result = _run_login_outlet_in_clean_thread(store_metadata)
-        else:
-            login_result = login_outlet(store_metadata)
+        max_extract_attempts = 3
+        login_result = None
+        for extract_attempt in range(1, max_extract_attempts + 1):
+            if in_event_loop:
+                login_result = _run_login_outlet_in_clean_thread(store_metadata)
+            else:
+                login_result = login_outlet(store_metadata)
+                
+            if login_result and login_result.get('captured_menu'):
+                break
+                
+            if extract_attempt < max_extract_attempts:
+                print(f"[🔄 RETRY {extract_attempt}/{max_extract_attempts}] Penarikan menu GoFood belum berhasil, mengulang proses login browser dalam 3 detik...")
+                import time
+                time.sleep(3)
+
         if not login_result or not login_result.get('access_token'):
-            print(f"[!] Login atau penarikan menu dibatalkan/gagal.")
-            return False, "Proses login/intersepsi menu via browser gagal atau dibatalkan."
+            print(f"[!] Login atau penarikan menu dibatalkan/gagal setelah {max_extract_attempts} percobaan.")
+            return False, f"Proses login/intersepsi menu via browser gagal setelah {max_extract_attempts} percobaan."
     except Exception as e:
         print(f"[!] Terjadi kesalahan saat menjalankan browser login: {e}")
         return False, f"Terjadi kesalahan saat meluncurkan browser login: {e}"
@@ -76,8 +88,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     
     captured_menu = login_result.get('captured_menu')
     if not captured_menu:
-        print("[!] Gagal menangkap data menu dari browser pada sesi ini.")
-        return False, "Gagal menangkap data menu dari browser pada sesi ini."
+        print(f"[!] Gagal menangkap data menu dari browser pada sesi ini setelah {max_extract_attempts} percobaan.")
+        return False, f"Gagal menangkap data menu dari browser pada sesi ini setelah {max_extract_attempts} percobaan."
         
     try:
         with open(json_path, 'w', encoding='utf-8') as f:

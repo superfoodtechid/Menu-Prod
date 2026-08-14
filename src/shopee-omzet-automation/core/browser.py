@@ -732,6 +732,230 @@ def _trigger_and_extract_tokens(driver) -> tuple:
     return extract_tokens_from_driver(driver)
 
 
+def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: str = "", driver=None) -> str:
+    script_dir = Path(__file__).resolve().parent.parent
+    data_dir = script_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    otp_file = data_dir / f"otp_request_{username}.json"
+    
+    shopee_data_dir = script_dir.parent.parent / "shopee" / "data"
+    shopee_data_dir.mkdir(parents=True, exist_ok=True)
+    otp_file_alt = shopee_data_dir / f"otp_request_{username}.json"
+    
+    request_data = {
+        "status": "WAITING_OTP",
+        "username": username,
+        "phone": phone or "",
+        "error_msg": error_msg or "",
+        "requested_at": datetime.now().isoformat()
+    }
+    
+    try:
+        otp_file.write_text(json.dumps(request_data, indent=2))
+        try:
+            otp_file_alt.write_text(json.dumps(request_data, indent=2))
+        except Exception: pass
+        log.info(f"🔑 [OTP] File request OTP dibuat untuk '{username}': {otp_file.name} (error='{error_msg}'). Menunggu input OTP via Web UI / API (timeout {timeout}s)...")
+        print(f"DISCORD_OTP_REQUEST: {json.dumps(request_data)}", flush=True)
+    except Exception as e:
+        log.error(f"Gagal menulis file request OTP: {e}")
+        return ""
+    
+    start_wait = time.time()
+    whatsapp_triggered = False
+    while time.time() - start_wait < timeout:
+        target_fpath = otp_file if otp_file.exists() else (otp_file_alt if otp_file_alt.exists() else None)
+        if target_fpath:
+            try:
+                data = json.loads(target_fpath.read_text())
+
+                # Cek jika pengguna memilih saluran WhatsApp di Web UI
+                req_channel = (data.get("requested_channel") or "").lower()
+                if driver and req_channel == "whatsapp" and not whatsapp_triggered:
+                    log.info("📲 [OTP] Pengguna memilih WhatsApp di Web UI! Menjalankan 'metode verifikasi lainnya'...")
+                    try:
+                        success = _handle_verification_method_selection(driver, target_method="whatsapp")
+                        if success:
+                            whatsapp_triggered = True
+                            log.info("✅ [OTP] Pemicuan WhatsApp OTP sukses!")
+                    except Exception as ch_err:
+                        log.error(f"Gagal memproses pemicuan WhatsApp OTP: {ch_err}")
+
+                if data.get("status") == "RECEIVED" and data.get("code"):
+                    otp_code = str(data["code"]).strip()
+                    log.info(f"✅ [OTP] Kode OTP diterima ({data.get('channel', 'sms')}): {otp_code}")
+                    otp_file.unlink(missing_ok=True)
+                    otp_file_alt.unlink(missing_ok=True)
+                    return otp_code
+            except Exception as e:
+                log.error(f"Error membaca file OTP: {e}")
+        time.sleep(1)
+        
+    log.warning(f"❌ [OTP] Timeout ({timeout}s) menunggu OTP untuk '{username}'")
+    otp_file.unlink(missing_ok=True)
+    otp_file_alt.unlink(missing_ok=True)
+    return ""
+
+
+def set_session_file(val):
+    _thread_local.session_file = Path(val)
+
+class ThreadLocalSessionFileProxy:
+    def __getattr__(self, name):
+        return getattr(get_session_file(), name)
+        
+    def __str__(self):
+        return str(get_session_file())
+        
+    def __fspath__(self):
+        return str(get_session_file())
+
+    def __eq__(self, other):
+        return get_session_file() == other
+
+SESSION_FILE = ThreadLocalSessionFileProxy()
+
+
+def _handle_verification_method_selection(driver, target_method: str = None) -> bool:
+    """
+    Handling fleksibel verifikasi Shopee (SMS atau WhatsApp):
+    - target_method 'whatsapp': Mengklik 'metode verifikasi lainnya' lalu memilih WhatsApp.
+    - target_method 'sms': Menggunakan saluran SMS.
+    """
+    if not target_method:
+        target_method = os.getenv("SHOPEE_OTP_METHOD", "auto").lower()
+
+    log.info(f"🔑 [OTP] Menjalankan verifikasi saluran target='{target_method.upper()}'...")
+
+    try:
+        # Cek apakah layar saat ini adalah modal pilihan (atau opsi WhatsApp sudah ada di DOM)
+        is_method_screen = driver.execute_script("""
+            var bodyText = (document.body.innerText || document.body.textContent || "").toLowerCase();
+            return bodyText.includes("whatsapp") ||
+                   bodyText.includes("pilih metode") ||
+                   bodyText.includes("pilih cara") ||
+                   bodyText.includes("pilih verifikasi");
+        """)
+
+        # Jika target 'whatsapp' dan belum berada di layar pilihan / tombol whatsapp belum tampil
+        if not is_method_screen and target_method == "whatsapp":
+            log.info("🔍 [OTP] Memeriksa tautan 'metode verifikasi lainnya' (menunggu timer 60s Shopee)...")
+            start_wait = time.time()
+            while time.time() - start_wait < 65:
+                # 1. Cek apakah layar sudah berpindah ke modal pilihan atau opsi whatsapp sudah ada
+                is_method_screen = driver.execute_script("""
+                    var bodyText = (document.body.innerText || document.body.textContent || "").toLowerCase();
+                    return bodyText.includes("whatsapp") ||
+                           bodyText.includes("pilih metode") ||
+                           bodyText.includes("pilih cara") ||
+                           bodyText.includes("pilih verifikasi");
+                """)
+                if is_method_screen:
+                    log.info("✅ [OTP] Layar 'Pilih Metode Verifikasi' / Opsi WhatsApp terdeteksi!")
+                    break
+
+                # 2. Coba klik tautan 'metode verifikasi lainnya' via JS robust ke element & ancestor
+                clicked_link = driver.execute_script("""
+                    var keywords = ["metode verifikasi lainnya", "metode verifikasi lain", "coba metode verifikasi", "metode verifikasi"];
+                    var els = Array.from(document.querySelectorAll('a, button, span, div, p'));
+                    for (var i = 0; i < els.length; i++) {
+                        var el = els[i];
+                        var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
+                        for (var k = 0; k < keywords.length; k++) {
+                            if (txt.includes(keywords[k])) {
+                                var targets = [el, el.parentElement, el.closest('a, button, div, [role="button"]')].filter(Boolean);
+                                for (var t = 0; t < targets.length; t++) {
+                                    var target = targets[t];
+                                    try { target.click(); } catch(e) {}
+                                    try {
+                                        var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+                                        target.dispatchEvent(ev);
+                                    } catch(e) {}
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                """)
+
+                if clicked_link:
+                    log.info("👇 [OTP] Berhasil mengklik tautan 'metode verifikasi lainnya'!")
+                    time.sleep(2)
+                    is_method_screen = driver.execute_script("""
+                        var bodyText = (document.body.innerText || document.body.textContent || "").toLowerCase();
+                        return bodyText.includes("whatsapp") ||
+                               bodyText.includes("pilih metode") ||
+                               bodyText.includes("pilih cara") ||
+                               bodyText.includes("pilih verifikasi");
+                    """)
+                    if is_method_screen:
+                        log.info("✅ [OTP] Layar 'Pilih Metode Verifikasi' / Opsi WhatsApp terdeteksi!")
+                        break
+
+                time.sleep(1)
+
+        # Jika layar menunjukkan modal pilihan saluran (SMS / WhatsApp / Telepon)
+        if is_method_screen or target_method == "whatsapp":
+            if target_method == "whatsapp":
+                log.info("🔍 [OTP] Mengklik opsi verifikasi: 'WhatsApp'...")
+                clicked_wa = driver.execute_script("""
+                    var els = Array.from(document.querySelectorAll('button, div, span, p, a, label'));
+                    for (var i = 0; i < els.length; i++) {
+                        var el = els[i];
+                        var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
+                        if (txt.includes("whatsapp")) {
+                            var targets = [el, el.parentElement, el.closest('button, div, a, [role="button"]')].filter(Boolean);
+                            for (var t = 0; t < targets.length; t++) {
+                                var target = targets[t];
+                                try { target.click(); } catch(e) {}
+                                try {
+                                    var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+                                    target.dispatchEvent(ev);
+                                } catch(e) {}
+                            }
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                if clicked_wa:
+                    log.info("✅ [OTP] Berhasil mengklik pilihan verifikasi WhatsApp!")
+                    time.sleep(2)
+                    return True
+
+            elif target_method == "sms":
+                log.info("🔍 [OTP] Mengklik opsi verifikasi: 'SMS'...")
+                clicked_sms = driver.execute_script("""
+                    var els = Array.from(document.querySelectorAll('button, div, span, p, a, label'));
+                    for (var i = 0; i < els.length; i++) {
+                        var el = els[i];
+                        var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
+                        if (txt.includes("sms")) {
+                            var targets = [el, el.parentElement, el.closest('button, div, a, [role="button"]')].filter(Boolean);
+                            for (var t = 0; t < targets.length; t++) {
+                                var target = targets[t];
+                                try { target.click(); } catch(e) {}
+                                try {
+                                    var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+                                    target.dispatchEvent(ev);
+                                } catch(e) {}
+                            }
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                if clicked_sms:
+                    log.info("✅ [OTP] Berhasil mengklik pilihan verifikasi SMS!")
+                    time.sleep(2)
+                    return True
+    except Exception as err:
+        log.debug(f"⚠️ [OTP] Verification method handling error: {err}")
+
+    return False
+
+
 # ── Driver Initialization ──────────────────────────────────────────────────────
 
 def resolve_shopee_headless(headless_override: bool = None) -> bool:
@@ -754,88 +978,6 @@ def resolve_shopee_headless(headless_override: bool = None) -> bool:
 
     if headless_override is not None:
         return headless_override
-
-    return False
-
-
-def _handle_verification_method_selection(driver, target_method: str = None) -> bool:
-    """
-    Handling fleksibel verifikasi Shopee (SMS atau WhatsApp):
-    - target_method 'auto' (default): Menggunakan SMS/WhatsApp secara fleksibel tanpa memaksa ganti saluran.
-    - target_method 'whatsapp': Mengklik 'metode verifikasi lainnya' lalu memilih WhatsApp.
-    - target_method 'sms': Menggunakan saluran SMS.
-    """
-    if not target_method:
-        target_method = os.getenv("SHOPEE_OTP_METHOD", "auto").lower()
-
-    try:
-        # Cek apakah layar saat ini adalah modal pilihan 'Pilih Metode Verifikasi'
-        is_method_screen = driver.execute_script("""
-            var bodyText = (document.body.innerText || "").toLowerCase();
-            return bodyText.includes("pilih metode verifikasi") || bodyText.includes("pilih cara verifikasi");
-        """)
-
-        # Jika pengguna secara spesifik meminta WhatsApp dan masih di layar 'Masukkan Kode Verifikasi' (SMS)
-        if not is_method_screen and target_method == "whatsapp":
-            log.info("🔍 [OTP] Memeriksa tautan 'metode verifikasi lainnya' (menunggu timer 60s Shopee)...")
-            start_wait = time.time()
-            clicked_link = False
-            while time.time() - start_wait < 65:
-                is_method_screen = driver.execute_script("""
-                    var bodyText = (document.body.innerText || "").toLowerCase();
-                    return bodyText.includes("pilih metode verifikasi") || bodyText.includes("pilih cara verifikasi");
-                """)
-                if is_method_screen:
-                    break
-
-                other_method_links = driver.find_elements(By.XPATH,
-                    "//*[contains(text(),'metode verifikasi lainnya') or contains(text(),'metode verifikasi lain') or contains(text(),'coba metode verifikasi')] | "
-                    "//a[contains(text(),'metode verifikasi')] | "
-                    "//*[contains(@class,'link') or contains(@class,'btn') or contains(@class,'action')][contains(text(),'metode verifikasi')]"
-                )
-                for link in other_method_links:
-                    if link.is_displayed():
-                        try:
-                            log.info("👇 [OTP] Mengklik 'metode verifikasi lainnya'...")
-                            driver.execute_script("arguments[0].click();", link)
-                            time.sleep(2)
-                            is_method_screen = True
-                            clicked_link = True
-                            break
-                        except Exception: pass
-                if clicked_link or is_method_screen:
-                    break
-                time.sleep(1)
-
-        # Jika layar menunjukkan modal pilihan saluran (SMS / WhatsApp / Telepon)
-        if is_method_screen:
-            if target_method == "whatsapp":
-                wa_btns = driver.find_elements(By.XPATH,
-                    "//button[contains(translate(.,'WHATSAPP','whatsapp'),'whatsapp')] | "
-                    "//div[contains(@class,'verification') or contains(@class,'method') or contains(@class,'card') or contains(@class,'item') or contains(@class,'option')]//*[contains(text(),'WhatsApp')] | "
-                    "//*[contains(text(),'WhatsApp') and not(self::script)]"
-                )
-                for wbtn in wa_btns:
-                    if wbtn.is_displayed():
-                        log.info("👇 [OTP] Mengklik opsi verifikasi: 'WhatsApp'")
-                        driver.execute_script("arguments[0].click();", wbtn)
-                        time.sleep(2)
-                        return True
-
-            # Jika target_method 'sms' atau 'auto'
-            sms_btns = driver.find_elements(By.XPATH,
-                "//button[contains(translate(.,'SMS','sms'),'sms')] | "
-                "//div[contains(@class,'verification') or contains(@class,'method') or contains(@class,'card') or contains(@class,'item') or contains(@class,'option')]//*[contains(text(),'SMS')] | "
-                "//*[contains(text(),'SMS') and not(self::script)]"
-            )
-            for sbtn in sms_btns:
-                if sbtn.is_displayed():
-                    log.info("👇 [OTP] Mengklik opsi verifikasi: 'SMS'")
-                    driver.execute_script("arguments[0].click();", sbtn)
-                    time.sleep(2)
-                    return True
-    except Exception as err:
-        log.debug(f"⚠️ [OTP] Verification method handling error: {err}")
 
     return False
 
@@ -938,6 +1080,16 @@ def _init_driver(headless: bool = True):
 
 def _perform_login(driver, wait, username: str = None, password: str = None, phone: str = None, is_retry: bool = False, interactive: bool = True) -> bool:
     log.info("➡️  [AUTH] Starting login sequence...")
+    
+    # Cleanup any stale OTP request files from previous runs
+    script_dir = Path(__file__).resolve().parent.parent
+    shopee_dir = script_dir.parent.parent / "shopee"
+    for target_u in [username, phone]:
+        if target_u:
+            for d in [script_dir / "data", shopee_dir / "data"]:
+                if d.exists():
+                    (d / f"otp_request_{target_u}.json").unlink(missing_ok=True)
+
     if not phone and (not username or not password):
         raise Exception("Shopee credentials are not configured! Please configure them in 'credentials.json' at the project root directory.")
     
@@ -1854,21 +2006,25 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
             # Restore from file only on first attempt if not logged in
             if not is_logged_in and attempt == 0:
                 saved = load_session()
-                if saved:
-                    log.debug("🔍 Attempting to restore session from saved tokens...")
-                    driver.add_cookie({"name": "shopee_tob_token", "value": saved["shopee_tob_token"]})
-                    if saved.get("shopee_tob_entity_id"):
-                        driver.add_cookie({"name": "shopee_tob_entity_id", "value": saved["shopee_tob_entity_id"]})
-                    for n, v in saved.get("extra_cookies", {}).items():
-                        try: driver.add_cookie({"name": n, "value": v})
-                        except: pass
-                    
-                    driver.refresh()
-                    time.sleep(4)
-                    current_url = driver.current_url.lower()
-                    if "dashboard" in current_url or "merchant-selector" in current_url:
-                        log.info("✅ [SESSION] Restored from saved tokens.")
-                        is_logged_in = True
+                if saved and saved.get("shopee_tob_token"):
+                    log.info("🔍 Attempting to restore session from saved tokens...")
+                    try:
+                        driver.add_cookie({"name": "shopee_tob_token", "value": saved["shopee_tob_token"]})
+                        if saved.get("shopee_tob_entity_id"):
+                            driver.add_cookie({"name": "shopee_tob_entity_id", "value": saved["shopee_tob_entity_id"]})
+                        for n, v in saved.get("extra_cookies", {}).items():
+                            try: driver.add_cookie({"name": n, "value": v})
+                            except: pass
+                        
+                        # Re-navigate to PARTNER_DASHBOARD so cookies take effect on dashboard endpoint
+                        driver.get(PARTNER_DASHBOARD)
+                        time.sleep(4)
+                        current_url = driver.current_url.lower()
+                        if any(kw in current_url for kw in ["dashboard", "merchant-selector", "onboarding"]):
+                            log.info("✅ [SESSION] Restored successfully from saved tokens.")
+                            is_logged_in = True
+                    except Exception as _cookie_err:
+                        log.warning(f"  ⚠️ Cookie injection failed: {_cookie_err}")
 
             # On retry attempts, try injecting saved session tokens BEFORE resorting
             # to a full fresh login. Chrome may have crashed mid-session (causing
@@ -1886,10 +2042,10 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                         for n, v in saved.get("extra_cookies", {}).items():
                             try: driver.add_cookie({"name": n, "value": v})
                             except: pass
-                        driver.refresh()
+                        driver.get(PARTNER_DASHBOARD)
                         time.sleep(4)
                         current_url = driver.current_url.lower()
-                        if "dashboard" in current_url or "merchant-selector" in current_url:
+                        if any(kw in current_url for kw in ["dashboard", "merchant-selector", "onboarding"]):
                             log.info(f"✅ [SESSION] Restored from saved tokens on retry {attempt+1}.")
                             is_logged_in = True
                     except Exception as _cookie_err:
