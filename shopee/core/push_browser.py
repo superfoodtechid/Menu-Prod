@@ -538,17 +538,30 @@ def get_push_session(
                             log.info(f"🔑 [PUSH_BROWSER] Halaman OTP terdeteksi untuk '{username}'. Menulis OTP request...")
                             _write_otp_request(username)
                             otp_requested = True
+                            whatsapp_triggered = False
 
-                        # Cek apakah kode OTP sudah tersedia
+                        # Cek apakah pengguna memilih saluran WhatsApp atau kode OTP sudah tersedia
                         data_dir = AUTOMATION_DIR / "data"
                         otp_file = data_dir / f"otp_request_{username}.json"
                         try:
                             if otp_file.exists():
                                 data = json.loads(otp_file.read_text())
+                                
+                                # Cek jika pengguna memilih saluran WhatsApp via Web UI
+                                req_channel = (data.get("requested_channel") or "").lower()
+                                if req_channel == "whatsapp" and not whatsapp_triggered:
+                                    whatsapp_triggered = True
+                                    log.info(f"📲 [PUSH_BROWSER] Pengguna memilih WhatsApp di Web UI! Menjalankan 'metode verifikasi lainnya'...")
+                                    try:
+                                        from core.browser import _handle_verification_method_selection
+                                        _handle_verification_method_selection(driver, target_method="whatsapp")
+                                    except Exception as ch_err:
+                                        log.error(f"Gagal memproses pemicuan WhatsApp OTP: {ch_err}")
+
                                 if data.get("status") == "RECEIVED" and data.get("code"):
                                     otp_code = str(data["code"]).strip()
                                     otp_file.unlink(missing_ok=True)
-                                    log.info(f"✅ [PUSH_BROWSER] Mengisi OTP: {otp_code}")
+                                    log.info(f"✅ [PUSH_BROWSER] Mengisi OTP ({data.get('channel', 'sms')}): {otp_code}")
 
                                     # Isi kode OTP ke form
                                     otp_fields = []

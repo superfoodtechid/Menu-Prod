@@ -51,7 +51,7 @@ def get_session_file() -> Path:
         _thread_local.session_file = Path(__file__).resolve().parent.parent / "data" / "session.json"
     return _thread_local.session_file
 
-def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: str = "") -> str:
+def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: str = "", driver=None) -> str:
     script_dir = Path(__file__).resolve().parent.parent
     data_dir = script_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -74,13 +74,25 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: 
         return ""
     
     start_wait = time.time()
+    whatsapp_triggered = False
     while time.time() - start_wait < timeout:
         if otp_file.exists():
             try:
                 data = json.loads(otp_file.read_text())
+
+                # Cek jika pengguna memilih saluran WhatsApp di Web UI
+                req_channel = (data.get("requested_channel") or "").lower()
+                if driver and req_channel == "whatsapp" and not whatsapp_triggered:
+                    whatsapp_triggered = True
+                    log.info("📲 [OTP] Pengguna memilih WhatsApp di Web UI! Menjalankan 'metode verifikasi lainnya'...")
+                    try:
+                        _handle_verification_method_selection(driver, target_method="whatsapp")
+                    except Exception as ch_err:
+                        log.error(f"Gagal memproses pemicuan WhatsApp OTP: {ch_err}")
+
                 if data.get("status") == "RECEIVED" and data.get("code"):
                     otp_code = str(data["code"]).strip()
-                    log.info(f"✅ [OTP] Kode OTP diterima: {otp_code}")
+                    log.info(f"✅ [OTP] Kode OTP diterima ({data.get('channel', 'sms')}): {otp_code}")
                     otp_file.unlink(missing_ok=True)
                     return otp_code
             except Exception as e:
@@ -1114,7 +1126,7 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                 otp_error_msg = ""
                 for otp_attempt in range(3):  # Maksimal 3x percobaan masukan OTP
                     log.info(f"🔑 [AUTH] Verifikasi / OTP diperlukan untuk '{username or phone}' (Percobaan {otp_attempt + 1}/3)...")
-                    otp_code = get_otp_code(username or "user", phone or "", error_msg=otp_error_msg)
+                    otp_code = get_otp_code(username or "user", phone or "", error_msg=otp_error_msg, driver=driver)
                     if not otp_code:
                         log.error(f"❌ [AUTH] Timeout atau gagal menerima Kode OTP untuk '{username or phone}'")
                         return False
