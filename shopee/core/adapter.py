@@ -26,7 +26,7 @@ class ShopeeAdapter(PlatformAdapter):
             "password": password,
             "merchant_name": "Bootstrap",
         }
-        client, _ = _boot_client(store_metadata, headless=True)
+        client, _ = _boot_client(store_metadata, headless=None)
         if not client:
             print("Failed to boot Shopee client for listing stores")
             return []
@@ -57,7 +57,7 @@ class ShopeeAdapter(PlatformAdapter):
             "brand": "",
         }
 
-        client, _ = _boot_client(store_metadata, headless=True)
+        client, _ = _boot_client(store_metadata, headless=None)
         if not client:
             raise Exception("Failed to boot Shopee client")
 
@@ -102,7 +102,7 @@ class ShopeeAdapter(PlatformAdapter):
             "brand": "",
         }
 
-        client, _ = _boot_client(store_metadata, headless=True)
+        client, _ = _boot_client(store_metadata, headless=None)
         if not client:
             raise Exception("Failed to boot Shopee client")
 
@@ -235,7 +235,7 @@ class ShopeeAdapter(PlatformAdapter):
             "brand": "",
         }
         try:
-            client, _ = _boot_client(store_metadata, headless=True)
+            client, _ = _boot_client(store_metadata, headless=None)
             if not client:
                 return {"active": False, "msg": "Client boot failed"}
 
@@ -269,7 +269,7 @@ class ShopeeAdapter(PlatformAdapter):
             "brand": "",
         }
 
-        client, _ = _boot_client(store_metadata, headless=True)
+        client, _ = _boot_client(store_metadata, headless=None)
         if not client:
             return [f"Gagal login/koneksi API Shopee"]
 

@@ -20,7 +20,7 @@ IMG_BASE = "https://down-id.img.susercontent.com/file"
 
 def list_menu_shopee(store_metadata: dict) -> tuple[bool, list | str]:
     from shopee.core.item.edit import _boot_client
-    client, err = _boot_client(store_metadata, headless=True)
+    client, err = _boot_client(store_metadata, headless=None)
     if not client:
         return False, f"Boot client failed: {err}"
         
@@ -54,7 +54,7 @@ def get_shopee_master_credentials() -> tuple[str, str]:
     return "allvbadmin", "Master!00!"
 
 
-def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = False):
+def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = None):
     store_id = store_metadata.get('store_id', '')
     if isinstance(store_id, str):
         store_id = store_id.strip().split('.')[0]

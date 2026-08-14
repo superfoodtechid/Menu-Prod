@@ -722,7 +722,114 @@ def _trigger_and_extract_tokens(driver) -> tuple:
 
 # ── Driver Initialization ──────────────────────────────────────────────────────
 
-def _init_driver(headless: bool):
+def resolve_shopee_headless(headless_override: bool = None) -> bool:
+    env_shopee = os.getenv("HEADLESS_SHOPEE")
+    if env_shopee is not None:
+        return env_shopee.lower() in ("true", "1", "yes")
+
+    try:
+        cur = Path(__file__).resolve().parent
+        for _ in range(4):
+            cfg = cur / "config.json"
+            if cfg.exists():
+                with open(cfg, "r") as f:
+                    data = json.load(f)
+                    if "headless_shopee" in data:
+                        return bool(data["headless_shopee"])
+            cur = cur.parent
+    except Exception:
+        pass
+
+    if headless_override is not None:
+        return headless_override
+
+    return False
+
+
+def _handle_verification_method_selection(driver, target_method: str = None) -> bool:
+    """
+    Handling fleksibel verifikasi Shopee (SMS atau WhatsApp):
+    - target_method 'auto' (default): Menggunakan SMS/WhatsApp secara fleksibel tanpa memaksa ganti saluran.
+    - target_method 'whatsapp': Mengklik 'metode verifikasi lainnya' lalu memilih WhatsApp.
+    - target_method 'sms': Menggunakan saluran SMS.
+    """
+    if not target_method:
+        target_method = os.getenv("SHOPEE_OTP_METHOD", "auto").lower()
+
+    try:
+        # Cek apakah layar saat ini adalah modal pilihan 'Pilih Metode Verifikasi'
+        is_method_screen = driver.execute_script("""
+            var bodyText = (document.body.innerText || "").toLowerCase();
+            return bodyText.includes("pilih metode verifikasi") || bodyText.includes("pilih cara verifikasi");
+        """)
+
+        # Jika pengguna secara spesifik meminta WhatsApp dan masih di layar 'Masukkan Kode Verifikasi' (SMS)
+        if not is_method_screen and target_method == "whatsapp":
+            log.info("🔍 [OTP] Memeriksa tautan 'metode verifikasi lainnya' (menunggu timer 60s Shopee)...")
+            start_wait = time.time()
+            clicked_link = False
+            while time.time() - start_wait < 65:
+                is_method_screen = driver.execute_script("""
+                    var bodyText = (document.body.innerText || "").toLowerCase();
+                    return bodyText.includes("pilih metode verifikasi") || bodyText.includes("pilih cara verifikasi");
+                """)
+                if is_method_screen:
+                    break
+
+                other_method_links = driver.find_elements(By.XPATH,
+                    "//*[contains(text(),'metode verifikasi lainnya') or contains(text(),'metode verifikasi lain') or contains(text(),'coba metode verifikasi')] | "
+                    "//a[contains(text(),'metode verifikasi')] | "
+                    "//*[contains(@class,'link') or contains(@class,'btn') or contains(@class,'action')][contains(text(),'metode verifikasi')]"
+                )
+                for link in other_method_links:
+                    if link.is_displayed():
+                        try:
+                            log.info("👇 [OTP] Mengklik 'metode verifikasi lainnya'...")
+                            driver.execute_script("arguments[0].click();", link)
+                            time.sleep(2)
+                            is_method_screen = True
+                            clicked_link = True
+                            break
+                        except Exception: pass
+                if clicked_link or is_method_screen:
+                    break
+                time.sleep(1)
+
+        # Jika layar menunjukkan modal pilihan saluran (SMS / WhatsApp / Telepon)
+        if is_method_screen:
+            if target_method == "whatsapp":
+                wa_btns = driver.find_elements(By.XPATH,
+                    "//button[contains(translate(.,'WHATSAPP','whatsapp'),'whatsapp')] | "
+                    "//div[contains(@class,'verification') or contains(@class,'method') or contains(@class,'card') or contains(@class,'item') or contains(@class,'option')]//*[contains(text(),'WhatsApp')] | "
+                    "//*[contains(text(),'WhatsApp') and not(self::script)]"
+                )
+                for wbtn in wa_btns:
+                    if wbtn.is_displayed():
+                        log.info("👇 [OTP] Mengklik opsi verifikasi: 'WhatsApp'")
+                        driver.execute_script("arguments[0].click();", wbtn)
+                        time.sleep(2)
+                        return True
+
+            # Jika target_method 'sms' atau 'auto'
+            sms_btns = driver.find_elements(By.XPATH,
+                "//button[contains(translate(.,'SMS','sms'),'sms')] | "
+                "//div[contains(@class,'verification') or contains(@class,'method') or contains(@class,'card') or contains(@class,'item') or contains(@class,'option')]//*[contains(text(),'SMS')] | "
+                "//*[contains(text(),'SMS') and not(self::script)]"
+            )
+            for sbtn in sms_btns:
+                if sbtn.is_displayed():
+                    log.info("👇 [OTP] Mengklik opsi verifikasi: 'SMS'")
+                    driver.execute_script("arguments[0].click();", sbtn)
+                    time.sleep(2)
+                    return True
+    except Exception as err:
+        log.debug(f"⚠️ [OTP] Verification method handling error: {err}")
+
+    return False
+
+
+def _init_driver(headless: bool = True):
+    headless = resolve_shopee_headless(headless)
     options = Options()
     options.add_argument("--log-level=3")
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -996,11 +1103,13 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                 var bodyText = (document.body.innerText || "").toLowerCase();
                 return texts.some(function(t) { return bodyText.includes(t); });
             """)
-
             if otp_input or is_verification_page:
                 if not interactive:
                     log.error(f"❌ [AUTH] OTP or verification is required for '{username or phone}'. Aborting in non-interactive mode.")
                     return False
+
+                # Handle 2-step verification method selection ('metode verifikasi lainnya' -> WhatsApp)
+                _handle_verification_method_selection(driver)
 
                 otp_error_msg = ""
                 for otp_attempt in range(3):  # Maksimal 3x percobaan masukan OTP
@@ -1701,7 +1810,8 @@ def return_to_selector(driver) -> bool:
             pass
         return True
 
-def get_session(username=None, password=None, phone=None, headless=True, close_browser=True, target_name=None, interactive=True) -> dict | None:
+def get_session(username=None, password=None, phone=None, headless=None, close_browser=True, target_name=None, interactive=True) -> dict | None:
+    headless = resolve_shopee_headless(headless)
     for attempt in range(3):
         log.info(f"🌐 [BROWSER] Launching (headless={headless}, attempt={attempt+1}/3)...")
         driver = _init_driver(headless=headless)
