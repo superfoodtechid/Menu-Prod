@@ -332,21 +332,20 @@ def sync_sheets(db: Session = Depends(get_db)):
             if pd.notna(pwd_val) and str(pwd_val).strip() != "":
                 password = str(pwd_val).strip()
         elif platform == "gofood":
-            # GoFood uses Email Login Go 1 or Email Login Go 2 (No phone login)
+            # GoFood strictly uses Email Login Go 1 (Kolom Y), Email Login Go 2 (Kolom Z), or Email (Kolom P)
             email_1 = row.get("Email Login Go 1")
             email_2 = row.get("Email Login Go 2")
-            user_val = email_1 if pd.notna(email_1) and "@" in str(email_1) else email_2
+            email_p = row.get("Email")
+            email_o = row.get("Nama Akses Mitra")
 
-            if pd.notna(user_val) and "@" in str(user_val):
-                username = str(user_val).strip()
-            else:
-                # Fallback to username.1 if email not found
-                user_1 = row.get("Nama Pengguna.1")
-                if pd.notna(user_1) and str(user_1).strip() != "" and str(user_1).strip() != "-":
-                    username = str(user_1).strip()
+            for candidate in [email_1, email_2, email_p, email_o]:
+                if pd.notna(candidate) and "@" in str(candidate) and str(candidate).strip() not in ("-", "", "nan", "None"):
+                    username = str(candidate).strip()
+                    break
 
-            pwd_val = row.get("Kata Sandi.1") if pd.notna(row.get("Kata Sandi.1")) else row.get("Kata Sandi")
-            if pd.notna(pwd_val) and str(pwd_val).strip() != "" and str(pwd_val).strip() != "-":
+            # Never fallback to Shopee staff 'allvbadmin' (Nama Pengguna.1) for GoFood!
+            pwd_val = row.get("Kata Sandi") if pd.notna(row.get("Kata Sandi")) else row.get("Kata Sandi.1")
+            if pd.notna(pwd_val) and str(pwd_val).strip() not in ("-", "", "nan", "None"):
                 password = str(pwd_val).strip()
 
         if not username:
@@ -422,6 +421,8 @@ def sync_sheets(db: Session = Depends(get_db)):
             if merchant_name and merchant_name != "-":
                 db_outlet.merchant_name = merchant_name
             db_outlet.nama_outlet = nama_outlet or db_outlet.nama_resto_final or db_outlet.merchant_name
+            if cabang:
+                db_outlet.cabang = cabang
             db_outlet.nama_resto_final = nama_resto_final
             db_outlet.brand = brand
             db_outlet.is_active = True
@@ -3751,6 +3752,44 @@ class ShopeeOTPRequest(BaseModel):
     username: str
     code: str
     channel: Optional[str] = "sms"
+
+class ShopeeOTPChannelRequest(BaseModel):
+    username: str
+    channel: str  # "sms" | "whatsapp"
+
+@app.post("/api/shopee/select-otp-channel")
+def select_shopee_otp_channel(req: ShopeeOTPChannelRequest):
+    """Saves user's selected OTP channel (e.g. WhatsApp) to trigger channel switching in browser automation."""
+    username = req.username.strip()
+    channel = req.channel.strip().lower()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+
+    shopee_data_dirs = [
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data"
+    ]
+    for d in shopee_data_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        fpath = d / f"otp_request_{username}.json"
+        if fpath.exists():
+            try:
+                data = json.loads(fpath.read_text())
+                data["requested_channel"] = channel
+                data["channel_requested_at"] = datetime.now().isoformat()
+                fpath.write_text(json.dumps(data, indent=2))
+            except Exception as e:
+                log.error(f"Error updating OTP channel in {fpath}: {e}")
+        else:
+            request_data = {
+                "status": "WAITING_OTP",
+                "username": username,
+                "requested_channel": channel,
+                "requested_at": datetime.now().isoformat()
+            }
+            fpath.write_text(json.dumps(request_data, indent=2))
+
+    return {"status": "SUCCESS", "channel": channel, "message": f"Channel {channel.upper()} selected for {username}"}
 
 @app.get("/api/shopee/otp-status")
 def get_shopee_otp_status(username: Optional[str] = None):
