@@ -1031,12 +1031,12 @@ def login_outlet(outlet_info, proxy_config=None):
                         nonlocal captured_menu, captured_restaurant_id, captured_v2_group_id
                         url_lower = response.url.lower()
 
-                        if "/restaurants/" in url_lower:
+                        if "/restaurants/" in url_lower or "/outlets/" in url_lower or "/gofood/" in url_lower:
                             parts = response.url.split("/")
                             for idx, part in enumerate(parts):
-                                if part.lower() == "restaurants" and idx + 1 < len(parts):
+                                if part.lower() in ("restaurants", "outlets", "gofood") and idx + 1 < len(parts):
                                     cand = parts[idx + 1].split("?")[0]
-                                    if len(cand) == 36 and "-" in cand:
+                                    if cand and cand not in ("menu-items", "menu", "menus", ""):
                                         captured_restaurant_id = cand
                                         break
 
@@ -1048,25 +1048,22 @@ def login_outlet(outlet_info, proxy_config=None):
                                     for idx, part in enumerate(parts):
                                         if part == "menu_groups" and idx + 1 < len(parts):
                                             gid = parts[idx + 1].split("?")[0]
-                                            if len(gid) == 36 and gid.count("-") == 4:
+                                            if len(gid) >= 10:
                                                 captured_v2_group_id = gid
                                                 print(f"   ✅ [Listener] Berhasil menangkap V2 Menu Group ID: {gid}")
                                                 break
                             except Exception:
                                 pass
 
-                        if ("/menus" in url_lower or "menu_groups" in url_lower) and (
-                            "gofood/merchant" in url_lower or "/restaurants/" in url_lower or "/menu_groups/" in url_lower
-                        ):
+                        if ("/menus" in url_lower or "menu_groups" in url_lower or "menu-items" in url_lower) and response.status == 200:
                             try:
-                                if response.status == 200:
-                                    data = response.json()
-                                    if isinstance(data, dict) and ("menus" in data or "categories" in data):
-                                        captured_menu = data
-                                        print(f"   ✅ [Listener] Berhasil menangkap response API Menu! Total kategori: {len(data.get('menus', []))}")
+                                data = response.json()
+                                if isinstance(data, dict) and ("menus" in data or "categories" in data or "data" in data):
+                                    captured_menu = data
+                                    print(f"   ✅ [Listener] Berhasil menangkap response API Menu! Total kategori: {len(data.get('menus', data.get('categories', [])))}")
                             except Exception as e:
-                                print(f"   ⚠️ [Listener] Gagal memproses JSON response: {e}")
-                                
+                                pass
+
                         if "variant_categories" in response.url:
                             try:
                                 if response.status == 200:
@@ -1076,7 +1073,7 @@ def login_outlet(outlet_info, proxy_config=None):
                                         captured_modifiers.extend(cats)
                                         print(f"   ✅ [Listener] Berhasil menangkap {len(cats)} modifier category dari API!")
                             except Exception as e:
-                                print(f"   ⚠️ [Listener] Gagal memproses JSON modifier response: {e}")
+                                pass
                     
                     page.on("request", handle_request_passkey)
                     page.on("response", handle_response)
@@ -1126,88 +1123,105 @@ def login_outlet(outlet_info, proxy_config=None):
                         print(f"   🤖 Langsung navigasi ke halaman menu outlet {store_id_clean}...")
                         safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/", wait_until="domcontentloaded")
                             
-                    # Retry mechanism: Tunggu dan lakukan re-navigasi / reload up to 3x jika captured_menu belum terisi
-                    max_menu_retries = 3
+                    # Ultra-reliable Menu Capture Flow (2x max retries)
+                    max_menu_retries = 2
                     for menu_attempt in range(1, max_menu_retries + 1):
                         if captured_menu is not None:
                             break
 
-                        print(f"   🤖 [Retry Mechanism {menu_attempt}/{max_menu_retries}] Menunggu response API Menu ditangkap (15 detik)...")
+                        print(f"   🤖 [Retry Mechanism {menu_attempt}/{max_menu_retries}] Menunggu response API Menu ditangkap listener (maksimal 8 detik)...")
                         start_wait = time.time()
-                        while captured_menu is None and (time.time() - start_wait) < 15:
+                        while captured_menu is None and (time.time() - start_wait) < 8:
                             page.wait_for_timeout(500)
 
-                        if captured_menu is None and menu_attempt < max_menu_retries:
-                            print(f"   🔄 [Retry Mechanism {menu_attempt}/{max_menu_retries}] Menu belum tertangkap, melakukan reload / re-navigasi...")
-                            try:
-                                if menu_attempt == 1:
-                                    page.reload(wait_until="domcontentloaded", timeout=15000)
-                                else:
-                                    safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/", wait_until="domcontentloaded")
-                                tutup_semua_popup(page)
-                            except Exception as reload_err:
-                                print(f"   ⚠️ Reload/re-navigasi warning: {reload_err}")
+                        if captured_menu is not None:
+                            break
 
-                    # Direct Fetch & V2 Menu Groups Fallback jika listener belum menangkap data menu setelah retries
-                    if captured_menu is None:
-                        if access_token:
-                            print("   🤖 [Direct Fetch Fallback] Listener belum menangkap menu, mencoba fetch langsung via API Gojek...")
+                        # Jika listener belum menangkap menu setelah 8 detik, eksekusi Direct Fetch API & V2 API
+                        if captured_menu is None and access_token:
+                            print(f"   🤖 [Direct Fetch Fallback {menu_attempt}/{max_menu_retries}] Memulai fetch langsung via API Gojek...")
                             token_for_fetch = access_token if str(access_token).lower().startswith("bearer ") else f"Bearer {access_token}"
-                            target_ids = [i for i in [captured_restaurant_id] if i and len(str(i)) == 36 and "-" in str(i)]
+                            
+                            target_ids = []
+                            for cand in [store_id_clean, captured_restaurant_id]:
+                                if cand and str(cand).strip() not in ("-", "", "None") and str(cand).strip() not in target_ids:
+                                    target_ids.append(str(cand).strip())
+                                    
                             try:
-                                storage_uuid = page.evaluate("""() => {
-                                    const re = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-                                    const fromUrl = re.exec(window.location.href || '');
-                                    if (fromUrl) return fromUrl[0];
-                                    for (let i = 0; i < localStorage.length; i++) {
-                                        const v = localStorage.getItem(localStorage.key(i)) || '';
-                                        const m = re.exec(v);
-                                        if (m) return m[0];
-                                    }
-                                    for (let i = 0; i < sessionStorage.length; i++) {
-                                        const v = sessionStorage.getItem(sessionStorage.key(i)) || '';
-                                        const m = re.exec(v);
-                                        if (m) return m[0];
-                                    }
-                                    return null;
+                                storage_ids = page.evaluate("""() => {
+                                    const found = [];
+                                    const add = (v) => {
+                                        if (v && typeof v === 'string') {
+                                            const s = v.trim();
+                                            if (s.length >= 6 && s.length <= 40 && !s.includes('{') && !s.includes('[') && !found.includes(s)) {
+                                                found.push(s);
+                                            }
+                                        }
+                                    };
+                                    const href = window.location.href || '';
+                                    href.split('/').forEach(add);
+                                    const uuidM = href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|G[0-9]{8,12}|M[0-9]{5,10}/gi);
+                                    if (uuidM) uuidM.forEach(add);
+
+                                    [localStorage, sessionStorage].forEach(store => {
+                                        try {
+                                            for (let i = 0; i < store.length; i++) {
+                                                const k = (store.key(i) || '').toLowerCase();
+                                                const v = store.getItem(store.key(i)) || '';
+                                                if (k.includes('restaurant') || k.includes('outlet') || k.includes('store') || k.includes('merchant') || k.includes('id')) {
+                                                    add(v);
+                                                }
+                                                const m = v.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|G[0-9]{8,12}|M[0-9]{5,10}/gi);
+                                                if (m) m.forEach(add);
+                                            }
+                                        } catch(e) {}
+                                    });
+                                    return found;
                                 }""")
-                                if storage_uuid and storage_uuid not in target_ids:
-                                    target_ids.append(storage_uuid)
+                                if storage_ids:
+                                    for sid in storage_ids:
+                                        if sid not in target_ids:
+                                            target_ids.append(sid)
                             except Exception:
                                 pass
+
                             try:
-                                direct_menu = page.evaluate("""async ({token, targetIds}) => {
+                                direct_menu = page.evaluate("""async ({token, targetIds, passkey}) => {
                                     for (const restId of targetIds) {
                                         const endpoints = [
                                             `https://api.gojekapi.com/gofood/merchant/v1/restaurants/${restId}/menus`,
                                             `https://api.gobiz.co.id/gofood/merchant/v1/restaurants/${restId}/menus`,
-                                            `https://api.gojekapi.com/gofood/merchant/v2/restaurants/${restId}/menus`
+                                            `https://api.gojekapi.com/gofood/merchant/v2/restaurants/${restId}/menus`,
+                                            `https://api.gojekapi.com/gofood/merchant/v1/outlets/${restId}/menus`,
+                                            `https://api.gojekapi.com/gofood/merchant/v2/menu_groups/${restId}/menus`,
+                                            `https://portal.gofoodmerchant.co.id/api/gofood/v1/restaurants/${restId}/menus`,
+                                            `https://portal.gofoodmerchant.co.id/api/gofood/v2/restaurants/${restId}/menus`
                                         ];
                                         for (const ep of endpoints) {
                                             try {
-                                                const res = await fetch(ep, {
-                                                    headers: {
-                                                        "Authorization": "Bearer " + token,
-                                                        "Authentication-Type": "go-id",
-                                                        "Gojek-Country-Code": "ID",
-                                                        "Accept": "application/json"
-                                                    }
-                                                });
+                                                const headers = {
+                                                    "Authorization": "Bearer " + token.replace(/^Bearer /i, ''),
+                                                    "Authentication-Type": "go-id",
+                                                    "Gojek-Country-Code": "ID",
+                                                    "Accept": "application/json"
+                                                };
+                                                if (passkey) headers["X-Passkey"] = passkey;
+                                                const res = await fetch(ep, { headers });
                                                 if (res.ok) {
                                                     const d = await res.json();
-                                                    if (d && (d.menus || d.categories)) return d;
+                                                    if (d && (d.menus || d.categories || d.data)) return d;
                                                 }
                                             } catch (e) {}
                                         }
                                     }
                                     return null;
-                                }""", {"token": access_token, "targetIds": target_ids})
+                                }""", {"token": access_token, "targetIds": target_ids, "passkey": captured_x_passkey})
 
                                 if direct_menu:
                                     captured_menu = direct_menu
-                                    print(f"   ✅ [Direct Fetch Fallback] Berhasil mengambil menu GoFood langsung dari API! Total kategori: {len(direct_menu.get('menus', []))}")
+                                    print(f"   ✅ [Direct Fetch Fallback {menu_attempt}/{max_menu_retries}] Berhasil mengambil menu GoFood langsung dari API! Total kategori: {len(direct_menu.get('menus', direct_menu.get('categories', [])))}")
                             except Exception as err:
-                                print(f"   ⚠️ [Direct Fetch Fallback] Error: {err}")
+                                print(f"   ⚠️ [Direct Fetch Fallback {menu_attempt}/{max_menu_retries}] Error: {err}")
 
                         if captured_menu is None and captured_v2_group_id:
                             try:
@@ -1216,9 +1230,17 @@ def login_outlet(outlet_info, proxy_config=None):
                                 v2_menu = go_api.fetch_menus_v2(page, token_for_fetch, captured_v2_group_id, passkey=captured_x_passkey)
                                 if v2_menu:
                                     captured_menu = {"menus": v2_menu} if isinstance(v2_menu, list) else v2_menu
-                                    print("   ✅ [Direct Fetch Fallback] Berhasil mengambil menu via endpoint V2 menu_groups.")
+                                    print(f"   ✅ [Direct Fetch Fallback {menu_attempt}/{max_menu_retries}] Berhasil mengambil menu via endpoint V2 menu_groups.")
                             except Exception as v2_err:
-                                print(f"   ⚠️ [Direct Fetch Fallback] V2 menu_groups gagal: {v2_err}")
+                                print(f"   ⚠️ [Direct Fetch Fallback {menu_attempt}/{max_menu_retries}] V2 menu_groups gagal: {v2_err}")
+
+                        if captured_menu is None and menu_attempt < max_menu_retries:
+                            print(f"   🔄 [Retry Mechanism {menu_attempt}/{max_menu_retries}] Re-navigasi presisi ke halaman menu items...")
+                            try:
+                                safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/menu-items", wait_until="domcontentloaded")
+                                tutup_semua_popup(page)
+                            except Exception as reload_err:
+                                print(f"   ⚠️ Re-navigasi warning: {reload_err}")
                         
                     # Beri waktu tambahan 5 detik untuk menangkap pemanggilan API variant_categories
                     if captured_menu is not None:

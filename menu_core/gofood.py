@@ -58,7 +58,7 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         except RuntimeError:
             in_event_loop = False
 
-        max_extract_attempts = 3
+        max_extract_attempts = 2
         login_result = None
         for extract_attempt in range(1, max_extract_attempts + 1):
             if in_event_loop:

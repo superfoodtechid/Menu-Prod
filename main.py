@@ -264,8 +264,8 @@ def sync_sheets(db: Session = Depends(get_db)):
             if col in df.columns:
                 df[col] = df[col].ffill()
 
-    # Filter only Live status
-    df_live = df[df["Status"].str.contains("Live", na=False, case=False)]
+    # Filter Live and Pending status merchants
+    df_live = df[df["Status"].astype(str).str.lower().str.contains("live|pending", na=False)]
 
     # Pre-fetch all accounts and outlets to prevent N+1 queries in the loop
     all_accounts = db.query(Account).all()
