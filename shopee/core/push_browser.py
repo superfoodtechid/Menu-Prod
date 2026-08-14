@@ -528,6 +528,12 @@ def get_push_session(
                     """)
 
                     if otp_input or is_verification_page:
+                        try:
+                            from core.browser import _handle_verification_method_selection
+                            _handle_verification_method_selection(driver)
+                        except Exception as method_err:
+                            log.debug(f"Verification method selection warning: {method_err}")
+
                         if not otp_requested:
                             log.info(f"🔑 [PUSH_BROWSER] Halaman OTP terdeteksi untuk '{username}'. Menulis OTP request...")
                             _write_otp_request(username)
