@@ -1626,6 +1626,38 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             "category_common_id": cat.get("common_id")
                         }
 
+                # ──────────────────────────────────────────────────────────────
+                # BARRIER: Tunggu x-passkey DAN menu_group_id dari SPA sebelum
+                # memulai PATCH. Kedua nilai ini dikirim SPA via background
+                # request setelah halaman dimuat — tanpa ini item pertama 403.
+                # ──────────────────────────────────────────────────────────────
+                _need_passkey = not api_headers.get('x-passkey')
+                _need_groupid = not api_headers.get('menu_group_id') and not group_id
+                if _need_passkey or _need_groupid:
+                    _missing = []
+                    if _need_passkey: _missing.append("x-passkey")
+                    if _need_groupid: _missing.append("menu_group_id")
+                    logger.info(f"⏳ [BARRIER] Menunggu dari SPA: {', '.join(_missing)} (maks 30 detik)...")
+                    _barrier_start = time.time()
+                    while (time.time() - _barrier_start) < 30:
+                        _has_pk = bool(api_headers.get('x-passkey'))
+                        _has_gid = bool(api_headers.get('menu_group_id') or group_id)
+                        if _has_pk and _has_gid:
+                            logger.info("✅ [BARRIER] x-passkey + menu_group_id tertangkap! Memulai PATCH.")
+                            break
+                        page.wait_for_timeout(500)
+                    else:
+                        _still_missing = []
+                        if not api_headers.get('x-passkey'): _still_missing.append("x-passkey")
+                        if not (api_headers.get('menu_group_id') or group_id): _still_missing.append("menu_group_id")
+                        if _still_missing:
+                            logger.warning(f"⚠️ [BARRIER] Timeout 30 detik. Masih belum ada: {', '.join(_still_missing)}. Melanjutkan...")
+
+                # Update group_id dari api_headers jika baru ditangkap BARRIER
+                if not group_id and api_headers.get('menu_group_id'):
+                    group_id = api_headers['menu_group_id']
+                    logger.info(f"🔑 [BARRIER] group_id diupdate dari SPA listener: {group_id}")
+
                 for idx, update in enumerate(updates_list):
                     item_id = update["item_id"]
                     new_price = update["new_price"]
