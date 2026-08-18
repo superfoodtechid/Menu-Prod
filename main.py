@@ -461,10 +461,30 @@ def create_account(account: AccountCreate, db: Session = Depends(get_db)):
     db.add(new_account)
     db.commit()
     db.refresh(new_account)
-    return new_account
+# ─── REALTIME SHEETS AUTO-SYNC FOR DROPDOWN ────────────────────────────────────
+LAST_SYNC_TIMESTAMP = 0.0
+SYNC_LOCK = threading.Lock()
+
+def check_and_auto_sync_sheets(db: Session, force: bool = False, min_interval_seconds: float = 60.0):
+    global LAST_SYNC_TIMESTAMP
+    now = time.time()
+    if force or (now - LAST_SYNC_TIMESTAMP > min_interval_seconds):
+        if SYNC_LOCK.acquire(blocking=False):
+            try:
+                logger.info("🔄 Real-time Auto-sync: Fetching latest merchants from Google Sheets for dropdown...")
+                sync_sheets(db)
+                LAST_SYNC_TIMESTAMP = time.time()
+            except Exception as e:
+                logger.warning(f"⚠️ Real-time Auto-sync Google Sheets warning: {e}")
+            finally:
+                SYNC_LOCK.release()
 
 @app.get("/api/accounts", response_model=List[AccountResponse])
-def list_accounts(db: Session = Depends(get_db)):
+def list_accounts(
+    refresh: bool = Query(default=False, description="Paksa sync ulang dari Google Sheets"),
+    db: Session = Depends(get_db),
+):
+    check_and_auto_sync_sheets(db, force=refresh, min_interval_seconds=60.0)
     return db.query(Account).all()
 
 
@@ -524,8 +544,10 @@ def list_outlets(
         default=None,
         description="Filter platform berulang, contoh: ?platform=grab&platform=gofood",
     ),
+    refresh: bool = Query(default=False, description="Paksa sync ulang dari Google Sheets"),
     db: Session = Depends(get_db),
 ):
+    check_and_auto_sync_sheets(db, force=refresh, min_interval_seconds=60.0)
     platforms = normalize_platform_filters(platform)
     query = db.query(Outlet).options(joinedload(Outlet.account))
     if platforms:
@@ -3578,10 +3600,18 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
         clean_outlet = re.sub(r'\s+', ' ', clean_outlet).lower()
         
         exports_dir = BASE_DIR / "data" / "exports" / outlet.platform / clean_outlet
-        excel_files = list(exports_dir.glob("*.xlsx")) if exports_dir.exists() else []
-        if not excel_files:
-            return []
-        excel_path = str(excel_files[0])
+        if exports_dir.exists():
+            excel_files = sorted(exports_dir.glob("*.xlsx"), key=lambda p: os.path.getmtime(str(p)), reverse=True)
+            cabang_clean = (outlet.cabang or "").strip().lower()
+            store_id_clean = (outlet.store_id or "").strip().lower()
+            matched_file = None
+            if cabang_clean or store_id_clean:
+                for ef in excel_files:
+                    ef_name = ef.name.lower()
+                    if (store_id_clean and store_id_clean in ef_name) or (cabang_clean and cabang_clean in ef_name):
+                        matched_file = str(ef)
+                        break
+            excel_path = matched_file or (str(excel_files[0]) if excel_files else None)
 
     if not excel_path or not os.path.exists(excel_path):
         return []

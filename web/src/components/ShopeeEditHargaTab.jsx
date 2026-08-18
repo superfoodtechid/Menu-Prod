@@ -1393,7 +1393,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             <div>
               <StepLabel number={4} label="Sesuaikan Harga" active={true} done={false} className="mb-1" />
               <p className="text-[13px] text-zinc-500 dark:text-zinc-400 ml-8">
-                Terapkan ke <strong>1 brand</strong> terpilih. Saat ini ada <strong className="text-orange-600 dark:text-orange-400">{changedCount} perubahan</strong>.
+                Total <strong>{items.length} menu item</strong> dimuat. Saat ini ada <strong className="text-orange-600 dark:text-orange-400">{changedCount} item disesuaikan</strong>.
                 {promoCount > 0 && (
                   <span className="ml-2 text-purple-700 dark:text-purple-400 font-bold">
                     ({promoCount} menu promo aktif dikunci)
