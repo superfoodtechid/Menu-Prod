@@ -1699,8 +1699,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                 )
                                 status_code = cr_res.status
                                 if status_code in (429, 403, 503, 504) and attempt_idx < max_retries:
-                                    logger.warning(f"⚠️ Terdeteksi Rate Limit (HTTP {status_code}) pada item {item_id}. Menunggu 5 detik (attempt {attempt_idx+1}/{max_retries})...")
-                                    time.sleep(5.0)
+                                    backoff_sec = 12.0 * (attempt_idx + 1)
+                                    logger.warning(f"⚠️ Terdeteksi Rate Limit (HTTP {status_code}) pada item {item_id}. Menunggu {int(backoff_sec)} detik untuk cooldown (attempt {attempt_idx+1}/{max_retries})...")
+                                    time.sleep(backoff_sec)
                                     continue
                                 return {'ok': cr_res.ok, 'status': status_code, 'body': cr_res.text()}
                             except Exception as ex:
