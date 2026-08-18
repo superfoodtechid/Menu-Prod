@@ -558,11 +558,7 @@ def login_outlet(outlet_info, proxy_config=None):
                             pass
 
                     if token_candidate:
-                        print(f"   ✅ Sesi berhasil dimuat! Melewati login OTP untuk {cached_identifier}.")
-                        access_token = token_candidate
-                        session_loaded_successfully = True
-                        logged_in_email = cached_identifier if "@" in str(cached_identifier) else None
-                        # Sesi sudah terkonfirmasi valid — baru navigasi ke halaman menu items
+                        # Sesi terdeteksi, uji apakah navigasi ke menu-items tetap valid
                         if store_id:
                             store_id_cached = str(store_id).strip()
                             safe_goto_with_retry(
@@ -572,6 +568,25 @@ def login_outlet(outlet_info, proxy_config=None):
                                 timeout=45000,
                             )
                             time.sleep(2.0)
+                        
+                        # Verifikasi apakah URL di-redirect kembali ke auth/login
+                        if "/auth" in page.url or "login" in page.url:
+                            print(f"   ⚠️ Sesi kedaluwarsa saat membuka halaman menu ({page.url}). Memaksa fresh login ulang...")
+                            context.clear_cookies()
+                            try:
+                                page.close()
+                            except Exception:
+                                pass
+                            sanitized_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(cached_identifier).strip().lower())
+                            old_session = MENU_DIR / "Gofood" / f"session_gofood_{sanitized_id}.json"
+                            if old_session.exists():
+                                try: os.remove(old_session)
+                                except Exception: pass
+                        else:
+                            print(f"   ✅ Sesi berhasil dimuat! Melewati login OTP untuk {cached_identifier}.")
+                            access_token = token_candidate
+                            session_loaded_successfully = True
+                            logged_in_email = cached_identifier if "@" in str(cached_identifier) else None
                     else:
                         print(f"   ⚠️ Sesi terlihat login tetapi token tidak ditemukan untuk {cached_identifier}. Memaksa login ulang...")
                         context.clear_cookies()
@@ -948,7 +963,7 @@ def login_outlet(outlet_info, proxy_config=None):
             print(f"   🤖 URL saat ini setelah login: {current_url}")
             
             if "/auth" in current_url or "login" in current_url:
-                print(f"   ⚠️ URL saat ini masih di {current_url}. Sesi kedaluwarsa/invalid, memicu fresh login ulang...")
+                print(f"   ⚠️ URL saat ini masih di {current_url}. Sesi kedaluwarsa/invalid.")
                 access_token = None
                 session_loaded_successfully = False
                 context.clear_cookies()
@@ -958,6 +973,7 @@ def login_outlet(outlet_info, proxy_config=None):
                     if old_session.exists():
                         try: os.remove(old_session)
                         except Exception: pass
+                raise RuntimeError(f"Halaman masih terdampar di {current_url} (unauthenticated). Sesi tidak valid, perlu fresh login.")
 
             # Jika URL mengandung 'choose' atau 'choose-outlet', kita perlu memilih merchant
             elif "choose" in current_url or "outlet" in current_url:
