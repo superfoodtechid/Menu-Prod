@@ -1205,7 +1205,10 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
             if not merchant_id:
                 raise Exception("Merchant ID (store_id) is missing for GoFood outlet.")
-            if not merchant_id.startswith("G"):
+            merchant_id = str(merchant_id).strip()
+            if merchant_id.startswith("GM"):
+                merchant_id = merchant_id[1:]
+            elif merchant_id.isdigit():
                 merchant_id = "G" + merchant_id
 
             job.progress_pct = 30
@@ -1623,6 +1626,38 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             "category_common_id": cat.get("common_id")
                         }
 
+                # ──────────────────────────────────────────────────────────────
+                # BARRIER: Tunggu x-passkey DAN menu_group_id dari SPA sebelum
+                # memulai PATCH. Kedua nilai ini dikirim SPA via background
+                # request setelah halaman dimuat — tanpa ini item pertama 403.
+                # ──────────────────────────────────────────────────────────────
+                _need_passkey = not api_headers.get('x-passkey')
+                _need_groupid = not api_headers.get('menu_group_id') and not group_id
+                if _need_passkey or _need_groupid:
+                    _missing = []
+                    if _need_passkey: _missing.append("x-passkey")
+                    if _need_groupid: _missing.append("menu_group_id")
+                    logger.info(f"⏳ [BARRIER] Menunggu dari SPA: {', '.join(_missing)} (maks 30 detik)...")
+                    _barrier_start = time.time()
+                    while (time.time() - _barrier_start) < 30:
+                        _has_pk = bool(api_headers.get('x-passkey'))
+                        _has_gid = bool(api_headers.get('menu_group_id') or group_id)
+                        if _has_pk and _has_gid:
+                            logger.info("✅ [BARRIER] x-passkey + menu_group_id tertangkap! Memulai PATCH.")
+                            break
+                        page.wait_for_timeout(500)
+                    else:
+                        _still_missing = []
+                        if not api_headers.get('x-passkey'): _still_missing.append("x-passkey")
+                        if not (api_headers.get('menu_group_id') or group_id): _still_missing.append("menu_group_id")
+                        if _still_missing:
+                            logger.warning(f"⚠️ [BARRIER] Timeout 30 detik. Masih belum ada: {', '.join(_still_missing)}. Melanjutkan...")
+
+                # Update group_id dari api_headers jika baru ditangkap BARRIER
+                if not group_id and api_headers.get('menu_group_id'):
+                    group_id = api_headers['menu_group_id']
+                    logger.info(f"🔑 [BARRIER] group_id diupdate dari SPA listener: {group_id}")
+
                 for idx, update in enumerate(updates_list):
                     item_id = update["item_id"]
                     new_price = update["new_price"]
@@ -1696,8 +1731,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                 )
                                 status_code = cr_res.status
                                 if status_code in (429, 403, 503, 504) and attempt_idx < max_retries:
-                                    logger.warning(f"⚠️ Terdeteksi Rate Limit (HTTP {status_code}) pada item {item_id}. Menunggu 5 detik (attempt {attempt_idx+1}/{max_retries})...")
-                                    time.sleep(5.0)
+                                    backoff_sec = 12.0 * (attempt_idx + 1)
+                                    logger.warning(f"⚠️ Terdeteksi Rate Limit (HTTP {status_code}) pada item {item_id}. Menunggu {int(backoff_sec)} detik untuk cooldown (attempt {attempt_idx+1}/{max_retries})...")
+                                    time.sleep(backoff_sec)
                                     continue
                                 return {'ok': cr_res.ok, 'status': status_code, 'body': cr_res.text()}
                             except Exception as ex:
@@ -1782,9 +1818,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     time.sleep(random.uniform(1.2, 2.5))
 
                     # Jeda istirahat (batch breather) setiap 10 item agar token bucket rate-limit GoFood pulih
-                    if (idx + 1) % 10 == 0 and (idx + 1) < total_updates:
-                        logger.info(f"☕ Batch pause (item {idx+1}/{total_updates}): istirahat 5 detik untuk mendinginkan rate-limit GoFood...")
-                        time.sleep(random.uniform(4.0, 6.0))
+                    if (idx + 1) % 20 == 0 and (idx + 1) < total_updates:
+                        logger.info(f"☕ Batch pause (item {idx+1}/{total_updates}): istirahat 3 detik...")
+                        time.sleep(3.0)
 
                     # Update progress setiap 5 item
                     if (idx + 1) % 5 == 0 or (idx + 1) == total_updates:
@@ -2162,7 +2198,10 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
 
     if not merchant_id:
         raise Exception("Merchant ID (store_id) tidak tersedia untuk outlet GoFood.")
-    if not merchant_id.startswith("G"):
+    merchant_id = str(merchant_id).strip()
+    if merchant_id.startswith("GM"):
+        merchant_id = merchant_id[1:]
+    elif merchant_id.isdigit():
         merchant_id = "G" + merchant_id
 
     results = []
@@ -2632,9 +2671,9 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
 
                 # Pacing + batch breather to respect GoFood rate limits
                 time.sleep(random.uniform(1.2, 2.5))
-                if (idx + 1) % 10 == 0 and (idx + 1) < total:
-                    logger.info(f"☕ Batch pause item {idx+1}/{total}: istirahat 5s...")
-                    time.sleep(random.uniform(4.0, 6.0))
+                if (idx + 1) % 20 == 0 and (idx + 1) < total:
+                    logger.info(f"☕ Batch pause item {idx+1}/{total}: istirahat 3s...")
+                    time.sleep(3.0)
         finally:
             try:
                 browser.close()
@@ -2711,8 +2750,12 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         for sid, sid_updates in updates_by_sid.items():
             # Resolve the outlet + account credentials for this Store ID.
             outlet = db.query(Outlet).filter(Outlet.store_id == sid).first()
-            if not outlet and sid and not sid.startswith("G"):
-                outlet = db.query(Outlet).filter(Outlet.store_id == ("G" + sid)).first()
+            if not outlet and sid:
+                cands = [sid.replace("GM", "M"), sid.lstrip("G"), "G" + sid]
+                for csid in cands:
+                    outlet = db.query(Outlet).filter(Outlet.store_id == csid, Outlet.platform == "gofood").first()
+                    if outlet:
+                        break
             account = db.query(Account).filter(Account.id == outlet.account_id).first() if outlet else None
 
             if not outlet or not account:
