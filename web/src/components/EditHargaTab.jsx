@@ -1251,7 +1251,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             <div>
               <StepLabel number={4} label="Sesuaikan Harga" active={true} done={false} className="mb-1" />
               <p className="text-[13px] text-zinc-500 dark:text-zinc-400 ml-8">
-                Terapkan ke <strong>{preview.length} brand</strong> terpilih. Saat ini ada <strong className="text-red-700 dark:text-red-400">{totalChanges} perubahan</strong>.
+                Terapkan ke <strong>{preview.length} brand</strong> terpilih. Saat ini ada <strong className="text-red-700 dark:text-red-400">{totalChanges} item disesuaikan</strong>.
               </p>
             </div>
             <div className="flex items-center gap-1 bg-zinc-150 dark:bg-zinc-900 p-1 rounded-xl shrink-0 self-start lg:self-auto border border-zinc-200 dark:border-zinc-700">
