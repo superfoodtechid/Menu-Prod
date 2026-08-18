@@ -1786,9 +1786,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     time.sleep(random.uniform(1.2, 2.5))
 
                     # Jeda istirahat (batch breather) setiap 10 item agar token bucket rate-limit GoFood pulih
-                    if (idx + 1) % 10 == 0 and (idx + 1) < total_updates:
-                        logger.info(f"☕ Batch pause (item {idx+1}/{total_updates}): istirahat 5 detik untuk mendinginkan rate-limit GoFood...")
-                        time.sleep(random.uniform(4.0, 6.0))
+                    if (idx + 1) % 20 == 0 and (idx + 1) < total_updates:
+                        logger.info(f"☕ Batch pause (item {idx+1}/{total_updates}): istirahat 3 detik...")
+                        time.sleep(3.0)
 
                     # Update progress setiap 5 item
                     if (idx + 1) % 5 == 0 or (idx + 1) == total_updates:
@@ -2639,9 +2639,9 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
 
                 # Pacing + batch breather to respect GoFood rate limits
                 time.sleep(random.uniform(1.2, 2.5))
-                if (idx + 1) % 10 == 0 and (idx + 1) < total:
-                    logger.info(f"☕ Batch pause item {idx+1}/{total}: istirahat 5s...")
-                    time.sleep(random.uniform(4.0, 6.0))
+                if (idx + 1) % 20 == 0 and (idx + 1) < total:
+                    logger.info(f"☕ Batch pause item {idx+1}/{total}: istirahat 3s...")
+                    time.sleep(3.0)
         finally:
             try:
                 browser.close()
