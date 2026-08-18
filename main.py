@@ -1205,7 +1205,10 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
             if not merchant_id:
                 raise Exception("Merchant ID (store_id) is missing for GoFood outlet.")
-            if not merchant_id.startswith("G"):
+            merchant_id = str(merchant_id).strip()
+            if merchant_id.startswith("GM"):
+                merchant_id = merchant_id[1:]
+            elif merchant_id.isdigit():
                 merchant_id = "G" + merchant_id
 
             job.progress_pct = 30
@@ -2162,7 +2165,10 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
 
     if not merchant_id:
         raise Exception("Merchant ID (store_id) tidak tersedia untuk outlet GoFood.")
-    if not merchant_id.startswith("G"):
+    merchant_id = str(merchant_id).strip()
+    if merchant_id.startswith("GM"):
+        merchant_id = merchant_id[1:]
+    elif merchant_id.isdigit():
         merchant_id = "G" + merchant_id
 
     results = []
@@ -2711,8 +2717,12 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         for sid, sid_updates in updates_by_sid.items():
             # Resolve the outlet + account credentials for this Store ID.
             outlet = db.query(Outlet).filter(Outlet.store_id == sid).first()
-            if not outlet and sid and not sid.startswith("G"):
-                outlet = db.query(Outlet).filter(Outlet.store_id == ("G" + sid)).first()
+            if not outlet and sid:
+                cands = [sid.replace("GM", "M"), sid.lstrip("G"), "G" + sid]
+                for csid in cands:
+                    outlet = db.query(Outlet).filter(Outlet.store_id == csid, Outlet.platform == "gofood").first()
+                    if outlet:
+                        break
             account = db.query(Account).filter(Account.id == outlet.account_id).first() if outlet else None
 
             if not outlet or not account:
