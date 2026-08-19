@@ -423,12 +423,18 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     // Sync GSheet first when platform is selected
     triggerGSheetSync().then(() => {
       const url = `${API_BASE_URL}/api/outlets?platform=${platform}`;
-      return fetch(url, { headers: { "X-API-Key": API_SECRET_KEY || "" } }).then(r => r.json())
+      return fetch(url, { headers: { "X-API-Key": API_SECRET_KEY || "" } })
+        .then(r => r.ok ? r.json() : [])
         .then(data => {
-          setAllOutlets(data);
-          setUniqueParents(Array.from(new Set(data.map(o => o.nama_outlet || o.nama_resto_final || o.merchant_name).filter(Boolean))).sort());
+          const list = Array.isArray(data) ? data : [];
+          setAllOutlets(list);
+          setUniqueParents(Array.from(new Set(list.map(o => o.nama_outlet || o.nama_resto_final || o.merchant_name).filter(Boolean))).sort());
         });
-    }).catch((err) => console.error("Error fetching outlets:", err))
+    }).catch((err) => {
+      console.error("Error fetching outlets:", err);
+      setAllOutlets([]);
+      setUniqueParents([]);
+    })
       .finally(() => setLoading(false));
   }, [platform, API_BASE_URL, API_SECRET_KEY, clearSyncPolling, triggerGSheetSync]);
 

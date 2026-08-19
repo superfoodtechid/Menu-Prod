@@ -245,8 +245,16 @@ def sync_sheets(db: Session = Depends(get_db)):
         except Exception as ce:
             logger.warning(f"⚠️ Failed to update master_merchants_cache.csv: {ce}")
     except Exception as e:
-        logger.error(f"❌ Failed to fetch Google Sheet: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch Google Sheet: {str(e)}")
+        logger.error(f"❌ Failed to fetch Google Sheet online: {e}")
+        from menu_core.sheets import CACHE_PATH
+        if os.path.exists(CACHE_PATH):
+            logger.info("⚠️ Using local master_merchants_cache.csv fallback.")
+            try:
+                df = pd.read_csv(CACHE_PATH)
+            except Exception as fe:
+                raise HTTPException(status_code=500, detail=f"Failed to load cached merchant sheet: {str(fe)}")
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch Google Sheet: {str(e)}")
 
     added_accounts = 0
     added_outlets = 0
