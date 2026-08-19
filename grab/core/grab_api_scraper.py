@@ -683,9 +683,9 @@ class GrabAPI:
             ]
         }
         res = await self.call_api(url, method="PUT", headers=headers, body=body)
-        if res.get("status") in (200, 204):
-            return True, None
-        return False, res.get("error") or f"Status {res.get('status')}: {res.get('data')    async def validate_item(self, group_id, store_id, category_id, item_data, is_menu_group: bool = False, menu_group_id: str = None, force_store_level: bool = False):
+        return False, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
+
+    async def validate_item(self, group_id, store_id, category_id, item_data, is_menu_group: bool = False, menu_group_id: str = None, force_store_level: bool = False):
         """POST /food/merchant/v2/item-validation or /food/merchant/v2/menu-groups/item-validation"""
         if force_store_level:
             mg_id = None
@@ -860,7 +860,6 @@ class GrabAPI:
                     self._in_upsert_fallback = False
 
         return None, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
-)}"
 
     async def delete_item(self, group_id, store_id, item_id):
         """DELETE /food/merchant/v2/items/{item_id}"""

@@ -6,6 +6,9 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [parseResult, setParseResult] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
 
+  // Platform selection (gofood / grab)
+  const [targetPlatform, setTargetPlatform] = useState("gofood");
+
   // Multi-Select Store IDs (SID)
   const [selectedSids, setSelectedSids] = useState([]);
 
@@ -103,7 +106,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
     };
   }, [activeJob, API_BASE_URL, API_SECRET_KEY]);
 
-  // Handle Trigger Push C5 GoFood
+  // Handle Trigger Push C5
   const handleTriggerPush = async () => {
     if (!parseResult || selectedSids.length === 0) return;
 
@@ -133,7 +136,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
           "X-API-Key": API_SECRET_KEY || ""
         },
         body: JSON.stringify({
-          platform: "gofood",
+          platform: targetPlatform,
           selected_sids: selectedSids,
           updates: targetItems.map((item) => ({
             sid: item.sid,
@@ -204,7 +207,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
       {/* Header Banner */}
       <div className="surface-card flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-red-600 to-red-800 text-white shadow-lg shadow-red-900/20 dark:from-zinc-800 dark:to-zinc-950 dark:border dark:border-zinc-700">
+          <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-white shadow-lg transition-all ${
+            targetPlatform === "grab"
+              ? "bg-gradient-to-br from-emerald-600 to-green-800 shadow-emerald-900/20"
+              : "bg-gradient-to-br from-red-600 to-red-800 shadow-red-900/20"
+          } dark:from-zinc-800 dark:to-zinc-950 dark:border dark:border-zinc-700`}>
             <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
             </svg>
@@ -212,10 +219,9 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
           <div>
             <div className="flex items-center gap-2">
               <h2 className="text-xl font-bold text-slate-900 dark:text-white">Menu Push C5</h2>
-              <PlatformBadge platform="gofood" size="sm" />
             </div>
             <p className="mt-0.5 text-[14px] text-slate-500 dark:text-zinc-400">
-              Unggah file C5 (`.xlsx`), pilih cabang Store ID (`SID`), dan apply perubahan item menu ke GoFood.
+              Unggah file C5 (`.xlsx`), pilih cabang Store ID (`SID`), dan apply perubahan item menu.
             </p>
           </div>
         </div>
@@ -255,7 +261,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
             </div>
             <h3 className="text-lg font-bold text-slate-900 dark:text-white">Pilih atau Seret File Excel C5 (`.xlsx`)</h3>
             <p className="mt-1 max-w-sm text-[14px] text-slate-500 dark:text-zinc-400">
-              Sistem akan otomatis mengurai sheet `Item`, mendeteksi Store ID (`SID`), lalu membandingkan dengan data PULL terakhir untuk mendeteksi perubahan nama & harga item GoFood.
+              Sistem akan otomatis mengurai sheet `Item`, mendeteksi Store ID (`SID`), lalu membandingkan dengan data PULL terakhir untuk mendeteksi perubahan nama, harga, foto, & kategori.
             </p>
 
             <label className="mt-6 inline-flex cursor-pointer items-center gap-2 rounded-xl bg-red-700 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-red-900/15 transition hover:bg-red-800 dark:bg-white dark:text-black dark:shadow-none">
@@ -294,63 +300,93 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
       {/* Parse Result & Multi-Select Store ID Panel */}
       {parseResult && (
         <div className="space-y-6">
-          {/* Minimalist Summary Cards Bar */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-9">
-            <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Store ID (SID)</p>
-              <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{parseResult.summary.total_stores}</p>
-              <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">{selectedSids.length} Dipilih</p>
-            </div>
-            <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Total Item</p>
-              <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{parseResult.summary.total_items}</p>
-              <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">Dalam C5</p>
-            </div>
-            <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-3.5 shadow-xs dark:border-amber-500/30 dark:bg-amber-500/10">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">Total Perubahan</p>
-              <p className="mt-1 text-xl font-extrabold text-amber-600 dark:text-amber-400">{parseResult.summary.total_changes}</p>
-              <p className="mt-0.5 text-[11px] text-amber-600/70 dark:text-amber-400/70">Terdeteksi</p>
-            </div>
-            <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Item Baru</p>
-              <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{parseResult.summary.new_items_count || 0}</p>
-              <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">Tambah Item</p>
-            </div>
-            <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Kategori Baru</p>
-              <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{parseResult.summary.new_categories_count || 0}</p>
-              <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">Buat Kategori</p>
-            </div>
-            <div className="rounded-xl border border-rose-500/40 bg-rose-500/5 p-3.5 shadow-xs dark:border-rose-500/30 dark:bg-rose-500/10">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">Hapus Item</p>
-              <p className="mt-1 text-xl font-extrabold text-rose-600 dark:text-rose-400">{parseResult.summary.deleted_items_count || 0}</p>
-              <p className="mt-0.5 text-[11px] text-rose-600/70 dark:text-rose-400/70">Tidak Ada di C5</p>
-            </div>
-            <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Harga</p>
-              <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{parseResult.summary.price_changes || 0}</p>
-              <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">Harga Berubah</p>
-            </div>
-            {parseResult.summary?.price_warning_count > 0 && (
-              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-3.5 shadow-xs dark:border-amber-500/30 dark:bg-amber-500/10">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">Step Push</p>
-                <p className="mt-1 text-xl font-extrabold text-amber-600 dark:text-amber-400">{parseResult.summary.price_warning_count}</p>
-                <p className="mt-0.5 text-[11px] text-amber-600/70 dark:text-amber-400/70">Harga &gt;15%</p>
+          {/* Summary Cards — selalu tampil 3 utama, sisanya hanya jika > 0 */}
+          {(() => {
+            const s = parseResult.summary;
+            const itemCount = (s.new_items_count || 0) + (s.name_changes || 0);
+            const attrCount = (s.category_changes || 0) + (s.photo_changes || 0) + (s.description_changes || 0);
+
+            const dynamicCards = [
+              itemCount > 0 && {
+                label: "Item", value: itemCount,
+                sub: [s.new_items_count > 0 && `+${s.new_items_count} baru`, s.name_changes > 0 && `${s.name_changes} nama`].filter(Boolean).join(", "),
+                cls: "border-slate-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900/80",
+                valCls: "text-slate-900 dark:text-white",
+                labelCls: "text-slate-400 dark:text-zinc-500",
+                subCls: "text-slate-400 dark:text-zinc-500",
+              },
+              (s.new_categories_count || 0) > 0 && {
+                label: "Kategori Baru", value: s.new_categories_count,
+                sub: "Buat Kategori",
+                cls: "border-slate-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900/80",
+                valCls: "text-slate-900 dark:text-white",
+                labelCls: "text-slate-400 dark:text-zinc-500",
+                subCls: "text-slate-400 dark:text-zinc-500",
+              },
+              (s.deleted_items_count || 0) > 0 && {
+                label: "Hapus Item", value: s.deleted_items_count,
+                sub: "Tidak Ada di C5",
+                cls: "border-rose-500/40 bg-rose-500/5 dark:border-rose-500/30 dark:bg-rose-500/10",
+                valCls: "text-rose-600 dark:text-rose-400",
+                labelCls: "text-rose-600 dark:text-rose-400",
+                subCls: "text-rose-600/70 dark:text-rose-400/70",
+              },
+              (s.price_changes || 0) > 0 && {
+                label: "Harga", value: s.price_changes,
+                sub: "Harga Berubah",
+                cls: "border-slate-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900/80",
+                valCls: "text-slate-900 dark:text-white",
+                labelCls: "text-slate-400 dark:text-zinc-500",
+                subCls: "text-slate-400 dark:text-zinc-500",
+              },
+              (s.price_warning_count || 0) > 0 && {
+                label: "Step Push", value: s.price_warning_count,
+                sub: "Harga >15%",
+                cls: "border-amber-500/40 bg-amber-500/5 dark:border-amber-500/30 dark:bg-amber-500/10",
+                valCls: "text-amber-600 dark:text-amber-400",
+                labelCls: "text-amber-600 dark:text-amber-400",
+                subCls: "text-amber-600/70 dark:text-amber-400/70",
+              },
+              attrCount > 0 && {
+                label: "Atribut", value: attrCount,
+                sub: [s.category_changes > 0 && `${s.category_changes} kat`, s.photo_changes > 0 && `${s.photo_changes} foto`, s.description_changes > 0 && `${s.description_changes} desc`].filter(Boolean).join(", "),
+                cls: "border-slate-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900/80",
+                valCls: "text-slate-900 dark:text-white",
+                labelCls: "text-slate-400 dark:text-zinc-500",
+                subCls: "text-slate-400 dark:text-zinc-500",
+              },
+            ].filter(Boolean);
+
+            return (
+              <div className="flex flex-wrap gap-3">
+                {/* 3 kartu tetap */}
+                <div className="min-w-[110px] flex-1 rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Store ID (SID)</p>
+                  <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{s.total_stores}</p>
+                  <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">{selectedSids.length} Dipilih</p>
+                </div>
+                <div className="min-w-[110px] flex-1 rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Total Item</p>
+                  <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{s.total_items}</p>
+                  <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">Dalam C5</p>
+                </div>
+                <div className="min-w-[110px] flex-1 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3.5 shadow-xs dark:border-amber-500/30 dark:bg-amber-500/10">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">Total Perubahan</p>
+                  <p className="mt-1 text-xl font-extrabold text-amber-600 dark:text-amber-400">{s.total_changes}</p>
+                  <p className="mt-0.5 text-[11px] text-amber-600/70 dark:text-amber-400/70">Terdeteksi</p>
+                </div>
+
+                {/* Kartu dinamis — hanya muncul jika > 0 */}
+                {dynamicCards.map((card) => (
+                  <div key={card.label} className={`min-w-[110px] flex-1 rounded-xl border p-3.5 shadow-xs ${card.cls}`}>
+                    <p className={`text-[10px] font-bold uppercase tracking-wider ${card.labelCls}`}>{card.label}</p>
+                    <p className={`mt-1 text-xl font-extrabold ${card.valCls}`}>{card.value}</p>
+                    <p className={`mt-0.5 text-[11px] ${card.subCls}`}>{card.sub}</p>
+                  </div>
+                ))}
               </div>
-            )}
-            <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Nama Item</p>
-              <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">{parseResult.summary.name_changes || 0}</p>
-              <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">Nama Berubah</p>
-            </div>
-            <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/80">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Atribut</p>
-              <p className="mt-1 text-xl font-extrabold text-slate-900 dark:text-white">
-                {(parseResult.summary.category_changes || 0) + (parseResult.summary.photo_changes || 0) + (parseResult.summary.description_changes || 0)}
-              </p>
-              <p className="mt-0.5 text-[11px] text-slate-400 dark:text-zinc-500">Kat / Foto / Desc</p>
-            </div>
-          </div>
+            );
+          })()}
 
           {/* Validation Error Alert Banner */}
           {parseResult.summary?.has_validation_errors && (
@@ -381,7 +417,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-4 dark:border-zinc-800">
               <div>
                 <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                  Pilih Store ID (SID) untuk di-Push ke GoFood
+                  Pilih Store ID (SID) untuk di-Push ke {targetPlatform === "grab" ? "GrabFood" : "GoFood"}
                 </h3>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-zinc-400">
                   File C5 ini berisi {parseResult.stores.length} Store ID. Centang store yang ingin Anda terapkan perubahannya.
@@ -404,11 +440,10 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                 return (
                   <label
                     key={store.sid}
-                    className={`flex cursor-pointer items-center justify-between rounded-2xl border p-4 transition ${
-                      isSelected
+                    className={`flex cursor-pointer items-center justify-between rounded-2xl border p-4 transition ${isSelected
                         ? "border-red-300 bg-red-50/50 shadow-xs dark:border-red-800 dark:bg-red-950/20"
                         : "border-slate-200 bg-white hover:border-slate-300 dark:border-zinc-800 dark:bg-zinc-900"
-                    }`}
+                      }`}
                   >
                     <div className="flex items-center gap-3">
                       <input
@@ -443,11 +478,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-bold text-slate-900 dark:text-white">Eksekusi Push Menu GoFood</h3>
-                  <PlatformBadge platform="gofood" size="sm" />
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-white">Eksekusi Push Menu {targetPlatform === "grab" ? "GrabFood" : "GoFood"}</h3>
+                  <PlatformBadge platform={targetPlatform} size="sm" />
                 </div>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-zinc-400">
-                  Akan mendorong perubahan pada {selectedSids.length} Store ID yang dipilih ke portal GoFood Merchant.
+                  Akan mendorong perubahan pada {selectedSids.length} Store ID yang dipilih ke portal {targetPlatform === "grab" ? "Grab Merchant" : "GoFood Merchant"}.
                 </p>
               </div>
 
@@ -455,11 +490,12 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                 type="button"
                 onClick={handleTriggerPush}
                 disabled={triggering || selectedSids.length === 0}
-                className={`inline-flex items-center justify-center gap-2 rounded-xl px-6 py-3 text-sm font-bold text-white transition shadow-md ${
-                  selectedSids.length > 0 && !triggering
-                    ? "bg-red-700 hover:bg-red-800 shadow-red-900/20 dark:bg-white dark:text-black"
+                className={`inline-flex items-center justify-center gap-2 rounded-xl px-6 py-3 text-sm font-bold text-white transition shadow-md ${selectedSids.length > 0 && !triggering
+                    ? targetPlatform === "grab"
+                      ? "bg-emerald-700 hover:bg-emerald-800 shadow-emerald-900/20 dark:bg-emerald-600 dark:hover:bg-emerald-500"
+                      : "bg-red-700 hover:bg-red-800 shadow-red-900/20 dark:bg-white dark:text-black"
                     : "cursor-not-allowed bg-slate-300 text-slate-500 dark:bg-zinc-800 dark:text-zinc-600"
-                }`}
+                  }`}
               >
                 {triggering ? (
                   <>
@@ -474,7 +510,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                     <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                     </svg>
-                    <span>Push Perubahan ke GoFood ({selectedSids.length} Store ID)</span>
+                    <span>Push Perubahan ke {targetPlatform === "grab" ? "GrabFood" : "GoFood"} ({selectedSids.length} Store ID)</span>
                   </>
                 )}
               </button>
@@ -508,7 +544,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
 
                 {activeJob.status === "SUCCESS" && (
                   <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs font-bold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300">
-                    🎉 Push Perubahan C5 GoFood Selesai
+                    🎉 Push Perubahan C5 {activeJob.payload?.platform === "grab" || targetPlatform === "grab" ? "GrabFood" : "GoFood"} Selesai
                     <p className="mt-1 font-normal text-emerald-700 dark:text-emerald-400">
                       {activeJob.result_metadata?.success_count ?? 0} item berhasil
                       {(activeJob.result_metadata?.fail_count ?? 0) > 0
@@ -521,7 +557,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
 
                 {activeJob.status === "FAILED" && (
                   <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-xs font-bold text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
-                    Push Perubahan C5 GoFood Gagal
+                    Push Perubahan C5 {activeJob.payload?.platform === "grab" || targetPlatform === "grab" ? "GrabFood" : "GoFood"} Gagal
                     <p className="mt-1 font-normal text-red-700 dark:text-red-400">
                       {activeJob.current_step}
                     </p>
@@ -553,13 +589,12 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                     key={mode}
                     type="button"
                     onClick={() => setFilterMode(mode)}
-                    className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
-                      filterMode === mode
+                    className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${filterMode === mode
                         ? "bg-slate-900 text-white dark:bg-white dark:text-black"
                         : mode === "invalid" && parseResult?.summary?.has_validation_errors
-                        ? "bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-950/60 dark:text-red-300"
-                        : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
-                    }`}
+                          ? "bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-950/60 dark:text-red-300"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                      }`}
                   >
                     {label}
                   </button>
@@ -605,15 +640,14 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                     filteredItems.map((item, idx) => (
                       <tr
                         key={`${item.sid}-${item.item_id}-${idx}`}
-                        className={`transition ${
-                          item.is_valid === false
+                        className={`transition ${item.is_valid === false
                             ? "bg-red-50/70 hover:bg-red-100/60 dark:bg-red-950/20 dark:hover:bg-red-950/40"
                             : item.is_new_item
-                            ? "bg-teal-50/40 hover:bg-teal-50/70 dark:bg-teal-950/20 dark:hover:bg-teal-950/40"
-                            : item.is_changed
-                            ? "bg-amber-50/30 hover:bg-amber-50/60 dark:bg-amber-950/10 dark:hover:bg-amber-950/20"
-                            : "hover:bg-slate-50 dark:hover:bg-zinc-900/50"
-                        }`}
+                              ? "bg-teal-50/40 hover:bg-teal-50/70 dark:bg-teal-950/20 dark:hover:bg-teal-950/40"
+                              : item.is_changed
+                                ? "bg-amber-50/30 hover:bg-amber-50/60 dark:bg-amber-950/10 dark:hover:bg-amber-950/20"
+                                : "hover:bg-slate-50 dark:hover:bg-zinc-900/50"
+                          }`}
                       >
                         <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">
                           <div>{item.outlet_name}</div>

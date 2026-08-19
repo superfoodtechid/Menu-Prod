@@ -2692,7 +2692,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
 
 
 def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
-    """Background task to push C5 menu changes (name + price) to the real GoFood store."""
+    """Background task to push C5 menu changes (name + price + photos + categories) to real store (GoFood or GrabFood)."""
     from menu_core.database import SessionLocal
     db = SessionLocal()
     job = db.query(Job).filter(Job.id == job_id).first()
@@ -2700,26 +2700,27 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         db.close()
         return
 
-    lock = PLATFORM_LOCKS.get("gofood")
+    platform = (job.platform or "gofood").lower()
+    lock = PLATFORM_LOCKS.get(platform)
     if lock:
-        logger.info(f"🔒 C5 job {job_id} (gofood) waiting for lock...")
+        logger.info(f"🔒 C5 job {job_id} ({platform}) waiting for lock...")
         lock.acquire()
-        logger.info(f"🔓 C5 job {job_id} (gofood) acquired lock.")
+        logger.info(f"🔓 C5 job {job_id} ({platform}) acquired lock.")
 
     try:
         job.status = "RUNNING"
         job.started_at = datetime.utcnow()
         job.progress_pct = 10
-        job.current_step = "Menginisialisasi kredensial GoFood..."
+        job.current_step = f"Menginisialisasi kredensial {platform.title()}..."
         db.commit()
 
         total_updates = len(updates_list)
         success_count = 0
         fail_count = 0
 
-        logger.info(f"🚀 run_push_c5_job starting for job {job_id}. Selected SIDs: {selected_sids}, total updates: {total_updates}")
+        logger.info(f"🚀 run_push_c5_job starting for job {job_id}, platform {platform}. Selected SIDs: {selected_sids}, total updates: {total_updates}")
 
-        # Group updates by Store ID — each SID is a separate GoFood merchant/login.
+        # Group updates by Store ID — each SID is a separate merchant/login.
         updates_by_sid = {}
         for upd in updates_list:
             sid = (upd.get("sid") or "").strip() or (selected_sids[0] if selected_sids else "")
@@ -2745,7 +2746,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                 outlet_id=job.outlet_id or uuid.uuid4(),
                 item_id=str(upd.get("item_id", "")),
                 item_name=str(upd.get("item_name", "")),
-                change_type="C5_PUSH_GOFOOD",
+                change_type=f"C5_PUSH_{platform.upper()}",
                 field_changed=change_str,
                 old_value=str(upd.get("item_name") or upd.get("current_fake_price") or ""),
                 new_value=" | ".join(new_val) if new_val else ("Updated" if status_str == "SUCCESS" else ""),
@@ -2756,25 +2757,27 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
             db.commit()
 
         for sid, sid_updates in updates_by_sid.items():
-            # Resolve the outlet + account credentials for this Store ID.
-            outlet = db.query(Outlet).filter(Outlet.store_id == sid).first()
+            # Resolve the outlet + account credentials for this Store ID & platform.
+            outlet = db.query(Outlet).filter(Outlet.store_id == sid, Outlet.platform == platform).first()
+            if not outlet:
+                outlet = db.query(Outlet).filter(Outlet.store_id == sid).first()
             if not outlet and sid:
                 cands = [sid.replace("GM", "M"), sid.lstrip("G"), "G" + sid]
                 for csid in cands:
-                    outlet = db.query(Outlet).filter(Outlet.store_id == csid, Outlet.platform == "gofood").first()
+                    outlet = db.query(Outlet).filter(Outlet.store_id == csid).first()
                     if outlet:
                         break
             account = db.query(Account).filter(Account.id == outlet.account_id).first() if outlet else None
 
             if not outlet or not account:
-                logger.warning(f"⚠️ Outlet/akun tidak ditemukan untuk SID {sid}. Menandai {len(sid_updates)} item gagal.")
+                logger.warning(f"⚠️ Outlet/akun tidak ditemukan untuk SID {sid} ({platform}). Menandai {len(sid_updates)} item gagal.")
                 for upd in sid_updates:
                     processed += 1
                     fail_count += 1
-                    record_trail(upd, "FAILED", f"Outlet atau akun GoFood tidak ditemukan untuk Store ID {sid}.")
+                    record_trail(upd, "FAILED", f"Outlet atau akun {platform.title()} tidak ditemukan untuk Store ID {sid}.")
                 continue
 
-            job.current_step = f"Login GoFood & memproses Store {sid} ({len(sid_updates)} item)..."
+            job.current_step = f"Login {platform.title()} & memproses Store {sid} ({len(sid_updates)} item)..."
             db.commit()
 
             def progress_cb(idx, total, upd, _sid=sid):
@@ -2783,18 +2786,28 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                 db.commit()
 
             try:
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    results = executor.submit(
-                        _push_c5_gofood_for_merchant,
-                        email=account.username,
+                if platform == "grab":
+                    from grab.core.push_c5 import push_c5_grab_for_merchant
+                    results = push_c5_grab_for_merchant(
+                        username=account.username,
                         password=account.password,
-                        merchant_id=outlet.store_id,
+                        store_id=outlet.store_id,
                         updates=sid_updates,
                         progress_cb=progress_cb,
-                    ).result()
+                    )
+                else:
+                    from concurrent.futures import ThreadPoolExecutor
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        results = executor.submit(
+                            _push_c5_gofood_for_merchant,
+                            email=account.username,
+                            password=account.password,
+                            merchant_id=outlet.store_id,
+                            updates=sid_updates,
+                            progress_cb=progress_cb,
+                        ).result()
             except Exception as ex:
-                logger.error(f"❌ Gagal push GoFood untuk SID {sid}: {ex}")
+                logger.error(f"❌ Gagal push {platform.title()} untuk SID {sid}: {ex}")
                 for upd in sid_updates:
                     processed += 1
                     fail_count += 1
@@ -2820,7 +2833,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         job.completed_at = datetime.utcnow()
         job.progress_pct = 100
         if fail_count == 0:
-            job.current_step = "Selesai di-push ke GoFood!"
+            job.current_step = f"Selesai di-push ke {platform.title()}!"
         elif success_count > 0:
             job.current_step = f"Selesai dengan sebagian gagal: {success_count} sukses, {fail_count} gagal."
         else:
@@ -2830,6 +2843,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
             "fail_count": fail_count,
             "selected_sids": selected_sids,
             "total_updates": total_updates,
+            "platform": platform,
         }
         db.commit()
     except Exception as ex:
@@ -3373,14 +3387,17 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
 
 @app.post("/api/jobs/push-c5", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
 def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Triggers background job to push C5 menu updates (GoFood) for selected Store IDs (SIDs)."""
+    """Triggers background job to push C5 menu updates (GoFood or GrabFood) for selected Store IDs (SIDs)."""
+    target_platform = (request.platform or "gofood").lower()
     outlet = None
     if request.selected_sids:
         target_sid = request.selected_sids[0]
-        outlet = db.query(Outlet).filter(Outlet.store_id == target_sid).first()
+        outlet = db.query(Outlet).filter(Outlet.store_id == target_sid, Outlet.platform == target_platform).first()
+        if not outlet:
+            outlet = db.query(Outlet).filter(Outlet.store_id == target_sid).first()
 
     if not outlet:
-        outlet = db.query(Outlet).join(Account).filter(Account.platform == "gofood").first()
+        outlet = db.query(Outlet).join(Account).filter(Account.platform == target_platform).first()
 
     outlet_id = outlet.id if outlet else uuid.uuid4()
     updates_payload = [item.dict() for item in request.updates]
@@ -3388,14 +3405,14 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
     new_job = Job(
         outlet_id=outlet_id,
         job_type="PUSH_UPDATE",
-        platform="gofood",
+        platform=target_platform,
         status="PENDING",
         progress_pct=0,
-        current_step="Mengantrekan C5 push GoFood...",
+        current_step=f"Mengantrekan C5 push {target_platform.title()}...",
         payload={
             "selected_sids": request.selected_sids,
             "updates_count": len(updates_payload),
-            "platform": "gofood"
+            "platform": target_platform
         }
     )
     db.add(new_job)

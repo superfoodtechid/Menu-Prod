@@ -367,6 +367,54 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         # Write to O. C5 Template Excel
         template_path = str(WORKSPACE_DIR / "O. C5 Template.xlsx")
         import openpyxl
+
+        # ── Kolom yang bisa diisi user secara manual (akan di-preserve saat re-pull) ──
+        USER_EDITABLE_COLS = [
+            'Keyword',                   # Kol L
+            'Item Name Improvement',     # Kol M
+            'Design Improvement',        # Kol N
+            'Offline Price (Rp)',        # Kol W
+            'Offline Adjustment (Rp)',   # Kol X
+            'Current Adjustment (Rp)',   # Kol AC
+            'New Markup (%)',            # Kol AI
+            'New Adjustment (Rp)',       # Kol AK
+            'New Slash Price (%)',       # Kol AM
+            'Notes',                     # Kol AP
+        ]
+
+        # ── Load data user dari C5 lama (jika ada) ──
+        prev_user_data = {}  # { item_id: { col_name: value } }
+        if os.path.exists(excel_path):
+            try:
+                wb_prev = openpyxl.load_workbook(excel_path, data_only=True)
+                if 'Item' in wb_prev.sheetnames:
+                    sheet_prev = wb_prev['Item']
+                    prev_headers = {}
+                    for cell in sheet_prev[1]:
+                        if cell.value:
+                            prev_headers[str(cell.value).strip()] = cell.column - 1  # 0-indexed
+                    item_id_idx = prev_headers.get('Item ID')
+                    edit_col_indices = {col: prev_headers[col] for col in USER_EDITABLE_COLS if col in prev_headers}
+                    if item_id_idx is not None:
+                        for row_cells in sheet_prev.iter_rows(min_row=2, values_only=True):
+                            raw_iid = row_cells[item_id_idx] if item_id_idx < len(row_cells) else None
+                            if raw_iid is None or str(raw_iid).strip() in ('', 'None', 'nan'):
+                                continue
+                            iid = str(raw_iid).strip()
+                            row_data = {}
+                            for col_name, col_idx in edit_col_indices.items():
+                                if col_idx < len(row_cells):
+                                    val = row_cells[col_idx]
+                                    if val is not None and str(val).strip() not in ('', 'None', 'nan'):
+                                        row_data[col_name] = val
+                            if row_data:
+                                prev_user_data[iid] = row_data
+                wb_prev.close()
+                if prev_user_data:
+                    print(f"[🔄] Ditemukan C5 sebelumnya — memuat {len(prev_user_data)} baris data user untuk di-preserve.")
+            except Exception as prev_err:
+                print(f"[⚠️] Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
+
         try:
             wb = openpyxl.load_workbook(template_path)
             
@@ -380,6 +428,10 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             
             new_row_idx = 2
             for d in all_dishes:
+                # Lookup data user lama berdasarkan Item ID (dish_id)
+                dish_id_str = str(d.get('dish_id', '')).strip()
+                prev_row = prev_user_data.get(dish_id_str, {})
+
                 mapping = {
                     'OFD': d['ofd'],
                     'Outlet Name': d['nama_panjang'],
@@ -404,6 +456,11 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     'Current Slash Price (Rp)': d['slash_price_rp']
                 }
                 
+                # Tambahkan kolom user-editable dari C5 lama jika ada
+                for col_name in USER_EDITABLE_COLS:
+                    if col_name not in mapping and col_name in prev_row:
+                        mapping[col_name] = prev_row[col_name]
+                
                 for key, val in mapping.items():
                     if key in headers_item:
                         col_idx = headers_item[key]
@@ -414,6 +471,9 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                                 val = str(int(val)) if val.is_integer() else str(val)
                             else:
                                 val = str(val)
+                        # Jika kolom ini bisa diisi user & nilai baru kosong, restore nilai lama
+                        if key in USER_EDITABLE_COLS and (val == "" or val is None):
+                            val = prev_row.get(key, val)
                         sheet_item.cell(row=new_row_idx, column=col_idx, value=val)
                 new_row_idx += 1
                         
@@ -459,7 +519,11 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 new_row_idx += 1
                         
             wb.save(excel_path)
-            print(f"[+] Berhasil menyimpan file catalog menggunakan template O.C5 ke: {excel_path}")
+            if prev_user_data:
+                print(f"[+] Berhasil menyimpan file catalog dengan data user yang di-preserve ke: {excel_path}")
+            else:
+                print(f"[+] Berhasil menyimpan file catalog menggunakan template O.C5 ke: {excel_path}")
+
         except Exception as ex_err:
             print(f"[-] Gagal menulis ke template O.C5: {ex_err}. Fallback ke Excel biasa.")
             # Fallback to standard excel writer if template fails
