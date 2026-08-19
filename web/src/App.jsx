@@ -22,6 +22,11 @@ export default function Home() {
     if (import.meta.env.VITE_API_URL) {
       return import.meta.env.VITE_API_URL.replace(/\/+$/, "");
     }
+    if (typeof window !== "undefined" && window.location.hostname) {
+      const protocol = window.location.protocol || "http:";
+      const hostname = window.location.hostname;
+      return `${protocol}//${hostname}:8000`;
+    }
     return "";
   };
   const API_BASE_URL = getApiBaseUrl();
