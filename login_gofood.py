@@ -345,7 +345,7 @@ def save_gofood_session(identifier, session_data):
         print(f"   ⚠️ Gagal menyimpan berkas sesi untuk {identifier}: {e}")
 
 
-def login_outlet(outlet_info, proxy_config=None):
+def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
     """
     Membuka browser Chromium untuk login otomatis 1 outlet.
     Menangkap token, menyimpannya di .env, dan mengembalikannya.
@@ -499,15 +499,16 @@ def login_outlet(outlet_info, proxy_config=None):
         # Check if we have a cached session for one of the emails or phone
         cached_identifier = None
         cached_data = None
-        for email in emails_to_try:
-            cached_data = load_gofood_session(email)
-            if cached_data:
-                cached_identifier = email
-                break
-        if not cached_data and phone:
-            cached_data = load_gofood_session(phone)
-            if cached_data:
-                cached_identifier = phone
+        if not disable_cache:
+            for email in emails_to_try:
+                cached_data = load_gofood_session(email)
+                if cached_data:
+                    cached_identifier = email
+                    break
+            if not cached_data and phone:
+                cached_data = load_gofood_session(phone)
+                if cached_data:
+                    cached_identifier = phone
 
         if cached_data and cached_data.get('cookies'):
             try:
@@ -966,14 +967,32 @@ def login_outlet(outlet_info, proxy_config=None):
                 print(f"   ⚠️ URL saat ini masih di {current_url}. Sesi kedaluwarsa/invalid.")
                 access_token = None
                 session_loaded_successfully = False
-                context.clear_cookies()
                 if cached_identifier:
                     sanitized_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(cached_identifier).strip().lower())
                     old_session = MENU_DIR / "Gofood" / f"session_gofood_{sanitized_id}.json"
                     if old_session.exists():
-                        try: os.remove(old_session)
+                        try:
+                            os.remove(old_session)
+                            print(f"   🗑️ Sesi kedaluwarsa {old_session.name} berhasil dihapus.")
                         except Exception: pass
-                raise RuntimeError(f"Halaman masih terdampar di {current_url} (unauthenticated). Sesi tidak valid, perlu fresh login.")
+
+                # Tutup Playwright & browser dengan bersih sebelum memicu fresh login
+                try: context.clear_cookies()
+                except Exception: pass
+                try: page.close()
+                except Exception: pass
+                try: browser.close()
+                except Exception: pass
+                try: p.stop()
+                except Exception: pass
+                try:
+                    if chrome_process and chrome_process.poll() is None:
+                        chrome_process.terminate()
+                except Exception: pass
+
+                # Memicu fresh login ulang otomatis via OTP (tanpa sesi cache)
+                print("   🔄 Sesi lama dibersihkan. Memulai fresh login otomatis via OTP...")
+                return login_outlet(outlet_info, proxy_config=proxy_config, disable_cache=True)
 
             # Jika URL mengandung 'choose' atau 'choose-outlet', kita perlu memilih merchant
             elif "choose" in current_url or "outlet" in current_url:
