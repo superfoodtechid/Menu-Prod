@@ -417,6 +417,53 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     BASE_DIR = Path(__file__).resolve().parents[1]
     template_path = BASE_DIR / "O. C5 Template.xlsx"
     
+    # ── Kolom yang bisa diisi user secara manual (akan di-preserve saat re-pull) ──
+    USER_EDITABLE_COLS = [
+        'Keyword',                   # Kol L
+        'Item Name Improvement',     # Kol M
+        'Design Improvement',        # Kol N
+        'Offline Price (Rp)',        # Kol W
+        'Offline Adjustment (Rp)',   # Kol X
+        'Current Adjustment (Rp)',   # Kol AC
+        'New Markup (%)',            # Kol AI
+        'New Adjustment (Rp)',       # Kol AK
+        'New Slash Price (%)',       # Kol AM
+        'Notes',                     # Kol AP
+    ]
+    
+    # ── Load data user dari C5 lama (jika ada) ──
+    prev_user_data = {}  # { item_id: { col_name: value } }
+    if os.path.exists(excel_path):
+        try:
+            wb_prev = openpyxl.load_workbook(excel_path, data_only=True)
+            if 'Item' in wb_prev.sheetnames:
+                sheet_prev = wb_prev['Item']
+                prev_headers = {}
+                for cell in sheet_prev[1]:
+                    if cell.value:
+                        prev_headers[str(cell.value).strip()] = cell.column - 1  # 0-indexed
+                item_id_idx = prev_headers.get('Item ID')
+                edit_col_indices = {col: prev_headers[col] for col in USER_EDITABLE_COLS if col in prev_headers}
+                if item_id_idx is not None:
+                    for row_cells in sheet_prev.iter_rows(min_row=2, values_only=True):
+                        raw_iid = row_cells[item_id_idx] if item_id_idx < len(row_cells) else None
+                        if raw_iid is None or str(raw_iid).strip() in ('', 'None', 'nan'):
+                            continue
+                        iid = str(raw_iid).strip()
+                        row_data = {}
+                        for col_name, col_idx in edit_col_indices.items():
+                            if col_idx < len(row_cells):
+                                val = row_cells[col_idx]
+                                if val is not None and str(val).strip() not in ('', 'None', 'nan'):
+                                    row_data[col_name] = val
+                        if row_data:
+                            prev_user_data[iid] = row_data
+            wb_prev.close()
+            if prev_user_data:
+                print(f"   🔄 Ditemukan C5 sebelumnya — memuat {len(prev_user_data)} baris data user untuk di-preserve.")
+        except Exception as prev_err:
+            print(f"   ⚠️ Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
+    
     try:
         wb = openpyxl.load_workbook(template_path)
         sheet_item = wb['Item']
@@ -424,6 +471,10 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             sheet_item.delete_rows(2, sheet_item.max_row - 1)
         headers_item = {cell.value: cell.column for cell in sheet_item[1]}
         for r_idx, row in df_items.iterrows():
+            # Ambil Item ID untuk lookup data user lama
+            item_id_val = str(row.get('Item ID', '')).strip()
+            prev_row = prev_user_data.get(item_id_val, {})
+            
             for col_name, val in row.items():
                 if col_name in headers_item:
                     if pd.isna(val):
@@ -433,6 +484,11 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                             val = str(int(val)) if val.is_integer() else str(val)
                         else:
                             val = str(val)
+                    
+                    # Jika kolom ini bisa diisi user & nilai baru kosong, restore nilai lama
+                    if col_name in USER_EDITABLE_COLS and (val == "" or val is None):
+                        val = prev_row.get(col_name, val)
+                    
                     sheet_item.cell(row=r_idx + 2, column=headers_item[col_name], value=val)
                     
         sheet_mod = wb['Modifier']
@@ -452,7 +508,11 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                     sheet_mod.cell(row=r_idx + 2, column=headers_mod[col_name], value=val)
                     
         wb.save(excel_path)
-        print(f"   ✅ Berhasil menyimpan file catalog menggunakan template O.C5 ke: {excel_path}")
+        if prev_user_data:
+            merged_count = sum(1 for iid in prev_user_data if any(str(row.get('Item ID', '')).strip() == iid for _, row in df_items.iterrows()))
+            print(f"   ✅ Berhasil menyimpan file catalog dengan {merged_count} baris data user yang di-preserve.")
+        else:
+            print(f"   ✅ Berhasil menyimpan file catalog menggunakan template O.C5 ke: {excel_path}")
     except Exception as ex_err:
         print(f"   [-] Gagal menulis ke template O.C5: {ex_err}. Fallback ke Excel biasa.")
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:

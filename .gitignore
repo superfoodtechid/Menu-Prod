@@ -72,3 +72,6 @@ creds_testing.json
 *.bak
 
 Gofood/API/*.json
+
+catanan/
+
