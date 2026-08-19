@@ -22,13 +22,7 @@ export default function Home() {
     if (import.meta.env.VITE_API_URL) {
       return import.meta.env.VITE_API_URL.replace(/\/+$/, "");
     }
-    if (typeof window !== "undefined") {
-      if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-        return "http://localhost:18800";
-      }
-      return `${window.location.protocol}//${window.location.hostname}:8000`;
-    }
-    return "http://localhost:18800";
+    return "";
   };
   const API_BASE_URL = getApiBaseUrl();
   const API_SECRET_KEY = import.meta.env.VITE_API_KEY || "foodmaster-secret-api-key-2026";

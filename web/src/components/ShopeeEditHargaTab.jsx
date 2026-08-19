@@ -569,17 +569,19 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
       }).then(r => r.ok ? r.json() : []);
     })
       .then(data => {
-        setAllOutlets(data || []);
+        setAllOutlets(Array.isArray(data) ? data : []);
         setLoading(false);
       })
       .catch(err => {
         console.error("Error fetching Shopee outlets:", err);
+        setAllOutlets([]);
         setLoading(false);
       });
   }, [API_BASE_URL, API_SECRET_KEY, triggerGSheetSync]);
 
   // Unique Parents list
   const uniqueParents = useMemo(() => {
+    if (!Array.isArray(allOutlets)) return [];
     const setNames = new Set();
     allOutlets.forEach(o => {
       const name = o.nama_outlet || o.nama_resto_final || o.merchant_name;
