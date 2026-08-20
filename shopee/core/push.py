@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 shopee/core/push.py — Push Update Harga Shopee Partner.
-Menggunakan push_browser.get_push_session() yang mendukung OTP interaktif penuh:
-saat Shopee meminta verifikasi OTP, browser tetap terbuka dan menunggu kode
-dari endpoint /api/shopee/submit-otp (file otp_request_{username}.json).
+Disesuaikan secara simetris dengan shopee/core/pull.py.
+Menggunakan engine browser core yang sama (browser.get_session)
+dengan penanganan otomatis sesi tersimpan, switcher merchant, dan OTP.
 """
 
 import sys
+import json
 import time
 from pathlib import Path
 from shopee.core.client import ShopeeModifyClient
@@ -16,11 +17,9 @@ WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent
 AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
+from core import browser
 
-# Gunakan push_browser yang mendukung OTP interaktif penuh
-from shopee.core.push_browser import get_push_session
-
-def _boot_push_client(store_metadata: dict, headless: bool = False) -> tuple[ShopeeModifyClient | None, str]:
+def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeModifyClient | None, str]:
     store_id = store_metadata.get("store_id")
     if isinstance(store_id, str):
         store_id = store_id.strip().split('.')[0]
@@ -29,25 +28,44 @@ def _boot_push_client(store_metadata: dict, headless: bool = False) -> tuple[Sho
 
     username = store_metadata.get("username") or "superfoodapp"
     password = store_metadata.get("password") or "Master@00@"
-
+    
     m_name = store_metadata.get('merchant_name', '')
     if not m_name or m_name.lower() == 'nan' or m_name == '-':
         target_name = store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or ''
     else:
         target_name = m_name
-
+        
     target_name = _resolve_target_merchant_name(username, target_name, store_metadata)
-
+    
+    automation_data_dir = AUTOMATION_DIR / "data"
+    automation_data_dir.mkdir(parents=True, exist_ok=True)
+    session_file = automation_data_dir / f"session_{username}.json"
+    browser.set_session_file(session_file)
+    
     print(f"[*] [PUSH] Membuka browser (headless={headless}) untuk akun '{username}', merchant: '{target_name}'...")
-
-    # get_push_session mendukung OTP interaktif — browser TIDAK ditutup saat OTP muncul,
-    # melainkan menunggu kode OTP dari endpoint /api/shopee/submit-otp.
-    session_data = get_push_session(
-        username=username,
-        password=password,
-        target_name=target_name,
-        headless=headless
-    )
+    session_data = None
+    try:
+        session_data = browser.get_session(
+            username=username,
+            password=password,
+            headless=headless,
+            close_browser=True,
+            target_name=target_name,
+            interactive=True
+        )
+    except Exception as e:
+        print(f"[WARN] get_session with target_name '{target_name}' failed ({e}). Retrying without target_name filter...")
+        try:
+            session_data = browser.get_session(
+                username=username,
+                password=password,
+                headless=headless,
+                close_browser=True,
+                target_name="",
+                interactive=True
+            )
+        except Exception as ex:
+            return None, f"Gagal menginisialisasi browser session: {ex}"
 
     if not session_data or "shopee_tob_token" not in session_data:
         return None, f"Gagal menginisialisasi browser session untuk akun '{username}'"

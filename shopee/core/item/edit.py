@@ -19,7 +19,7 @@ def _resolve_target_merchant_name(username: str, merchant_name: str, store_metad
         return merchant_name
     return store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or ''
 
-def _boot_client(store_metadata: dict, headless: bool = False) -> tuple[ShopeeModifyClient | None, str]:
+def _boot_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeModifyClient | None, str]:
     store_id = store_metadata["store_id"]
     username = store_metadata.get("username")
     password = store_metadata.get("password")
