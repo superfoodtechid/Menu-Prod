@@ -83,10 +83,12 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: 
                 # Cek jika pengguna memilih saluran WhatsApp di Web UI
                 req_channel = (data.get("requested_channel") or "").lower()
                 if driver and req_channel == "whatsapp" and not whatsapp_triggered:
-                    whatsapp_triggered = True
                     log.info("📲 [OTP] Pengguna memilih WhatsApp di Web UI! Menjalankan 'metode verifikasi lainnya'...")
                     try:
-                        _handle_verification_method_selection(driver, target_method="whatsapp")
+                        success = _handle_verification_method_selection(driver, target_method="whatsapp")
+                        if success:
+                            whatsapp_triggered = True
+                            log.info("✅ [OTP] Pemicuan WhatsApp OTP sukses!")
                     except Exception as ch_err:
                         log.error(f"Gagal memproses pemicuan WhatsApp OTP: {ch_err}")
 
@@ -836,28 +838,62 @@ def _handle_verification_method_selection(driver, target_method: str = None) -> 
                         "coba metode verifikasi", "verifikasi lainnya",
                         "use another verification", "try another method",
                         "other verification", "cara lain"];
-        var els = Array.from(document.querySelectorAll('a, button, span, div, p'));
+
+        function forceClick(el) {
+            if (!el) return;
+            try { el.scrollIntoView({block: 'center'}); } catch(e) {}
+            try { el.focus(); } catch(e) {}
+            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
+                try {
+                    var evt = new MouseEvent(evtName, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        buttons: 1
+                    });
+                    el.dispatchEvent(evt);
+                } catch(e) {}
+            });
+            try { el.click(); } catch(e) {}
+        }
+
+        var candidates = [];
+        var els = Array.from(document.querySelectorAll('a, button, [role="button"], span, div, p'));
         for (var i = 0; i < els.length; i++) {
             var el = els[i];
             var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
             for (var k = 0; k < keywords.length; k++) {
                 if (txt.includes(keywords[k]) && txt.length < 80) {
-                    var targets = [el, el.parentElement,
-                                   el.closest('a, button, div, [role="button"]')
-                                   ].filter(Boolean);
-                    for (var t = 0; t < targets.length; t++) {
-                        var tgt = targets[t];
-                        try { tgt.click(); } catch(e) {}
-                        try {
-                            tgt.dispatchEvent(new MouseEvent('click',
-                                {bubbles:true, cancelable:true, view:window}));
-                        } catch(e) {}
-                    }
-                    return el.innerText || el.textContent || "clicked";
+                    candidates.push({el: el, len: txt.length, txt: txt});
+                    break;
                 }
             }
         }
-        return null;
+
+        if (candidates.length === 0) return null;
+
+        // Urutkan kandidat berdasarkan panjang teks ASCENDING agar elemen link terkecil (innermost node) terpilih dulu
+        candidates.sort(function(a, b) {
+            var tagA = a.el.tagName.toLowerCase();
+            var tagB = b.el.tagName.toLowerCase();
+            var isInteractiveA = (tagA === 'a' || tagA === 'button' || a.el.getAttribute('role') === 'button');
+            var isInteractiveB = (tagB === 'a' || tagB === 'button' || b.el.getAttribute('role') === 'button');
+
+            if (isInteractiveA && !isInteractiveB) return -1;
+            if (!isInteractiveA && isInteractiveB) return 1;
+            return a.len - b.len;
+        });
+
+        var chosen = candidates[0].el;
+        var textMatch = candidates[0].txt;
+
+        forceClick(chosen);
+        var parentInteractive = chosen.closest('a, button, [role="button"]');
+        if (parentInteractive && parentInteractive !== chosen) {
+            forceClick(parentInteractive);
+        }
+
+        return textMatch || "clicked";
     """
 
     JS_IS_METHOD_SCREEN = """
@@ -871,44 +907,98 @@ def _handle_verification_method_selection(driver, target_method: str = None) -> 
     """
 
     JS_CLICK_WHATSAPP = """
-        var els = Array.from(document.querySelectorAll(
-            'button, div[role="button"], a, label, li, span, p'));
+        function forceClick(el) {
+            if (!el) return;
+            try { el.scrollIntoView({block: 'center'}); } catch(e) {}
+            try { el.focus(); } catch(e) {}
+            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
+                try {
+                    var evt = new MouseEvent(evtName, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        buttons: 1
+                    });
+                    el.dispatchEvent(evt);
+                } catch(e) {}
+            });
+            try { el.click(); } catch(e) {}
+        }
+
+        var candidates = [];
+        var els = Array.from(document.querySelectorAll('button, div[role="button"], a, label, li, span, div, p'));
         for (var i = 0; i < els.length; i++) {
             var el = els[i];
             var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
             if (txt.includes("whatsapp") && txt.length < 60) {
-                var targets = [el, el.parentElement,
-                               el.closest('button, div, a, li, [role="button"]')
-                               ].filter(Boolean);
-                for (var t = 0; t < targets.length; t++) {
-                    var tgt = targets[t];
-                    try { tgt.click(); } catch(e) {}
-                    try {
-                        tgt.dispatchEvent(new MouseEvent('click',
-                            {bubbles:true, cancelable:true, view:window}));
-                    } catch(e) {}
-                }
-                return el.innerText || el.textContent || "clicked";
+                candidates.push({el: el, len: txt.length, txt: txt});
             }
         }
-        return null;
+
+        if (candidates.length === 0) return null;
+
+        candidates.sort(function(a, b) {
+            var tagA = a.el.tagName.toLowerCase();
+            var tagB = b.el.tagName.toLowerCase();
+            var isInteractiveA = (tagA === 'button' || tagA === 'a' || a.el.getAttribute('role') === 'button');
+            var isInteractiveB = (tagB === 'button' || tagB === 'a' || b.el.getAttribute('role') === 'button');
+
+            if (isInteractiveA && !isInteractiveB) return -1;
+            if (!isInteractiveA && isInteractiveB) return 1;
+            return a.len - b.len;
+        });
+
+        var chosen = candidates[0].el;
+        var textMatch = candidates[0].txt;
+
+        forceClick(chosen);
+        var parentInteractive = chosen.closest('button, a, div[role="button"], li');
+        if (parentInteractive && parentInteractive !== chosen) {
+            forceClick(parentInteractive);
+        }
+
+        return textMatch || "clicked";
     """
 
     JS_CLICK_CONFIRM_AFTER_WA = """
         var keywords = ["kirim", "lanjutkan", "konfirmasi", "send", "continue",
                         "confirm", "selanjutnya", "next", "submit", "verifikasi"];
-        var els = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+        function forceClick(el) {
+            if (!el) return;
+            try { el.scrollIntoView({block: 'center'}); } catch(e) {}
+            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
+                try {
+                    var evt = new MouseEvent(evtName, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        buttons: 1
+                    });
+                    el.dispatchEvent(evt);
+                } catch(e) {}
+            });
+            try { el.click(); } catch(e) {}
+        }
+
+        var candidates = [];
+        var els = Array.from(document.querySelectorAll('button, div[role="button"], a, input[type="submit"]'));
         for (var i = 0; i < els.length; i++) {
             var el = els[i];
-            var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
+            var txt = (el.innerText || el.textContent || el.value || "").toLowerCase().trim();
             for (var k = 0; k < keywords.length; k++) {
                 if (txt.includes(keywords[k]) && txt.length < 40) {
-                    try { el.click(); } catch(e) {}
-                    return txt;
+                    candidates.push({el: el, len: txt.length, txt: txt});
+                    break;
                 }
             }
         }
-        return null;
+
+        if (candidates.length === 0) return null;
+
+        candidates.sort(function(a, b) { return a.len - b.len; });
+        var chosen = candidates[0].el;
+        forceClick(chosen);
+        return candidates[0].txt || "clicked";
     """
 
     try:
