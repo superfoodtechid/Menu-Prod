@@ -832,7 +832,7 @@ def _handle_verification_method_selection(driver, target_method: str = None) -> 
     log.info(f"🔑 [OTP] Menjalankan verifikasi saluran target='{target_method.upper()}'...")
 
     JS_CLICK_METODE_LAIN = """
-        var keywords = ["metode verifikasi lainnya", "metode verifikasi lain",
+        var keywords = ["cara lain untuk verifikasi", "metode verifikasi lainnya", "metode verifikasi lain",
                         "coba metode verifikasi", "verifikasi lainnya",
                         "use another verification", "try another method",
                         "other verification", "cara lain"];
