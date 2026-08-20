@@ -43,7 +43,7 @@ OTP_WAIT_TIMEOUT    = 600  # 10 menit
 
 # ── Driver ─────────────────────────────────────────────────────────────────────
 
-def _init_push_driver(username: str, headless: bool = True) -> webdriver.Chrome:
+def _init_push_driver(username: str, headless: bool = False) -> webdriver.Chrome:
     """Inisialisasi Chrome dengan profil terisolasi untuk username tertentu."""
     options = Options()
     options.add_argument("--log-level=3")
