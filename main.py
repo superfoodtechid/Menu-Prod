@@ -5,9 +5,17 @@ import uuid
 import logging
 import threading
 import time
+import builtins
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
+
+# Override standard print to include timestamp
+_original_print = builtins.print
+def timestamped_print(*args, **kwargs):
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _original_print(f"[{now_str}]", *args, **kwargs)
+builtins.print = timestamped_print
 
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Query, status, Request, File, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
@@ -27,7 +35,11 @@ sys.path.append(str(BASE_DIR / "menu_core"))
 from menu_core.database import get_db, init_db, Account, Outlet, Job, AuditTrail
 
 # Setup Logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 logger = logging.getLogger("FoodMasterAPI")
 
 # Initialize database tables on startup
