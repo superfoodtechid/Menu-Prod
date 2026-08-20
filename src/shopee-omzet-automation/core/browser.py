@@ -821,137 +821,184 @@ def _handle_verification_method_selection(driver, target_method: str = None) -> 
     Handling fleksibel verifikasi Shopee (SMS atau WhatsApp):
     - target_method 'whatsapp': Mengklik 'metode verifikasi lainnya' lalu memilih WhatsApp.
     - target_method 'sms': Menggunakan saluran SMS.
+
+    PENTING: Fungsi ini dipanggil SETELAH sinyal dari UI diterima (sudah 60 detik dari
+    pengiriman SMS OTP pertama), sehingga tombol 'metode verifikasi lainnya' di Shopee
+    seharusnya sudah aktif. Loop singkat mencari + klik link tersebut, lalu klik WhatsApp.
     """
     if not target_method:
         target_method = os.getenv("SHOPEE_OTP_METHOD", "auto").lower()
 
     log.info(f"🔑 [OTP] Menjalankan verifikasi saluran target='{target_method.upper()}'...")
 
-    try:
-        # Cek apakah layar saat ini adalah modal pilihan (atau opsi WhatsApp sudah ada di DOM)
-        is_method_screen = driver.execute_script("""
-            var bodyText = (document.body.innerText || document.body.textContent || "").toLowerCase();
-            return bodyText.includes("whatsapp") ||
-                   bodyText.includes("pilih metode") ||
-                   bodyText.includes("pilih cara") ||
-                   bodyText.includes("pilih verifikasi");
-        """)
+    JS_CLICK_METODE_LAIN = """
+        var keywords = ["metode verifikasi lainnya", "metode verifikasi lain",
+                        "coba metode verifikasi", "verifikasi lainnya",
+                        "use another verification", "try another method",
+                        "other verification", "cara lain"];
+        var els = Array.from(document.querySelectorAll('a, button, span, div, p'));
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
+            for (var k = 0; k < keywords.length; k++) {
+                if (txt.includes(keywords[k]) && txt.length < 80) {
+                    var targets = [el, el.parentElement,
+                                   el.closest('a, button, div, [role="button"]')
+                                   ].filter(Boolean);
+                    for (var t = 0; t < targets.length; t++) {
+                        var tgt = targets[t];
+                        try { tgt.click(); } catch(e) {}
+                        try {
+                            tgt.dispatchEvent(new MouseEvent('click',
+                                {bubbles:true, cancelable:true, view:window}));
+                        } catch(e) {}
+                    }
+                    return el.innerText || el.textContent || "clicked";
+                }
+            }
+        }
+        return null;
+    """
 
-        # Jika target 'whatsapp' dan belum berada di layar pilihan / tombol whatsapp belum tampil
-        if not is_method_screen and target_method == "whatsapp":
-            log.info("🔍 [OTP] Memeriksa tautan 'metode verifikasi lainnya' (menunggu timer 60s Shopee)...")
-            start_wait = time.time()
-            while time.time() - start_wait < 65:
-                # 1. Cek apakah layar sudah berpindah ke modal pilihan atau opsi whatsapp sudah ada
-                is_method_screen = driver.execute_script("""
-                    var bodyText = (document.body.innerText || document.body.textContent || "").toLowerCase();
-                    return bodyText.includes("whatsapp") ||
-                           bodyText.includes("pilih metode") ||
-                           bodyText.includes("pilih cara") ||
-                           bodyText.includes("pilih verifikasi");
-                """)
+    JS_IS_METHOD_SCREEN = """
+        var bodyText = (document.body.innerText || document.body.textContent || "").toLowerCase();
+        return bodyText.includes("whatsapp") ||
+               bodyText.includes("pilih metode") ||
+               bodyText.includes("pilih cara") ||
+               bodyText.includes("pilih verifikasi") ||
+               bodyText.includes("select verification") ||
+               bodyText.includes("choose verification");
+    """
+
+    JS_CLICK_WHATSAPP = """
+        var els = Array.from(document.querySelectorAll(
+            'button, div[role="button"], a, label, li, span, p'));
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
+            if (txt.includes("whatsapp") && txt.length < 60) {
+                var targets = [el, el.parentElement,
+                               el.closest('button, div, a, li, [role="button"]')
+                               ].filter(Boolean);
+                for (var t = 0; t < targets.length; t++) {
+                    var tgt = targets[t];
+                    try { tgt.click(); } catch(e) {}
+                    try {
+                        tgt.dispatchEvent(new MouseEvent('click',
+                            {bubbles:true, cancelable:true, view:window}));
+                    } catch(e) {}
+                }
+                return el.innerText || el.textContent || "clicked";
+            }
+        }
+        return null;
+    """
+
+    JS_CLICK_CONFIRM_AFTER_WA = """
+        var keywords = ["kirim", "lanjutkan", "konfirmasi", "send", "continue",
+                        "confirm", "selanjutnya", "next", "submit", "verifikasi"];
+        var els = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
+            for (var k = 0; k < keywords.length; k++) {
+                if (txt.includes(keywords[k]) && txt.length < 40) {
+                    try { el.click(); } catch(e) {}
+                    return txt;
+                }
+            }
+        }
+        return null;
+    """
+
+    try:
+        is_method_screen = driver.execute_script(JS_IS_METHOD_SCREEN)
+        # ── Jika target WhatsApp dan belum di layar pilihan metode ──────────────
+        if target_method == "whatsapp" and not is_method_screen:
+            log.info("🔍 [OTP] Mencari tautan 'metode verifikasi lainnya'...")
+            # Sinyal dari UI sudah datang setelah 60 detik, jadi link seharusnya sudah muncul.
+            # Tetap coba selama 30 detik dengan interval 2 detik (15 percobaan).
+            start_link = time.time()
+            link_clicked = False
+            while time.time() - start_link < 30:
+                is_method_screen = driver.execute_script(JS_IS_METHOD_SCREEN)
                 if is_method_screen:
-                    log.info("✅ [OTP] Layar 'Pilih Metode Verifikasi' / Opsi WhatsApp terdeteksi!")
+                    log.info("✅ [OTP] Layar pilih metode verifikasi sudah tampil!")
                     break
 
-                # 2. Coba klik tautan 'metode verifikasi lainnya' via JS robust ke element & ancestor
-                clicked_link = driver.execute_script("""
-                    var keywords = ["metode verifikasi lainnya", "metode verifikasi lain", "coba metode verifikasi", "metode verifikasi"];
-                    var els = Array.from(document.querySelectorAll('a, button, span, div, p'));
-                    for (var i = 0; i < els.length; i++) {
-                        var el = els[i];
-                        var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
-                        for (var k = 0; k < keywords.length; k++) {
-                            if (txt.includes(keywords[k])) {
-                                var targets = [el, el.parentElement, el.closest('a, button, div, [role="button"]')].filter(Boolean);
-                                for (var t = 0; t < targets.length; t++) {
-                                    var target = targets[t];
-                                    try { target.click(); } catch(e) {}
-                                    try {
-                                        var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-                                        target.dispatchEvent(ev);
-                                    } catch(e) {}
-                                }
-                                return true;
-                            }
-                        }
-                    }
-                    return false;
-                """)
-
-                if clicked_link:
-                    log.info("👇 [OTP] Berhasil mengklik tautan 'metode verifikasi lainnya'!")
+                result = driver.execute_script(JS_CLICK_METODE_LAIN)
+                if result:
+                    log.info(f"👇 [OTP] Klik 'metode verifikasi lainnya': '{str(result).strip()[:60]}'")
+                    link_clicked = True
                     time.sleep(2)
-                    is_method_screen = driver.execute_script("""
-                        var bodyText = (document.body.innerText || document.body.textContent || "").toLowerCase();
-                        return bodyText.includes("whatsapp") ||
-                               bodyText.includes("pilih metode") ||
-                               bodyText.includes("pilih cara") ||
-                               bodyText.includes("pilih verifikasi");
-                    """)
+                    is_method_screen = driver.execute_script(JS_IS_METHOD_SCREEN)
                     if is_method_screen:
-                        log.info("✅ [OTP] Layar 'Pilih Metode Verifikasi' / Opsi WhatsApp terdeteksi!")
+                        log.info("✅ [OTP] Modal pilih metode muncul setelah klik link!")
                         break
-
-                time.sleep(1)
-
-        # Jika layar menunjukkan modal pilihan saluran (SMS / WhatsApp / Telepon)
-        if is_method_screen or target_method == "whatsapp":
-            if target_method == "whatsapp":
-                log.info("🔍 [OTP] Mengklik opsi verifikasi: 'WhatsApp'...")
-                clicked_wa = driver.execute_script("""
-                    var els = Array.from(document.querySelectorAll('button, div, span, p, a, label'));
-                    for (var i = 0; i < els.length; i++) {
-                        var el = els[i];
-                        var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
-                        if (txt.includes("whatsapp")) {
-                            var targets = [el, el.parentElement, el.closest('button, div, a, [role="button"]')].filter(Boolean);
-                            for (var t = 0; t < targets.length; t++) {
-                                var target = targets[t];
-                                try { target.click(); } catch(e) {}
-                                try {
-                                    var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-                                    target.dispatchEvent(ev);
-                                } catch(e) {}
-                            }
-                            return true;
-                        }
-                    }
-                    return false;
-                """)
-                if clicked_wa:
-                    log.info("✅ [OTP] Berhasil mengklik pilihan verifikasi WhatsApp!")
                     time.sleep(2)
-                    return True
+                    is_method_screen = driver.execute_script(JS_IS_METHOD_SCREEN)
+                    if is_method_screen:
+                        break
+                else:
+                    log.debug("  ⏳ Tautan 'metode verifikasi lainnya' belum ditemukan, tunggu...")
 
-            elif target_method == "sms":
-                log.info("🔍 [OTP] Mengklik opsi verifikasi: 'SMS'...")
-                clicked_sms = driver.execute_script("""
-                    var els = Array.from(document.querySelectorAll('button, div, span, p, a, label'));
-                    for (var i = 0; i < els.length; i++) {
-                        var el = els[i];
-                        var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
-                        if (txt.includes("sms")) {
-                            var targets = [el, el.parentElement, el.closest('button, div, a, [role="button"]')].filter(Boolean);
-                            for (var t = 0; t < targets.length; t++) {
-                                var target = targets[t];
-                                try { target.click(); } catch(e) {}
-                                try {
-                                    var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-                                    target.dispatchEvent(ev);
-                                } catch(e) {}
-                            }
-                            return true;
-                        }
-                    }
-                    return false;
-                """)
-                if clicked_sms:
-                    log.info("✅ [OTP] Berhasil mengklik pilihan verifikasi SMS!")
-                    time.sleep(2)
+                time.sleep(2)
+
+            if not is_method_screen and not link_clicked:
+                log.warning("⚠️ [OTP] Layar pilih metode tidak terdeteksi dalam 30 detik. Tetap mencoba klik WhatsApp...")
+
+        # ── Klik opsi WhatsApp (dengan retry 3x) ────────────────────────────────
+        if target_method == "whatsapp":
+            log.info("📲 [OTP] Mencari dan mengklik opsi 'WhatsApp'...")
+            for attempt in range(1, 4):
+                result_wa = driver.execute_script(JS_CLICK_WHATSAPP)
+                if result_wa:
+                    log.info(f"✅ [OTP] Klik WhatsApp berhasil (percobaan {attempt}): '{str(result_wa).strip()[:40]}'")
+                    time.sleep(1.5)
+                    result_confirm = driver.execute_script(JS_CLICK_CONFIRM_AFTER_WA)
+                    if result_confirm:
+                        log.info(f"  👆 [OTP] Konfirmasi diklik: '{str(result_confirm).strip()[:40]}'")
+                        time.sleep(2)
                     return True
+                else:
+                    log.warning(f"  ⚠️ [OTP] Opsi WhatsApp belum ditemukan (percobaan {attempt}/3), tunggu 3s...")
+                    time.sleep(3)
+
+            log.error("❌ [OTP] Gagal menemukan/mengklik opsi WhatsApp setelah 3 percobaan.")
+            return False
+
+        # ── Klik opsi SMS ────────────────────────────────────────────────────────
+        elif target_method == "sms":
+            log.info("📱 [OTP] Mengklik opsi verifikasi 'SMS'...")
+            clicked_sms = driver.execute_script("""
+                var els = Array.from(document.querySelectorAll('button, div, span, p, a, label'));
+                for (var i = 0; i < els.length; i++) {
+                    var el = els[i];
+                    var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
+                    if (txt.includes("sms") && txt.length < 30) {
+                        var targets = [el, el.parentElement,
+                                       el.closest('button, div, a, [role="button"]')
+                                       ].filter(Boolean);
+                        for (var t = 0; t < targets.length; t++) {
+                            var tgt = targets[t];
+                            try { tgt.click(); } catch(e) {}
+                            try {
+                                tgt.dispatchEvent(new MouseEvent('click',
+                                    {bubbles:true, cancelable:true, view:window}));
+                            } catch(e) {}
+                        }
+                        return el.innerText || el.textContent || "clicked";
+                    }
+                }
+                return null;
+            """)
+            if clicked_sms:
+                log.info(f"✅ [OTP] Berhasil mengklik pilihan verifikasi SMS: '{str(clicked_sms).strip()[:40]}'")
+                time.sleep(2)
+                return True
+
     except Exception as err:
-        log.debug(f"⚠️ [OTP] Verification method handling error: {err}")
+        log.warning(f"⚠️ [OTP] Verification method handling error: {err}")
 
     return False
 

