@@ -994,7 +994,6 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                 <div className="fixed inset-0 z-20" onClick={() => setOpenPlatformDropdown(false)} />
                 <div className="absolute left-0 right-0 top-full mt-1 z-30 bg-white dark:bg-black rounded-xl shadow-xl border border-red-100 dark:border-zinc-800 p-1.5 space-y-0.5 animate-scale-up">
                   {[
-                    ["shopee", "ShopeeFood"],
                     ["gofood", "GoFood"],
                     ["grab", "GrabFood"]
                   ].map(([val]) => (
