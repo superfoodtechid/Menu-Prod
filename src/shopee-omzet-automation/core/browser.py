@@ -1116,7 +1116,7 @@ def resolve_shopee_headless(headless_override: bool = None) -> bool:
     if headless_override is not None:
         return headless_override
 
-    return False
+    return True
 
 
 def _init_driver(headless: bool = True):
