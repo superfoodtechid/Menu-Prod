@@ -1,15 +1,14 @@
 /**
- * Google Apps Script Web App for FoodMaster Menu Outlet Drive Upload & Conversion.
+ * Google Apps Script Web App for FoodMaster Menu Outlet Drive Upload.
  * 
  * Features:
  * - Dynamic Parent Folder resolution (reads folderId / parentFolderId / targetFolderId from payload,
  *   with fallback to DEFAULT_PARENT_FOLDER_ID)
  * - Auto-creates Owner / Outlet subfolder inside parent folder
- * - Uploads raw .xlsx binary file into subfolder
+ * - Uploads ONLY raw .xlsx binary file into subfolder (tanpa konversi Google Sheet)
+ * - Sets .xlsx file sharing permissions (ANYONE_WITH_LINK, VIEW)
  * - Removes file references from Root/Parent folder so files ONLY exist in Owner subfolder
- * - Converts .xlsx into native Google Sheet using Drive API v2 / v3
- * - Sets Google Sheet sharing permissions (ANYONE_WITH_LINK, VIEW)
- * - Returns JSON response with fileUrl, spreadsheetUrl, subFolderName, and subFolderId
+ * - Returns JSON response with fileUrl, subFolderName, and subFolderId
  */
 
 // Default Parent Folder ID (Target Folder Baru)
@@ -58,8 +57,8 @@ function doPost(e) {
     
     // 3. Simpan file Excel asli (.xlsx) ke dalam subfolder target
     var file = subFolder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
     var fileUrl = file.getUrl();
-    var spreadsheetUrl = "";
 
     // Bersihkan file asli dari Root/Parent jika terlanjur terasosiasi di parent folder
     try {
@@ -72,53 +71,10 @@ function doPost(e) {
       }
     } catch (eClean) {}
     
-    // 4. Konversi file Excel menjadi Google Spreadsheet menggunakan Drive API
-    try {
-      var sheetFile;
-      if (typeof Drive.Files.insert === 'function') {
-        // Drive API v2 (Default Apps Script Advanced Service)
-        sheetFile = Drive.Files.insert({
-          title: fileName.replace(/\.xlsx$/i, ''),
-          mimeType: MimeType.GOOGLE_SHEETS,
-          parents: [{id: subFolder.getId()}]
-        }, blob, {convert: true});
-        spreadsheetUrl = sheetFile.alternateLink;
-      } else {
-        // Drive API v3
-        sheetFile = Drive.Files.create({
-          name: fileName.replace(/\.xlsx$/i, ''),
-          mimeType: MimeType.GOOGLE_SHEETS,
-          parents: [subFolder.getId()]
-        }, blob, {convert: true});
-        spreadsheetUrl = sheetFile.webViewLink;
-      }
-      
-      // Mengatur agar file spreadsheet dapat diakses/dilihat oleh siapa saja yang memiliki link
-      if (sheetFile && sheetFile.id) {
-        var sheetDriveFile = DriveApp.getFileById(sheetFile.id);
-        sheetDriveFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-
-        // Pastikan file spreadsheet hasil konversi HANYA ada di subfolder (bukan di root/parent)
-        try {
-          var root = DriveApp.getRootFolder();
-          if (root.getId() !== subFolder.getId()) {
-            try { root.removeFile(sheetDriveFile); } catch (eR2) {}
-          }
-          if (parentFolder.getId() !== subFolder.getId()) {
-            try { parentFolder.removeFile(sheetDriveFile); } catch (eP2) {}
-          }
-        } catch (eClean2) {}
-      }
-      
-    } catch (err) {
-      // Fallback menggunakan URL excel asli jika Drive API Advanced Service belum diaktifkan
-      spreadsheetUrl = fileUrl;
-    }
-    
     return ContentService.createTextOutput(JSON.stringify({
       status: "success",
       fileUrl: fileUrl,
-      spreadsheetUrl: spreadsheetUrl,
+      spreadsheetUrl: fileUrl,
       subFolderName: subFolder.getName(),
       subFolderId: subFolder.getId(),
       parentFolderId: parentFolder.getId()

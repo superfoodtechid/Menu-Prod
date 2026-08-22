@@ -248,6 +248,24 @@ def push_price_update_batch(
                 opt_groups = dish.get("option_groups", [])
                 existing_dish = dish
 
+            # ── Active Promo / Slash Price Protection ──
+            orig_p = float(dish.get("price", 0)) / 100000.0 if dish else 0
+            list_p = float(dish.get("list_price", 0)) / 100000.0 if (dish and dish.get("list_price")) else orig_p
+            disc_pct = float(dish.get("discount_percentage", 0)) if dish else 0
+            is_in_promo = (list_p > orig_p > 0) or (disc_pct > 0) or (dish and dish.get("discount_status") == 1)
+
+            if is_in_promo:
+                print(f"[PUSH_BATCH] 🔒 Item '{target_name}' (ID: {dish_id}) sedang dalam promo aktif di ShopeeFood. Perubahan harga dilewati.")
+                results.append({
+                    "item_id": dish_id,
+                    "item_name": target_name,
+                    "new_price": new_price,
+                    "success": False,
+                    "status": "SKIPPED_ACTIVE_PROMO",
+                    "error_message": f"Item '{target_name}' sedang dalam promo/slash price aktif di ShopeeFood. Perubahan harga dasar dikunci."
+                })
+                continue
+
             ok = update_dish(
                 client=client,
                 store_id=store_id,
