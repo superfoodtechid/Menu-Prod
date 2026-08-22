@@ -857,6 +857,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     success_count += 1
                     status_str = "SUCCESS"
                     err_msg = None
+                elif res.get("status") == "SKIPPED_ACTIVE_PROMO":
+                    status_str = "SKIPPED_ACTIVE_PROMO"
+                    err_msg = res.get("error_message") or "Item sedang dalam promo/slash price aktif di ShopeeFood."
                 else:
                     fail_count += 1
                     status_str = "FAILED"
@@ -1034,7 +1037,38 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             selling_time_id = item_info["sellingTimeID"]
                             old_p = float(orig_item.get("priceInMin", 0)) / 100.0
 
-                            # 1. Cek Kuota Bulanan Grab (Maksimal 15x Perubahan Harga per Item per 30 Hari)
+                            # 1. Cek Active Promo / Slash Price Grab (itemCampaignInfo)
+                            campaign = orig_item.get("itemCampaignInfo")
+                            if campaign and isinstance(campaign, dict):
+                                item_label = orig_item.get("itemName", real_item_id)
+                                err_promo = f"Item '{item_label}' sedang dalam promo/slash price aktif di GrabFood. Perubahan harga dasar dikunci."
+                                logger.warning(f"🔒 Promo Grab Terdeteksi: {err_promo}")
+                                trail = AuditTrail(
+                                    job_id=job.id,
+                                    outlet_id=outlet.id,
+                                    item_id=real_item_id,
+                                    item_name=item_label,
+                                    change_type="PRICE_UPDATE",
+                                    field_changed="price",
+                                    old_value=str(old_p),
+                                    new_value=str(new_price),
+                                    status="SKIPPED_ACTIVE_PROMO",
+                                    error_message=err_promo
+                                )
+                                thread_db.add(trail)
+                                thread_db.commit()
+                                items_breakdown.append({
+                                    "item_id": real_item_id,
+                                    "item_name": item_label,
+                                    "old_price": old_p,
+                                    "requested_price": new_price,
+                                    "verified_price": old_p,
+                                    "status": "SKIPPED_ACTIVE_PROMO",
+                                    "error_message": err_promo
+                                })
+                                continue
+
+                            # 2. Cek Kuota Bulanan Grab (Maksimal 15x Perubahan Harga per Item per 30 Hari)
                             thirty_days_ago = datetime.utcnow() - timedelta(days=30)
                             monthly_count = thread_db.query(AuditTrail).filter(
                                 AuditTrail.outlet_id == outlet.id,
@@ -1074,7 +1108,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                 })
                                 continue
 
-                            # 2. Hitung Tahapan Kenaikan / Penurunan (>15% Push Bertahap)
+                            # 3. Hitung Tahapan Kenaikan / Penurunan (>15% Push Bertahap)
                             steps = calculate_price_steps(old_p, new_price, max_step_pct=0.15)
                             if len(steps) > 1:
                                 logger.info(f"📊 Grab Push Bertahap (>15%) untuk {orig_item.get('itemName')}: Rp {old_p:,.0f} -> Rp {new_price:,.0f} via {len(steps)} tahapan: {steps}")
@@ -1703,6 +1737,32 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
                     orig_item = item_info["item"]
                     cat_common_id = item_info["category_common_id"] or item_info["category_id"]
+
+                    # Cek active promo pada item GoFood
+                    promo_info = orig_item.get("promo_info") or orig_item.get("discount") or orig_item.get("campaign")
+                    original_p = float(orig_item.get("original_price") or orig_item.get("list_price") or 0)
+                    cur_p = float(orig_item.get("price") or 0)
+                    is_go_promo = bool(promo_info) or (original_p > cur_p > 0)
+
+                    if is_go_promo:
+                        item_label = orig_item.get("name", item_id)
+                        err_promo = f"Item '{item_label}' sedang dalam promo/slash price aktif di GoFood. Perubahan harga dasar dikunci."
+                        logger.warning(f"🔒 Promo GoFood Terdeteksi: {err_promo}")
+                        trail = AuditTrail(
+                            job_id=job.id,
+                            outlet_id=outlet.id,
+                            item_id=item_id,
+                            item_name=item_label,
+                            change_type="PRICE_UPDATE",
+                            field_changed="price",
+                            old_value=str(cur_p),
+                            new_value=str(new_price),
+                            status="SKIPPED_ACTIVE_PROMO",
+                            error_message=err_promo
+                        )
+                        db.add(trail)
+                        db.commit()
+                        continue
 
                     old_price = int(float(orig_item.get('price') or 0))
                     target_price = float(new_price)
@@ -2611,8 +2671,21 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 except (ValueError, TypeError):
                     final_price = int(float(orig_item.get('price') or 0))
 
-                orig_price = float(orig_item.get('price') or 0)
-                price_steps = calculate_price_steps(orig_price, final_price) if want_price and orig_price > 0 else [final_price]
+                # ── Active Promo Protection for GoFood C5 Push ──
+                promo_info = orig_item.get("promo_info") or orig_item.get("discount") or orig_item.get("campaign")
+                original_p = float(orig_item.get("original_price") or orig_item.get("list_price") or 0)
+                cur_p = float(orig_item.get("price") or 0)
+                is_go_promo = bool(promo_info) or (original_p > cur_p > 0)
+
+                if is_go_promo and want_price and raw_price is not None and int(float(raw_price)) != int(cur_p):
+                    logger.info(f"🔒 [GoFood C5 Push] Item '{final_name}' ({item_id}) sedang promo. Mempertahankan harga asli Rp{cur_p:,.0f} dan tetap mengupdate nama/foto/kategori.")
+                    final_price = int(cur_p)
+                    price_steps = [final_price]
+                    promo_note = " (Harga tidak diubah karena promo aktif)"
+                else:
+                    orig_price = float(orig_item.get('price') or 0)
+                    price_steps = calculate_price_steps(orig_price, final_price) if want_price and orig_price > 0 else [final_price]
+                    promo_note = ""
 
                 res = None
                 if len(price_steps) > 1:
@@ -2699,6 +2772,12 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 browser.close()
             except Exception:
                 pass
+            if proc:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
 
     return results
 
@@ -2807,6 +2886,21 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                         updates=sid_updates,
                         progress_cb=progress_cb,
                     )
+                elif platform == "shopee":
+                    from shopee.core.push_c5 import push_c5_shopee_for_merchant
+                    store_meta = {
+                        "store_id": outlet.store_id,
+                        "username": account.username,
+                        "password": account.password,
+                        "merchant_name": outlet.merchant_name or outlet.outlet_name,
+                        "nama_resto_final": outlet.outlet_name,
+                        "nama_outlet": outlet.outlet_name,
+                    }
+                    results = push_c5_shopee_for_merchant(
+                        store_metadata=store_meta,
+                        updates=sid_updates,
+                        progress_cb=progress_cb,
+                    )
                 else:
                     from concurrent.futures import ThreadPoolExecutor
                     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -2874,22 +2968,111 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
 
 
 
-@app.post("/api/jobs/parse-c5")
-async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Parses an uploaded C5 Excel file (.xlsx) and detects Store IDs (SIDs) plus menu changes
-    for GoFood by comparing each C5 row against the last PULL baseline
-    (Gofood/API/menu-response-<SID>.json). Scope tahap 1: name + price.
-    1. Name Change  — 'Item Name Improvement' terisi & berbeda dari nama baseline.
-    2. Price Change — 'New Fake Price (Rp)' terisi (TIDAK boleh kosong) & berbeda dari harga baseline.
-    Kategori & foto belum termasuk scope tahap ini.
-    """
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=400, detail="File harus berformat Excel (.xlsx / .xls)")
+def _download_gdrive_or_gsheet_bytes(url: str) -> tuple[bytes, str]:
+    """Mengunduh file C5 XLSX dari link Google Drive atau Google Sheets."""
+    import re
+    import urllib.request
+    import urllib.error
 
-    contents = await file.read()
+    clean_url = url.strip()
+    export_url = None
+    filename = "gdrive_c5.xlsx"
+
+    # 1. Google Sheets (/spreadsheets/d/<id> atau /spreadsheets/u/<num>/d/<id>)
+    m_sheet = re.search(r'/spreadsheets(?:/u/\d+)?/d/([a-zA-Z0-9-_]+)', clean_url)
+    if m_sheet:
+        sheet_id = m_sheet.group(1)
+        export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+        filename = f"gsheet_{sheet_id[:8]}.xlsx"
+    else:
+        # 2. Google Drive File (/file/d/<id> atau /file/u/<num>/d/<id>)
+        m_file = re.search(r'/file(?:/u/\d+)?/d/([a-zA-Z0-9-_]+)', clean_url)
+        if m_file:
+            file_id = m_file.group(1)
+            export_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            filename = f"gdrive_{file_id[:8]}.xlsx"
+        else:
+            # 3. Parameter id= atau /d/<id>
+            m_id = re.search(r'(?:[?&]id=|/d/)([a-zA-Z0-9-_]{20,})', clean_url)
+            if m_id:
+                file_id = m_id.group(1)
+                export_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                filename = f"gdrive_{file_id[:8]}.xlsx"
+
+    if not export_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Format Link Google Drive / Google Sheets tidak valid. Pastikan link berisi ID dokumen (contoh: https://docs.google.com/spreadsheets/d/...)"
+        )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        req = urllib.request.Request(export_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            # Cegah DoS / download raksasa (max 20 MB)
+            max_bytes = 20 * 1024 * 1024
+            data = resp.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise HTTPException(status_code=400, detail="Ukuran file Google Drive melebihi batas maksimal 20 MB.")
+            if not data:
+                raise HTTPException(status_code=400, detail="Data file kosong dari Google Drive.")
+            
+            # Cek jika respon HTML login/error google
+            if data[:100].strip().startswith(b"<!DOCTYPE") or b"<html" in data[:200].lower():
+                raise HTTPException(
+                    status_code=403,
+                    detail="Akses Google Drive ditolak atau memerlukan izin akses. Pastikan tautan disetel 'Siapa saja yang memiliki link / Anyone with link (Viewer)'."
+                )
+            return data, filename
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise HTTPException(
+                status_code=403,
+                detail="Akses Google Drive ditolak (403). Pastikan share setting disetel 'Anyone with the link can view'."
+            )
+        elif e.code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail="Dokumen Google Drive tidak ditemukan (404). Periksa kembali link Anda."
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"Gagal mengunduh file dari Google Drive (HTTP {e.code}): {e.reason}")
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=400, detail=f"Gagal menghubungi server Google: {e.reason}")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=400, detail=f"Terjadi kesalahan saat mengunduh Google Drive: {str(e)}")
+
+
+@app.post("/api/jobs/parse-c5")
+async def parse_c5_endpoint(
+    file: Optional[UploadFile] = File(None),
+    drive_url: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    """Parses an uploaded C5 Excel file (.xlsx) or Google Drive link and detects Store IDs (SIDs) plus menu changes
+    for GoFood/Grab by comparing each C5 row against the last PULL baseline.
+    """
     import io
     import openpyxl
     import re
+
+    filename = ""
+    contents = b""
+
+    if file and file.filename:
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="File harus berformat Excel (.xlsx / .xls)")
+        filename = file.filename
+        contents = await file.read()
+    elif drive_url and drive_url.strip():
+        contents, filename = _download_gdrive_or_gsheet_bytes(drive_url.strip())
+    else:
+        raise HTTPException(status_code=400, detail="Harap unggah file Excel C5 (.xlsx) atau masukkan Link Google Drive / Sheets.")
 
     try:
         wb_raw = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=False)
@@ -2911,7 +3094,7 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
     if len(rows) <= 1:
         return {
             "success": True,
-            "filename": file.filename,
+            "filename": filename,
             "stores": [],
             "items": [],
             "summary": {"total_stores": 0, "total_items": 0, "total_changes": 0}
@@ -3028,32 +3211,67 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
     def norm_str(s):
         return re.sub(r'\s+', ' ', str(s or '').strip().lower())
 
-    # ── Baseline PULL cache loader (Gofood/API/menu-response-<SID>.json) ──
-    baseline_dir = Path(__file__).parent / "Gofood" / "API"
+    # ── Baseline PULL cache loader (Multi-platform: GoFood / Grab / Shopee) ──
     _baseline_cache = {}
 
+    def _find_baseline_file(sid):
+        sid_str = str(sid or "").strip()
+        candidates = [
+            sid_str,
+            sid_str.replace("GM", "M"),
+            sid_str.replace("GM", "G"),
+            sid_str.lstrip("G"),
+            sid_str.lstrip("M"),
+            f"G{sid_str.lstrip('G')}",
+            f"M{sid_str.lstrip('M')}",
+        ]
+        unique_cands = []
+        for c in candidates:
+            if c and c not in unique_cands:
+                unique_cands.append(c)
+
+        search_dirs = [
+            Path(__file__).parent / "Gofood" / "API",
+            Path(__file__).parent / "grab" / "API",
+            Path(__file__).parent / "shopee" / "API",
+            Path(__file__).parent / "data" / "exports",
+        ]
+
+        for s_dir in search_dirs:
+            if not s_dir.exists():
+                continue
+            for cand in unique_cands:
+                p = s_dir / f"menu-response-{cand}.json"
+                if p.exists():
+                    return p
+
+        # Check export folders in data/exports/*/*/*.xlsx or json
+        return None
+
     def load_baseline(sid):
-        """Loads the last-pulled GoFood menu for a SID and indexes items by id/name and categories."""
+        """Loads the last-pulled menu snapshot for a SID and indexes items by id/name and categories."""
         if sid in _baseline_cache:
             return _baseline_cache[sid]
+
         by_id, by_name, categories = {}, {}, set()
-        path = baseline_dir / f"menu-response-{sid}.json"
-        if path.exists():
+        path = _find_baseline_file(sid)
+
+        if path and path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                for menu in (data.get("menus") or []):
-                    cat_name = menu.get("name") or ""
+                for menu in (data.get("menus") or data.get("categories") or []):
+                    cat_name = menu.get("name") or menu.get("category_name") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
-                    for it in (menu.get("menu_items") or []):
+                    for it in (menu.get("menu_items") or menu.get("items") or []):
                         rec = {
-                            "name": it.get("name") or "",
+                            "name": it.get("name") or it.get("item_name") or "",
                             "price": parse_price(it.get("price")),
-                            "image": it.get("image") or "",
+                            "image": it.get("image") or it.get("photo_url") or "",
                             "category": cat_name,
                             "description": it.get("description") or "",
                         }
-                        iid = str(it.get("common_id") or it.get("id") or "").strip()
+                        iid = str(it.get("common_id") or it.get("id") or it.get("item_id") or "").strip()
                         if iid:
                             by_id[iid] = rec
                         nn = norm_str(rec["name"])
@@ -3061,6 +3279,7 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
                             by_name[nn] = rec
             except Exception as ex:
                 logger.warning(f"Gagal membaca baseline PULL untuk SID {sid}: {ex}")
+
         result = {"by_id": by_id, "by_name": by_name, "categories": categories, "found": bool(by_id or by_name)}
         _baseline_cache[sid] = result
         return result
@@ -3373,7 +3592,7 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
 
     return {
         "success": True,
-        "filename": file.filename,
+        "filename": filename,
         "stores": list(stores_dict.values()),
         "items": parsed_items,
         "summary": {
