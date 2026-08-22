@@ -51,7 +51,7 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
             headless=headless,
             close_browser=True,
             target_name=target_name,
-            interactive=True
+            interactive=False
         )
     except Exception as e:
         print(f"[WARN] get_session with target_name '{target_name}' failed ({e}). Retrying without target_name filter...")
@@ -62,7 +62,7 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
                 headless=headless,
                 close_browser=True,
                 target_name="",
-                interactive=True
+                interactive=False
             )
         except Exception as ex:
             return None, f"Gagal menginisialisasi browser session: {ex}"

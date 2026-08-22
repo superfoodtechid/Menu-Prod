@@ -54,7 +54,7 @@ def get_shopee_master_credentials() -> tuple[str, str]:
     return "allvbadmin", "Master!00!"
 
 
-def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = None):
+def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = True):
     store_id = store_metadata.get('store_id', '')
     if isinstance(store_id, str):
         store_id = store_id.strip().split('.')[0]
@@ -85,7 +85,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         headless=headless,
         close_browser=True,
         target_name=target_name,
-        interactive=True
+        interactive=False
     )
     
     if not session_data or "shopee_tob_token" not in session_data:
