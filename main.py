@@ -4247,11 +4247,11 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
                 else:
                     promo_type = "NOMINAL"
                     promo_value = f"Rp {diff:,}"
-                    is_price_locked = True
+                    is_price_locked = False
             else:
                 promo_type = "NOMINAL"
                 promo_value = "Promo Aktif"
-                is_price_locked = True
+                is_price_locked = False
 
         items.append({
             "id": ri["id"],
