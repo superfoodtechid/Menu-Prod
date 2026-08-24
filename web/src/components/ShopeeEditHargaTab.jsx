@@ -790,7 +790,6 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     const itemUpdates = [];
 
     branchItems.forEach(item => {
-      if (item.is_in_promo) return;
       const curPrice = branchEdits[item.id];
       if (curPrice !== undefined && curPrice !== item.price) {
         const diff = curPrice - item.price;
@@ -891,14 +890,13 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const changedCount = useMemo(() => {
     if (!selectedBrandId || !rawItems || rawItems.length === 0) return 0;
     const bEdits = edits[selectedBrandId] || {};
-    return rawItems.filter(i => !i.is_in_promo && (bEdits[i.id] !== undefined && bEdits[i.id] !== i.price)).length;
+    return rawItems.filter(i => (bEdits[i.id] !== undefined && bEdits[i.id] !== i.price)).length;
   }, [rawItems, edits, selectedBrandId]);
 
   const violationCount = useMemo(() => {
     if (!selectedBrandId || !rawItems || rawItems.length === 0) return 0;
     const bEdits = edits[selectedBrandId] || {};
     return rawItems.filter(i => {
-      if (i.is_in_promo) return false;
       const curPrice = bEdits[i.id] ?? i.price;
       const { isViolation } = checkShopeeViolation(i.price, curPrice);
       return isViolation;
@@ -907,14 +905,13 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
   const promoCount = useMemo(() => rawItems.filter(i => i.is_in_promo).length, [rawItems]);
 
+  // Bulk adjust prices with optional rounding and item ID filtering
   const bulkAdj = (mode, type, val, rounding = "none", itemIds = null) => {
     setEdits(prev => {
       const bEdits = { ...(prev[selectedBrandId] || {}) };
       rawItems.forEach(i => {
-        if (!i.is_in_promo) {
-          if (!itemIds || itemIds.includes(i.id)) {
-            bEdits[i.id] = applyAdj(bEdits[i.id] ?? i.price, mode, type, val, rounding);
-          }
+        if (!itemIds || itemIds.includes(i.id)) {
+          bEdits[i.id] = applyAdj(bEdits[i.id] ?? i.price, mode, type, val, rounding);
         }
       });
       return { ...prev, [selectedBrandId]: bEdits };
@@ -926,7 +923,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const selectAllVisibleItems = () => {
-    setSelectedItemIds(items.filter(i => !i.is_in_promo).map(i => i.id));
+    setSelectedItemIds(items.map(i => i.id));
   };
   const deselectAllItems = () => {
     setSelectedItemIds([]);
@@ -1450,23 +1447,19 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
                       return (
                         <tr key={item.id} className={`transition ${
-                          item.is_in_promo
-                            ? "bg-purple-50/40 dark:bg-purple-950/20 opacity-85 cursor-not-allowed"
-                            : isChecked
+                          isChecked
                             ? "bg-amber-50/80 dark:bg-amber-950/30"
+                            : item.is_in_promo
+                            ? "bg-purple-50/20 dark:bg-purple-950/10"
                             : "hover:bg-zinc-50 dark:hover:bg-zinc-950/50"
                         }`}>
                           {itemEditMode === "multi" && (
                             <td className="p-3.5 text-center align-middle">
                               <input
                                 type="checkbox"
-                                disabled={item.is_in_promo}
-                                checked={!item.is_in_promo && isChecked}
-                                title={item.is_in_promo ? "Item sedang dalam promo aktif (tidak dapat diubah)" : ""}
-                                onChange={() => !item.is_in_promo && toggleSelectItem(item.id)}
-                                className={`h-4 w-4 rounded border-zinc-300 ${
-                                  item.is_in_promo ? "opacity-40 cursor-not-allowed" : "text-orange-600 focus:ring-orange-500 cursor-pointer"
-                                }`}
+                                checked={isChecked}
+                                onChange={() => toggleSelectItem(item.id)}
+                                className="h-4 w-4 rounded border-zinc-300 text-orange-600 focus:ring-orange-500 cursor-pointer"
                               />
                             </td>
                           )}
@@ -1503,8 +1496,8 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                         <span className="font-mono font-bold">{item.promo_value}</span>
                                       </div>
                                     )}
-                                    <div className="pt-1 border-t border-zinc-800 text-[10px] text-amber-300 font-normal leading-tight">
-                                      🔒 Harga dasar menu dikunci oleh ShopeeFood karena promo aktif.
+                                    <div className="pt-1 border-t border-zinc-800 text-[10px] text-emerald-400 font-normal leading-tight">
+                                      ✨ Promo aktif. Harga dasar dapat diedit & di-push.
                                     </div>
                                   </div>
                                 </div>
@@ -1516,11 +1509,8 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                           <td className="p-3.5 text-right align-middle">
                             <input
                               type="text"
-                              disabled={item.is_in_promo}
-                              title={item.is_in_promo ? "Harga dikunci oleh ShopeeFood karena menu sedang dalam promo aktif" : ""}
                               value={fmt(curPrice)}
                               onChange={(e) => {
-                                if (item.is_in_promo) return;
                                 const val = parse(e.target.value);
                                 setEdits(p => ({
                                   ...p,
@@ -1531,26 +1521,24 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                 }));
                               }}
                               className={`w-32 text-right p-2 rounded-xl border font-mono font-bold text-sm ${
-                                item.is_in_promo
-                                  ? "border-purple-200 dark:border-purple-900/60 bg-purple-50/50 dark:bg-purple-950/30 text-purple-900 dark:text-purple-300 cursor-not-allowed opacity-80"
-                                  : isEdited
+                                isEdited
                                   ? "border-orange-500 bg-orange-50 dark:bg-orange-950/40 text-orange-900 dark:text-orange-200 focus:ring-2 focus:ring-orange-500/20"
                                   : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white focus:border-orange-500"
                               }`}
                             />
                           </td>
                           <td className="p-3.5 text-center align-middle">
-                            {item.is_in_promo ? (
-                              <span title="Harga menu dikunci karena sedang dalam promo aktif di Shopee Partner Portal" className="px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 text-[11px] font-bold border border-purple-200 dark:border-purple-900/60 inline-block">
-                                🔒 Promo Aktif (Dikunci)
-                              </span>
-                            ) : isViolation ? (
+                            {isViolation ? (
                               <span className="px-2.5 py-1 rounded-lg bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-bold border border-red-200 dark:border-red-900/60 inline-block">
                                 ⚠️ {violationMsg}
                               </span>
                             ) : isEdited ? (
                               <span className="px-2.5 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-bold border border-emerald-200 dark:border-emerald-900/60 inline-block">
                                 ✓ Valid (Shopee OK)
+                              </span>
+                            ) : item.is_in_promo ? (
+                              <span className="px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 text-[11px] font-bold border border-purple-200 dark:border-purple-900/60 inline-block">
+                                Promo ({item.promo_value || "Aktif"})
                               </span>
                             ) : (
                               <span className="text-zinc-400 text-xs">-</span>
