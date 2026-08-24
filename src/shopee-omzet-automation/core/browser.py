@@ -1096,6 +1096,9 @@ def _handle_verification_method_selection(driver, target_method: str = None) -> 
 # ── Driver Initialization ──────────────────────────────────────────────────────
 
 def resolve_shopee_headless(headless_override: bool = None) -> bool:
+    if headless_override is not None:
+        return headless_override
+
     env_shopee = os.getenv("HEADLESS_SHOPEE")
     if env_shopee is not None:
         return env_shopee.lower() in ("true", "1", "yes")
@@ -1112,9 +1115,6 @@ def resolve_shopee_headless(headless_override: bool = None) -> bool:
             cur = cur.parent
     except Exception:
         pass
-
-    if headless_override is not None:
-        return headless_override
 
     return True
 
