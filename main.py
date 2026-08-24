@@ -88,6 +88,40 @@ def startup_event():
     cleanup_zombie_chromium()
     logger.info("🚀 Initializing database tables...")
     init_db()
+    # Ensure persistent shopee profile & session sync from /app/data
+    try:
+        import shutil
+        persistent_data_dir = BASE_DIR / "data"
+        shopee_auto_dir = BASE_DIR / "src" / "shopee-omzet-automation" / "data"
+        shopee_core_dir = BASE_DIR / "shopee" / "data"
+        shopee_auto_dir.mkdir(parents=True, exist_ok=True)
+        shopee_core_dir.mkdir(parents=True, exist_ok=True)
+
+        for src_f in persistent_data_dir.glob("session*.json"):
+            for dst_dir in [shopee_auto_dir, shopee_core_dir]:
+                dst_f = dst_dir / src_f.name
+                if not dst_f.exists() or src_f.stat().st_mtime > dst_f.stat().st_mtime:
+                    shutil.copy2(src_f, dst_f)
+            if src_f.name == "session_allvbadmin.json":
+                for dst_dir in [shopee_auto_dir, shopee_core_dir, persistent_data_dir]:
+                    dst_sess = dst_dir / "session.json"
+                    if not dst_sess.exists() or src_f.stat().st_mtime > dst_sess.stat().st_mtime:
+                        shutil.copy2(src_f, dst_sess)
+
+        for src_d in persistent_data_dir.glob("chrome_profile*"):
+            if src_d.is_dir():
+                for dst_dir in [shopee_auto_dir, shopee_core_dir]:
+                    dst_prof = dst_dir / (src_d.name if "allvbadmin" in src_d.name else "chrome_profile")
+                    if not dst_prof.exists():
+                        shutil.copytree(src_d, dst_prof, dirs_exist_ok=True)
+                # also mirror to standard chrome_profile name in shopee_core
+                dst_shopee_prof = shopee_core_dir / "chrome_profile"
+                if not dst_shopee_prof.exists():
+                    shutil.copytree(src_d, dst_shopee_prof, dirs_exist_ok=True)
+        logger.info("✅ Persistent Shopee sessions & Chrome profiles synced from /app/data")
+    except Exception as err:
+        logger.warning(f"⚠️ Shopee session persistence sync warning: {err}")
+
     # Ensure export directories exist dynamically
     exports_dir = BASE_DIR / "data" / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
