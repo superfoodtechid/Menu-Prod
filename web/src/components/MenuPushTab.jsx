@@ -561,7 +561,14 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                         className="h-4 w-4 rounded border-slate-300 text-red-600 focus:ring-red-500 dark:border-zinc-700"
                       />
                       <div>
-                        <p className="text-xs font-bold text-slate-900 dark:text-white">{store.name}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-bold text-slate-900 dark:text-white">{store.name}</p>
+                          {store.baseline_found === false && (
+                            <span className="rounded bg-amber-100 px-1.5 py-0.2 text-[9px] font-bold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300" title="Baseline PULL belum tersedia untuk Store ID ini. Semua item akan diperlakukan sebagai Item Baru.">
+                              ⚠️ No Baseline
+                            </span>
+                          )}
+                        </div>
                         <p className="text-[11px] font-mono text-slate-400 dark:text-zinc-500">SID: {store.sid}</p>
                       </div>
                     </div>
