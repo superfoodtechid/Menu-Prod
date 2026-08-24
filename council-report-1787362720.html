@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>Council Report: Mematikan Ubah Harga pada Item Diskon/Promo</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f8fafc; color: #1e293b; padding: 24px; max-width: 900px; margin: 0 auto; line-height: 1.6; }
+    .card { background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 24px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+    h1 { font-size: 22px; color: #0f172a; margin-top: 0; }
+    h2 { font-size: 16px; color: #334155; margin-top: 20px; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600; background: #f3e8ff; color: #6b21a8; border: 1px solid #d8b4fe; }
+    .verdict-box { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 16px; border-radius: 0 8px 8px 0; margin-bottom: 20px; }
+    .advisor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 20px 0; }
+    .advisor-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; }
+    .advisor-title { font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+    details { margin-bottom: 12px; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; background: #fafafa; }
+    summary { font-weight: 600; cursor: pointer; color: #0284c7; }
+    ul { margin: 8px 0; padding-left: 20px; }
+    li { margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <span class="badge">LLM Council Decision</span>
+    <h1>Strategi Mematikan Ubah Harga pada Item Promo / Diskon (GoFood, GrabFood, ShopeeFood)</h1>
+    <p><strong>Status:</strong> Rekomendasi Disetujui (Multi-layer Lock & Partial C5 Push)</p>
+
+    <div class="verdict-box">
+      <h3 style="margin-top:0; color:#1d4ed8;">Verdict Summary</h3>
+      <p>Pengubahan harga dasar pada menu yang sedang berstatus <strong>Promo / Slash Price</strong> wajib dikunci pada UI dan disaring pada level worker backend untuk mencegah kegagalan massal (API rejection 400/409) pada portal GoFood, GrabFood, dan ShopeeFood.</p>
+    </div>
+
+    <h2>Arsitektur Penguncian Multi-Layer</h2>
+    <ul>
+      <li><strong>Layer 1 - UI Form (Single & Bulk Edit):</strong> Input harga didisable (<code>disabled={item.is_in_promo}</code>), checkbox multi-select dinonaktifkan, dan bulk formula (+Rp/%) otomatis mengabaikan item promo.</li>
+      <li><strong>Layer 2 - Backend Request Validator:</strong> Endpoint push harga mendeteksi flag promo dan memfilter keluar item terkait sebelum masuk antrian.</li>
+      <li><strong>Layer 3 - Partial C5 Push Engine:</strong> Pada C5 push, perubahan nama/foto/kategori tetap berjalan, sedangkan perubahan harga diskip dengan audit trail <code>SKIPPED_ACTIVE_PROMO</code>.</li>
+    </ul>
+
+    <h2>Advisor Stances</h2>
+    <div class="advisor-grid">
+      <div class="advisor-card">
+        <div class="advisor-title" style="color:#b91c1c;">The Contrarian</div>
+        <p style="font-size:13px;">UI disabled saja tidak cukup; backend wajib memvalidasi agar script API tidak melempar error 400 ke portal aplikator.</p>
+      </div>
+      <div class="advisor-card">
+        <div class="advisor-title" style="color:#0369a1;">The First Principles Thinker</div>
+        <p style="font-size:13px;">Base price adalah pondasi kalkulasi diskon portal. Mengubah base price saat promo merusak integritas diskon.</p>
+      </div>
+      <div class="advisor-card">
+        <div class="advisor-title" style="color:#15803d;">The Expansionist</div>
+        <p style="font-size:13px;">Terapkan Partial Field Push agar update foto & nama tetap berhasil walau harga item promo terkunci.</p>
+      </div>
+      <div class="advisor-card">
+        <div class="advisor-title" style="color:#d97706;">The Outsider</div>
+        <p style="font-size:13px;">Berikan badge "PROMO AKTIF" dan tooltip jelas agar staf resto mengerti alasan harga tidak dapat diedit.</p>
+      </div>
+      <div class="advisor-card">
+        <div class="advisor-title" style="color:#4f46e5;">The Executor</div>
+        <p style="font-size:13px;">Pasang penguncian konsisten di <code>EditHargaTab.jsx</code>, <code>ShopeeEditHargaTab.jsx</code>, dan <code>main.py</code>.</p>
+      </div>
+    </div>
+
+    <details>
+      <summary>Lihat Detail Langkah Eksekusi</summary>
+      <ol style="font-size:14px; margin-top:8px;">
+        <li>Periksa <code>EditHargaTab.jsx</code> dan <code>ShopeeEditHargaTab.jsx</code> untuk memastikan <code>is_in_promo</code> mengunci input harga.</li>
+        <li>Pastikan bulk price adjust (penambahan nominal / persen) otomatis mem-bypass item dengan <code>is_in_promo === true</code>.</li>
+        <li>Pastikan <code>main.py</code> pada endpoint <code>/api/jobs/push-price</code> dan background runner memvalidasi / menskip item promo.</li>
+      </ol>
+    </details>
+  </div>
+</body>
+</html>

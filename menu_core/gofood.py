@@ -7,6 +7,76 @@ import base64
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+def fetch_gofood_mpp_promotions(access_token: str, restaurant_id: str = "") -> dict:
+    """
+    Fetches active GoFood promotions from GoBiz MPP API and returns a mapping:
+    lower(name) -> promo_info and item_id -> promo_info
+    """
+    if not access_token:
+        return {}
+
+    auth_header = access_token if str(access_token).lower().startswith("bearer ") else f"Bearer {access_token}"
+    headers = {
+        'Accept': 'application/json, text/plain, */*',
+        'Authentication-Type': 'go-id',
+        'Authorization': auth_header,
+        'Origin': 'https://portal.gofoodmerchant.co.id',
+        'Referer': 'https://portal.gofoodmerchant.co.id/',
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)',
+        'accept-language': 'id',
+        'accept-version': '2026-08-21',
+        'gojek-country-code': 'ID'
+    }
+
+    import requests
+    url = 'https://api.gojekapi.com/mpp/merchant/promotions?page=1&limit=50&source=gobiz_webapp'
+    promo_map = {}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        records = data.get('data', {}).get('records', [])
+        for rec in records:
+            if rec.get('status') in ('activated', 'active', 'scheduled', 'live'):
+                pid = rec.get('id')
+                p_name = rec.get('name')
+                try:
+                    d_url = f'https://api.gojekapi.com/mpp/merchant/promotions/{pid}?source=gobiz_webapp'
+                    dr = requests.get(d_url, headers=headers, timeout=10)
+                    if dr.status_code == 200:
+                        d_data = dr.json().get('data', {})
+                        d_details = d_data.get('details', {})
+                        m_items = d_details.get('menu_items', [])
+                        pct_disc = d_details.get('percentage_discount')
+                        p_type = d_details.get('promo_type') or rec.get('promo_type')
+                        for item in m_items:
+                            item_rest_id = item.get('restaurant_id')
+                            if restaurant_id and item_rest_id and str(item_rest_id).strip() != str(restaurant_id).strip():
+                                continue
+                            
+                            p_info = {
+                                'promo_id': pid,
+                                'promo_name': p_name,
+                                'promo_type': p_type,
+                                'original_price': item.get('price'),
+                                'discounted_price': item.get('discounted_price'),
+                                'discount_percentage': pct_disc,
+                                'restaurant_id': item_rest_id
+                            }
+                            iid = item.get('id')
+                            if iid:
+                                promo_map[str(iid).strip()] = p_info
+                            iname = item.get('name')
+                            if iname:
+                                promo_map[str(iname).strip().lower()] = p_info
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"   ⚠️ Gagal menarik promo MPP GoFood: {e}")
+    return promo_map
+
+
 def extract_gofood_menu(store_metadata: dict, output_dir: str):
     """
     Extracts menu for GoFood by running the login and redirect flow to intercept the menu API response.
@@ -158,6 +228,16 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         clean_slug = re.sub(r'\s+', '-', clean_slug.strip()).lower()
         gofood_link = f"https://gofood.co.id/{city_slug}/restaurant/{clean_slug}-{restaurant_uuid}"
 
+    # --- FETCH MPP PROMOTIONS ---
+    mpp_promos_map = {}
+    if access_token:
+        try:
+            mpp_promos_map = fetch_gofood_mpp_promotions(access_token, restaurant_uuid)
+            if mpp_promos_map:
+                print(f"   🎉 Berhasil memuat {len(mpp_promos_map)} pemetaan promo aktif MPP GoFood!")
+        except Exception as promo_err:
+            print(f"   ⚠️ Gagal menarik promo MPP GoFood: {promo_err}")
+
     # --- LOAD MODIFIER DATA ---
     modifier_path = os.path.join(api_dir, f"modifier-response-{store_id}.json")
         
@@ -266,7 +346,7 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                         var_visibility
                     ])
             
-            # Robust promotion parsing if present in API response
+            # Robust promotion parsing from Base64 promotion field or GoBiz MPP campaigns
             promo_info = item.get("promotion")
             
             if isinstance(promo_info, str) and promo_info:
@@ -275,12 +355,24 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                 except Exception:
                     promo_info = None
                     
+            # Fallback / lookup from MPP active campaigns map
+            if not promo_info and mpp_promos_map:
+                promo_info = mpp_promos_map.get(str(item_id).strip()) or mpp_promos_map.get(item_name.lower())
+                    
             harga_sebelum = item_price
             harga_setelah = item_price
             promo_val = 0
+            promo_type = "NONE"
             
             if isinstance(promo_info, dict):
-                disc_price = promo_info.get("selling_price") or promo_info.get("discounted_price") or promo_info.get("price") or promo_info.get("promo_price")
+                disc_price = promo_info.get("discounted_price") or promo_info.get("selling_price") or promo_info.get("price") or promo_info.get("promo_price")
+                orig_promo_price = promo_info.get("original_price")
+                if orig_promo_price:
+                    try:
+                        harga_sebelum = float(orig_promo_price)
+                    except ValueError:
+                        pass
+                
                 if disc_price:
                     try:
                         harga_setelah = float(disc_price)
@@ -289,24 +381,27 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                 
                 pct = promo_info.get("discount_percentage") or promo_info.get("percentage")
                 val = promo_info.get("discount_value") or promo_info.get("value") or promo_info.get("amount")
-                if pct:
+                if pct and float(pct) > 0:
                     promo_val = f"{int(pct)}%"
-                elif val:
+                    promo_type = "PERCENTAGE"
+                elif val and float(val) > 0:
                     try:
                         promo_val = f"Rp {int(float(val))}"
+                        promo_type = "NOMINAL"
                     except ValueError:
                         pass
                 else:
                     if harga_sebelum > harga_setelah and harga_sebelum > 0:
                         diff = harga_sebelum - harga_setelah
                         promo_val = f"{int(round(diff / harga_sebelum * 100))}%"
+                        promo_type = "PERCENTAGE"
             
             if isinstance(promo_val, str) and "%" in promo_val:
                 slash_pct = promo_val
                 slash_rp = 0
             elif isinstance(promo_val, str) and "Rp" in promo_val:
                 slash_pct = "0%"
-                slash_rp = int(promo_val.replace("Rp", "").strip())
+                slash_rp = int(promo_val.replace("Rp", "").strip().replace(".", "").replace(",", ""))
             else:
                 slash_pct = promo_val if promo_val else "0%"
                 slash_rp = 0

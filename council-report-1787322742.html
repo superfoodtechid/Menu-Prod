@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>LLM Council Report: Pressure-Test Menu Push C5</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px 14px; }
+    .container { max-width: 840px; margin: 0 auto; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+    h1 { font-size: 1.35rem; margin: 0 0 8px; }
+    h2 { font-size: 1.1rem; margin: 0 0 10px; border-bottom: 1px solid #334155; padding-bottom: 6px; color: #38bdf8; }
+    .verdict { background: rgba(16, 185, 129, 0.15); border-left: 4px solid #10b981; padding: 12px; border-radius: 4px; margin-bottom: 14px; }
+    .action { background: rgba(37, 99, 235, 0.15); border-left: 4px solid #3b82f6; padding: 12px; border-radius: 4px; margin-top: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin: 14px 0; }
+    .grid-item { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 8px; text-align: center; }
+    .grid-title { font-size: 0.7rem; font-weight: 700; color: #94a3b8; }
+    .grid-val { font-size: 0.75rem; font-weight: 700; margin-top: 4px; }
+    details { border: 1px solid #334155; border-radius: 6px; margin-bottom: 8px; background: #0f172a; }
+    summary { padding: 8px 12px; font-weight: 600; cursor: pointer; color: #e2e8f0; font-size: 0.9rem; }
+    .content { padding: 10px 12px; font-size: 0.85rem; line-height: 1.5; color: #cbd5e1; border-top: 1px solid #334155; }
+    .risk-high { color: #f87171; }
+    .risk-med { color: #fbbf24; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div style="font-size:0.7rem;font-weight:700;color:#38bdf8;text-transform:uppercase;">LLM Council Pressure-Test Report</div>
+      <h1>Pressure-Test & Audit Ketahanan Menu Push C5</h1>
+      <p style="color:#94a3b8;font-size:0.85rem;margin:0;">Evaluasi stres: Multi-SID batch, kebocoran memori browser, rate limit API, dan integritas transaksi.</p>
+    </div>
+
+    <div class="card">
+      <h2>Hasil Audit & Sintesis Chairman</h2>
+      <div class="verdict">
+        <strong>Status: Siap Produksi dengan 3 Titik Kritis Perlu Proteksi Ekstra</strong><br>
+        Logika perbandingan baseline dan validasi konsistensi nama kategori solid. Titik kegagalan terberat terletak pada <em>lifecycle Playwright headless browser</em> pada loop multi-SID dan perlindungan rate-limit Google Drive.
+      </div>
+
+      <div class="grid">
+        <div class="grid-item"><div class="grid-title">Memory Leak</div><div class="grid-val risk-high">Tinggi (Zombie Chrome)</div></div>
+        <div class="grid-item"><div class="grid-title">Idempotensi</div><div class="grid-val risk-med">Sedang (Realtime Trail)</div></div>
+        <div class="grid-item"><div class="grid-title">Throughput</div><div class="grid-val" style="color:#38bdf8;">Terkunci Global FIFO</div></div>
+        <div class="grid-item"><div class="grid-title">GDrive Quota</div><div class="grid-val risk-med">Perlu Cap 20MB</div></div>
+        <div class="grid-item"><div class="grid-title">Logic Integrity</div><div class="grid-val" style="color:#4ade80;">Sangat Kuat</div></div>
+      </div>
+
+      <h3>Titik Rentan & Rekomendasi Mitigasi</h3>
+      <ul>
+        <li><strong>Isolasi Proses Browser:</strong> Setiap iterasi per-merchant wajib membungkus proses Chromium dalam blok <code>try...finally</code> dengan pemanggilan <code>proc.kill()</code> eksplisit untuk mencegah OOM-kill saat memproses puluhan cabang.</li>
+        <li><strong>Atomic Audit Commit:</strong> Catat record <code>AuditTrail</code> seketika setiap 1 item berhasil di-patch ke GoBiz, bukan menunggu seluruh batch selesai.</li>
+        <li><strong>Batas Proteksi Google Drive:</strong> Batasi ukuran file download maksimal 20MB dan batas waktu 30 detik untuk mencegah eksploitasi server.</li>
+      </ul>
+
+      <div class="action">
+        <strong>Langkah Prioritas:</strong> Pastikan fungsi <code>_push_c5_gofood_for_merchant</code> membersihkan subprocess Chromium 100% pada kondisi error apapun.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Analisis Detail 5 Advisor</h2>
+      <details>
+        <summary>1. The Contrarian (Failure Modes)</summary>
+        <div class="content">Jika operator upload 1 file C5 berisi 30 SID sekaligus, Playwright akan membuka 30 browser context secara beruntun. Satu error tak tertangani bisa meninggalkan proses zombie Chromium yang menghabiskan seluruh RAM host.</div>
+      </details>
+      <details>
+        <summary>2. The First Principles Thinker (Integritas Data)</summary>
+        <div class="content">Audit trail tidak boleh hanya di-commit di akhir job. Kegagalan koneksi di item ke-70 dari 100 akan membuat job berstatus FAILED tanpa penanda item mana yang sudah sukses masuk ke server merchant.</div>
+      </details>
+      <details>
+        <summary>3. The Expansionist (Skalabilitas)</summary>
+        <div class="content">Global platform lock saat ini membatasi throughput sistem menjadi serial murni. Untuk menangani ratusan toko per jam, kunci harus di-shard per email akun login.</div>
+      </details>
+      <details>
+        <summary>4. The Outsider (UX & Resiliensi)</summary>
+        <div class="content">Operator butuh progress bar spesifik tingkat item (misal: "Mengupdate item 14/40: Paket Hemat...") agar tahu sistem tidak macet saat request lambat.</div>
+      </details>
+      <details>
+        <summary>5. The Executor (Checklist Tindakan)</summary>
+        <div class="content">1. Bungkus Playwright dengan sub-process killer agresif.<br>2. Set size limit Google Drive download 20MB.<br>3. Commit status per-item realtime ke database.</div>
+      </details>
+    </div>
+  </div>
+</body>
+</html>

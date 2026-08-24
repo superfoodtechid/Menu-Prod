@@ -1,0 +1,243 @@
+{
+  "data": {
+    "catalogs": [
+      {
+        "id": "3148481062563328",
+        "name": "Category B",
+        "rank": 1,
+        "sync_item_group_id": "",
+        "dishes": [
+          {
+            "id": "3148483850695168",
+            "store_id": "22459819",
+            "catalog_id": "3148481062563328",
+            "name": "Item C",
+            "price": "3400000000",
+            "list_price": "3400000000",
+            "picture": "id-11134505-822wl-mpyl50nuv5la00",
+            "description": "Desc C",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 1,
+            "create_source": null,
+            "discount_type": null,
+            "discount_amount": "0",
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": null,
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
+            },
+            "picture_type": 0,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          },
+          {
+            "id": "3148484252139008",
+            "store_id": "22459819",
+            "catalog_id": "3148481062563328",
+            "name": "Item D",
+            "price": "4500000000",
+            "list_price": "4500000000",
+            "picture": "id-11134505-822wt-mpyl5jm2lerxe3",
+            "description": "Desc D",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 2,
+            "create_source": null,
+            "discount_type": null,
+            "discount_amount": "0",
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": null,
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
+            },
+            "picture_type": 5,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          },
+          {
+            "id": "3148484649480704",
+            "store_id": "22459819",
+            "catalog_id": "3148481062563328",
+            "name": "Item E",
+            "price": "5400000000",
+            "list_price": "6000000000",
+            "picture": "id-11134505-822wm-mpyl622u366l5c",
+            "description": "Desc E",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 3,
+            "create_source": 1,
+            "discount_type": 1,
+            "discount_amount": "0",
+            "discount_percentage": 1000,
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": {
+              "id": "3148522146836992",
+              "dish_id": "3148484649480704",
+              "discount_price": "5400000000",
+              "limit_per_order": 4294967295,
+              "discount_status": 1,
+              "campaign_id": "3148522146774528835",
+              "store_id": "22459819",
+              "creator": "1305465393",
+              "create_time": "1782535341183",
+              "update_time": "1782535341183",
+              "campaign_start_time": 1782535500000,
+              "campaign_end_time": 4102329600000,
+              "discount_percentage": 1000,
+              "group_id": "7604ecaaec15413d9cdfcc61f46c8dbe",
+              "discount_type": 1,
+              "discount_amount": "0",
+              "creator_source": 1,
+              "stock": 1,
+              "sold_num": 0
+            },
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
+            },
+            "picture_type": 0,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          }
+        ]
+      },
+      {
+        "id": "3148480950140416",
+        "name": "Category A",
+        "rank": 2,
+        "sync_item_group_id": "",
+        "dishes": [
+          {
+            "id": "3148482929458688",
+            "store_id": "22459819",
+            "catalog_id": "3148480950140416",
+            "name": "Item A",
+            "price": "1300000000",
+            "list_price": "1300000000",
+            "picture": "id-11134505-822wp-mpyl3mwg1vyk4f",
+            "description": "Desc A",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 1,
+            "create_source": null,
+            "discount_type": null,
+            "discount_amount": "0",
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": null,
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
+            },
+            "picture_type": 0,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          },
+          {
+            "id": "3148483367975936",
+            "store_id": "22459819",
+            "catalog_id": "3148480950140416",
+            "name": "Item B",
+            "price": "2300000000",
+            "list_price": "2300000000",
+            "picture": "id-11134505-822wr-mpyl4e26z9c148",
+            "description": "Desc B",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 2,
+            "create_source": null,
+            "discount_type": null,
+            "discount_amount": "0",
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": null,
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
+            },
+            "picture_type": 0,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          }
+        ]
+      }
+    ]
+  }
+}

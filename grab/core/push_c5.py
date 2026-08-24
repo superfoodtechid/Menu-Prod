@@ -9,7 +9,7 @@ from grab.core.grab_api_scraper import GrabAPI, perform_login, SESSION_DIR
 
 logger = logging.getLogger("GrabC5Push")
 
-async def _async_push_c5_grab(username: str, password: str, store_id: str, updates: list, progress_cb=None):
+async def _async_push_c5_grab(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None):
     """
     Internal async worker to log into Grab Merchant Portal and push C5 menu updates to Grab API.
     """
@@ -199,29 +199,43 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     res_item["error"] = str(ex_item)
 
                 results.append(res_item)
+                if item_result_cb:
+                    try:
+                        err_cb = res_item.get("error") if res_item.get("status") == "FAILED" else None
+                        item_result_cb(upd, res_item.get("status", "FAILED"), err_cb, applied=res_item)
+                    except Exception:
+                        pass
 
         finally:
+            proc_killed = False
             try:
-                await browser.close()
+                if proc:
+                    from src.core.browser_factory import kill_process_tree
+                    kill_process_tree(proc)
+                    proc_killed = True
             except Exception:
                 pass
-            if proc:
+            if not proc_killed and proc:
                 try:
                     proc.kill()
                     proc.wait(timeout=2)
                 except Exception:
                     pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
         return results
 
-def push_c5_grab_for_merchant(username: str, password: str, store_id: str, updates: list, progress_cb=None):
+def push_c5_grab_for_merchant(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None):
     """
     Synchronous wrapper to run async Grab C5 push in a clean event loop.
     """
     new_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(new_loop)
     try:
-        return new_loop.run_until_complete(_async_push_c5_grab(username, password, store_id, updates, progress_cb))
+        return new_loop.run_until_complete(_async_push_c5_grab(username, password, store_id, updates, progress_cb, item_result_cb))
     finally:
         try:
             new_loop.close()

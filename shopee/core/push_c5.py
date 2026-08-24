@@ -44,7 +44,8 @@ def push_c5_shopee_for_merchant(
     store_metadata: dict,
     updates: list,
     progress_cb=None,
-    headless: bool = True
+    headless: bool = True,
+    item_result_cb=None
 ) -> list[dict]:
     """Eksekusi push item menu C5 untuk outlet Shopee Food."""
     results = []
@@ -201,5 +202,11 @@ def push_c5_shopee_for_merchant(
             res_item["error"] = last_err
 
         results.append(res_item)
+        if item_result_cb:
+            try:
+                err_cb = res_item.get("error") if res_item.get("status") == "FAILED" else None
+                item_result_cb(upd, res_item.get("status", "FAILED"), err_cb, applied=res_item)
+            except Exception:
+                pass
 
     return results
