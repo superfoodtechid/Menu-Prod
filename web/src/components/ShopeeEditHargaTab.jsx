@@ -1498,8 +1498,10 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                         <tr key={item.id} className={`transition ${
                           isChecked
                             ? "bg-amber-50/80 dark:bg-amber-950/30"
+                            : item.is_price_locked
+                            ? "bg-rose-50/30 dark:bg-rose-950/20"
                             : item.is_in_promo
-                            ? "bg-purple-50/20 dark:bg-purple-950/10"
+                            ? "bg-amber-50/40 dark:bg-amber-950/20"
                             : "hover:bg-zinc-50 dark:hover:bg-zinc-950/50"
                         }`}>
                           {itemEditMode === "multi" && (
@@ -1559,7 +1561,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                               }}
                               className={`w-32 text-right p-2 rounded-xl border font-mono font-bold text-sm ${
                                 item.is_price_locked
-                                  ? "border-amber-200 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-300 cursor-not-allowed opacity-80"
+                                  ? "border-rose-300 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/30 text-rose-900 dark:text-rose-300 cursor-not-allowed opacity-80"
                                   : isEdited
                                   ? "border-orange-500 bg-orange-50 dark:bg-orange-950/40 text-orange-900 dark:text-orange-200 focus:ring-2 focus:ring-orange-500/20"
                                   : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white focus:border-orange-500"
@@ -1568,7 +1570,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                           </td>
                           <td className="p-3.5 text-center align-middle">
                             {item.is_flash_sale ? (
-                              <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold border border-amber-300 dark:border-amber-800 inline-block">
+                              <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 text-[11px] font-semibold border border-rose-300 dark:border-rose-800 inline-block">
                                 Flash Sale (Dikunci)
                               </span>
                             ) : isViolation ? (
@@ -1580,7 +1582,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                 {pctFmt} (Valid)
                               </span>
                             ) : item.is_in_promo ? (
-                              <span className="px-2.5 py-1 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 text-[11px] font-semibold border border-zinc-300 dark:border-zinc-700 inline-block">
+                              <span className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold border border-amber-300 dark:border-amber-700 inline-block">
                                 Promo ({item.promo_value || "Aktif"})
                               </span>
                             ) : (

@@ -51,12 +51,12 @@ export default function PromoBadgeTooltip({ item, platform = "shopee", fmt }) {
       aria-describedby={isVisible ? tooltipId : undefined}
       className="inline-flex items-center outline-none focus:ring-2 focus:ring-offset-1 focus:ring-zinc-400 rounded cursor-help"
     >
-      {isFs ? (
-        <span className="px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold text-[11px] border border-amber-300 dark:border-amber-800 shrink-0 inline-flex items-center gap-1">
-          <span>Flash Sale {item.promo_value ? `(${item.promo_value})` : ""}</span>
+      {isFs || item.is_price_locked ? (
+        <span className="px-2 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-semibold text-[11px] border border-rose-300 dark:border-rose-800 shrink-0 inline-flex items-center gap-1">
+          <span>{isFs ? `Flash Sale ${item.promo_value ? `(${item.promo_value})` : ""}` : `Promo Dikunci ${item.promo_value ? `(${item.promo_value})` : ""}`}</span>
         </span>
       ) : (
-        <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-semibold text-[11px] border border-zinc-300 dark:border-zinc-700 shrink-0 inline-flex items-center gap-1">
+        <span className="px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold text-[11px] border border-amber-300 dark:border-amber-700 shrink-0 inline-flex items-center gap-1">
           <span>Promo {item.promo_value ? `(${item.promo_value})` : "Aktif"}</span>
         </span>
       )}
