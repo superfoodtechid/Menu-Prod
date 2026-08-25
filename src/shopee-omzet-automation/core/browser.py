@@ -51,7 +51,7 @@ def get_session_file() -> Path:
         _thread_local.session_file = Path(__file__).resolve().parent.parent / "data" / "session.json"
     return _thread_local.session_file
 
-def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: str = "", driver=None) -> str:
+def get_otp_code(username: str, phone: str = "", timeout: int = 600, error_msg: str = "", driver=None) -> str:
     script_dir = Path(__file__).resolve().parent.parent
     data_dir = script_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
