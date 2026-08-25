@@ -528,7 +528,7 @@ def get_push_session(
             start_wait = time.time()
             otp_requested = False
 
-            while time.time() - start_wait < 90:
+            while time.time() - start_wait < OTP_WAIT_TIMEOUT:
                 current_url = driver.current_url.lower()
 
                 # Cek jika ada layar 'Lanjutkan dengan Shopee'
