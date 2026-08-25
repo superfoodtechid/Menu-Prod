@@ -7,6 +7,7 @@ import PushConfirmModal from "./shared/PushConfirmModal";
 import StickyBottomBar from "./shared/StickyBottomBar";
 import SearchFilterInput from "./shared/SearchFilterInput";
 import PriceInput from "./shared/PriceInput";
+import PromoBadgeTooltip from "./shared/PromoBadgeTooltip";
 
 const group = (items) => {
   if (!items || !Array.isArray(items)) return {};
@@ -535,6 +536,18 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             current_step: job.current_step,
             error_message: null
           });
+          // Update local item baseline & reset pending edits
+          setBranchMenus(prev => {
+            const prevList = prev[bid] || [];
+            return {
+              ...prev,
+              [bid]: prevList.map(item => {
+                const newP = branchEdits[item.id];
+                return newP !== undefined ? { ...item, price: newP } : item;
+              })
+            };
+          });
+          setEdits(prev => ({ ...prev, [bid]: {} }));
           startPollingPushJob(job.id, bid);
           setSaveState(p => ({ ...p, [bid]: "saved" }));
         } else {
@@ -651,7 +664,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const totalSummaryItems = pushSummaryList.reduce((acc, s) => acc + s.updates.length, 0);
 
   return (
-    <main className="flex flex-col gap-6">
+    <main className="flex flex-col gap-6 pb-28">
       {/* ── Top: Controls ── */}
       <section className="surface-card p-5 sm:p-6 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-red-100 dark:border-zinc-800 pb-4 gap-2">
@@ -1276,8 +1289,8 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                       {itemEditMode === "multi" && <th className="p-3.5 w-12 text-center">Pilih</th>}
                       <th className="p-3.5 min-w-[220px]">Nama Menu</th>
                       <th className="p-3.5 w-36">Kategori</th>
-                      <th className="p-3.5 text-right w-36">Harga Saat Ini</th>
-                      <th className="p-3.5 text-right w-44">Harga Baru ({platform?.toUpperCase()})</th>
+                      <th className="p-3.5 text-right w-44">Harga Saat Ini</th>
+                      <th className="p-3.5 text-right w-48">Harga Fake Price Baru ({platform?.toUpperCase()})</th>
                       <th className="p-3.5 text-center w-44">Status Aturan / Promo</th>
                     </tr>
                   </thead>
@@ -1333,60 +1346,35 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                 <td className="p-3.5 text-zinc-900 dark:text-white font-bold align-middle">
                                   <div className="flex items-center gap-2 flex-wrap">
                                     <span>{item.name}</span>
-                                    {item.is_in_promo && (
-                                      <div className="relative group/promo inline-block">
-                                        <span 
-                                          className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 font-bold text-[10px] border border-purple-200 dark:border-purple-800 shrink-0 cursor-help inline-flex items-center gap-1"
-                                        >
-                                          <span>PROMO {item.promo_value ? `(${item.promo_value})` : "AKTIF"}</span>
-                                          <span className="text-[9px] opacity-70">ℹ️</span>
-                                        </span>
-                                        {/* Hover Tooltip / Detail Promo */}
-                                        <div className="absolute left-0 bottom-full mb-2 hidden group-hover/promo:flex flex-col z-50 w-64 p-3 bg-zinc-900 text-white rounded-xl shadow-xl text-xs space-y-1.5 border border-zinc-700 pointer-events-none animate-scale-up">
-                                          <div className="font-bold text-purple-300 border-b border-zinc-700 pb-1 flex items-center justify-between">
-                                            <span>Rincian Promo Aktif</span>
-                                            <span className="text-[10px] bg-purple-900/80 text-purple-200 px-1.5 py-0.5 rounded font-mono">
-                                              {item.promo_type || "PROMO"}
-                                            </span>
-                                          </div>
-                                          <div className="flex justify-between text-zinc-300">
-                                            <span>Harga Normal / Coret:</span>
-                                            <span className="font-mono font-bold line-through text-zinc-400">
-                                              Rp {item.original_price ? fmt(item.original_price) : fmt(item.price)}
-                                            </span>
-                                          </div>
-                                          <div className="flex justify-between text-emerald-400">
-                                            <span>Harga Jual Promo:</span>
-                                            <span className="font-mono font-bold">Rp {fmt(item.price)}</span>
-                                          </div>
-                                          {item.promo_value && (
-                                            <div className="flex justify-between text-purple-300">
-                                              <span>Besaran Diskon:</span>
-                                              <span className="font-mono font-bold">{item.promo_value}</span>
-                                            </div>
-                                          )}
-                                          <div className="pt-1 border-t border-zinc-800 text-[10px] text-amber-300 font-normal leading-tight">
-                                            🔒 Harga dasar menu dikunci otomatis untuk menjaga validitas campaign aktif.
-                                          </div>
-                                        </div>
-                                      </div>
-                                    )}
+                                    <PromoBadgeTooltip item={item} platform={platform} fmt={fmt} />
                                   </div>
                                 </td>
                                 <td className="p-3.5 text-zinc-500 font-medium align-middle">{item.category}</td>
-                                <td className="p-3.5 text-right text-zinc-600 dark:text-zinc-300 font-mono font-bold align-middle">
-                                  Rp {fmt(item.price)}
+                                <td className="p-3.5 text-right text-zinc-600 dark:text-zinc-300 font-mono font-bold align-middle whitespace-nowrap">
+                                  {item.discounted_price && item.discounted_price < item.price ? (
+                                    <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                      <span className="line-through text-zinc-400 dark:text-zinc-500 font-normal">
+                                        Rp {fmt(item.price)}
+                                      </span>
+                                      <span className="text-zinc-400">→</span>
+                                      <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                                        Rp {fmt(item.discounted_price)}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <span>Rp {fmt(item.price)}</span>
+                                  )}
                                 </td>
                                 <td className="p-3.5 text-right align-middle">
                                   <div className="flex items-center justify-end gap-1.5">
                                     <input
                                       type="text"
-                                      disabled={item.is_in_promo}
-                                      title={item.is_in_promo ? "Harga dikunci karena menu sedang dalam promo aktif" : ""}
+                                      disabled={item.is_price_locked}
+                                      title={item.is_price_locked ? "Harga dikunci karena menu sedang dalam promo nominal aktif" : ""}
                                       value={fmt(curPrice)}
                                       onChange={(e) => changePrice(selectedBrandId, item.id, e.target.value)}
                                       className={`w-32 text-right p-2 rounded-xl border font-mono font-bold text-sm ${
-                                        item.is_in_promo
+                                        item.is_price_locked
                                           ? "border-purple-200 dark:border-purple-900/60 bg-purple-50/50 dark:bg-purple-950/30 text-purple-900 dark:text-purple-300 cursor-not-allowed opacity-80"
                                           : isViolation
                                           ? "border-red-400 dark:border-red-700 bg-white dark:bg-zinc-900 text-red-700 dark:text-red-300 focus:border-red-500 focus:ring-red-200"
@@ -1398,9 +1386,9 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                   </div>
                                 </td>
                                 <td className="p-3.5 text-center align-middle">
-                                  {item.is_in_promo ? (
-                                    <span title="Harga menu dikunci karena sedang dalam promo aktif" className="px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 text-[11px] font-bold border border-purple-200 dark:border-purple-900/60 inline-block">
-                                      🔒 Promo Aktif (Dikunci)
+                                  {item.is_price_locked ? (
+                                    <span title="Harga menu dikunci karena sedang dalam promo nominal aktif" className="px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 text-[11px] font-bold border border-purple-200 dark:border-purple-900/60 inline-block">
+                                      🔒 Promo Nominal (Dikunci)
                                     </span>
                                   ) : isViolation ? (
                                     <span className="px-2.5 py-1 rounded-lg bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-bold border border-red-200 dark:border-red-900/60 inline-block">
