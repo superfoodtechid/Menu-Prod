@@ -38,7 +38,7 @@ def _boot_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeMod
         headless=headless,
         close_browser=True,
         target_name=target_name,
-        interactive=False
+        interactive=True
     )
     if not session_data or "shopee_tob_token" not in session_data:
         return None, "Gagal menginisialisasi browser session"

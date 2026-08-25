@@ -6,9 +6,9 @@ import logging
 import threading
 import time
 import builtins
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union, Dict, Any
 
 # Override standard print to include timestamp
 _original_print = builtins.print
@@ -2062,6 +2062,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                         try:
                             item_id_idx = header_row.index('Item ID') + 1
                             price_idx = header_row.index('Current Real Price (Rp)') + 1
+                            fake_price_idx = (header_row.index('Current Fake Price (Rp)') + 1) if 'Current Fake Price (Rp)' in header_row else None
                             
                             successful_updates = {}
                             for t in trails:
@@ -2074,7 +2075,15 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             for row_idx in range(2, sheet.max_row + 1):
                                 cell_item_id = str(sheet.cell(row=row_idx, column=item_id_idx).value).strip()
                                 if cell_item_id in successful_updates:
-                                    sheet.cell(row=row_idx, column=price_idx).value = successful_updates[cell_item_id]
+                                    new_val = successful_updates[cell_item_id]
+                                    if fake_price_idx:
+                                        curr_fake = sheet.cell(row=row_idx, column=fake_price_idx).value
+                                        if curr_fake is not None and str(curr_fake).strip() not in ("", "0"):
+                                            sheet.cell(row=row_idx, column=fake_price_idx).value = new_val
+                                        else:
+                                            sheet.cell(row=row_idx, column=price_idx).value = new_val
+                                    else:
+                                        sheet.cell(row=row_idx, column=price_idx).value = new_val
                                     
                             wb.save(excel_path)
                             logger.info(f"💾 Updated Excel catalog with new prices at: {excel_path}")
@@ -4072,6 +4081,89 @@ def parse_c5_template_headers(wb) -> dict:
 
 MENU_ITEMS_CACHE = {}  # excel_path -> (mtime, raw_items)
 
+def _format_epoch_ms_wib(epoch_ms: Union[int, float, str, None]) -> str:
+    """Format epoch ms timestamp to human-readable WIB datetime string."""
+    if not epoch_ms:
+        return ""
+    try:
+        val = int(epoch_ms)
+        # Check if timestamp is in seconds instead of milliseconds
+        if val < 10000000000:
+            val *= 1000
+        utc_dt = datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
+        wib_dt = utc_dt.astimezone(timezone(timedelta(hours=7)))
+        return wib_dt.strftime("%d %b %Y, %H:%M WIB")
+    except Exception:
+        return str(epoch_ms)
+
+def _extract_shopee_dish_promo_info(dish: dict) -> dict:
+    """Extract promo details and lock status from Shopee dish API response dictionary."""
+    if not isinstance(dish, dict):
+        return {"is_flash_sale": False, "is_price_locked": False, "promo_details": None}
+
+    fs = dish.get("flash_sale_dish_discount")
+    if fs and isinstance(fs, dict):
+        disc = fs.get("discount") or {}
+        # Shopee price in nano-units / 100,000
+        disc_p = float(disc.get("discount_price", 0)) / 100000.0 if disc.get("discount_price") else 0
+        raw_pct = disc.get("discount_percentage", 0)
+        pct_val = (float(raw_pct) / 100.0) if raw_pct else 0
+        pct_str = f"{int(pct_val)}%" if pct_val.is_integer() else f"{pct_val:.1f}%"
+
+        start_time_str = _format_epoch_ms_wib(fs.get("start_time") or disc.get("create_time"))
+        end_time_str = _format_epoch_ms_wib(fs.get("end_time"))
+
+        promo_details = {
+            "type": "FLASH_SALE",
+            "name": disc.get("flash_sale_dish_name") or disc.get("dish_name") or dish.get("name", ""),
+            "discount_price": disc_p,
+            "discount_percentage": pct_str,
+            "stock": disc.get("stock", 0),
+            "sold_num": disc.get("sold_num", 0),
+            "limit_per_user": disc.get("limit_per_user", 0),
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "campaign_id": str(fs.get("campaign_id") or disc.get("timeslot_id") or "")
+        }
+        return {
+            "is_flash_sale": True,
+            "is_price_locked": True,
+            "promo_type": "FLASH_SALE",
+            "promo_value": pct_str if pct_val > 0 else (f"Rp {disc_p:,.0f}" if disc_p > 0 else "Flash Sale"),
+            "promo_details": promo_details
+        }
+
+    it = dish.get("item_discount")
+    if it and isinstance(it, dict):
+        disc_p = float(it.get("discount_price", 0)) / 100000.0 if it.get("discount_price") else 0
+        raw_pct = it.get("discount_percentage", 0)
+        pct_val = (float(raw_pct) / 100.0) if raw_pct else 0
+        pct_str = f"{int(pct_val)}%" if pct_val.is_integer() else f"{pct_val:.1f}%"
+
+        start_time_str = _format_epoch_ms_wib(it.get("campaign_start_time"))
+        end_time_str = _format_epoch_ms_wib(it.get("campaign_end_time"))
+
+        promo_details = {
+            "type": "ITEM_DISCOUNT",
+            "discount_price": disc_p,
+            "discount_percentage": pct_str,
+            "stock": it.get("stock", 0),
+            "sold_num": it.get("sold_num", 0),
+            "limit_per_order": it.get("limit_per_order", 0),
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "campaign_id": str(it.get("campaign_id") or "")
+        }
+        return {
+            "is_flash_sale": False,
+            "is_price_locked": False,
+            "promo_type": "PERCENTAGE" if pct_val > 0 else "NOMINAL",
+            "promo_value": pct_str if pct_val > 0 else (f"Rp {disc_p:,.0f}" if disc_p > 0 else "Diskon Menu"),
+            "promo_details": promo_details
+        }
+
+    return {"is_flash_sale": False, "is_price_locked": False, "promo_details": None}
+
 def get_parsed_menu_items(excel_path: str) -> list:
     path = Path(excel_path)
     if not path.exists():
@@ -4220,6 +4312,32 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
     except Exception as ex:
         logger.warning(f"Error querying promo audit trails: {ex}")
 
+    # If outlet is Shopee, load latest captured dishes JSON snapshot to enrich promo/flash-sale metadata
+    shopee_dish_map = {}
+    outlet_obj = db.query(Outlet).filter(Outlet.id == outlet_id).first()
+    if outlet_obj and (outlet_obj.platform or "").lower() == "shopee":
+        try:
+            shopee_api_dir = BASE_DIR / "shopee" / "API"
+            store_id_str = str(outlet_obj.store_id or "").strip()
+            cands = []
+            if store_id_str:
+                cands.append(shopee_api_dir / f"menu-response-{store_id_str}.json")
+            cands.append(shopee_api_dir / "menu-response.json")
+            for cp in cands:
+                if cp.exists():
+                    with open(cp, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    catalogs = data.get("data", {}).get("catalogs", []) if isinstance(data, dict) else []
+                    for cat in catalogs:
+                        for dish in cat.get("dishes", []):
+                            d_id = str(dish.get("id"))
+                            if d_id:
+                                shopee_dish_map[d_id] = dish
+                    if shopee_dish_map:
+                        break
+        except Exception as ex:
+            logger.warning(f"Failed loading Shopee menu snapshot: {ex}")
+
     raw_items = get_parsed_menu_items(excel_path)
     
     items = []
@@ -4227,11 +4345,21 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
         slash_pct_str = ri.get("slash_pct", "")
         slash_rp_val = ri.get("slash_rp", 0)
         
+        # In catalog Excel (C5):
+        # 'Current Fake Price (Rp)' (ri["original_price"]) is base price (e.g. 11.000)
+        # 'Current Real Price (Rp)' (ri["price"]) is selling price after discount (e.g. 9.900)
+        # If no fake price, base price is price.
+        fake_p = ri.get("original_price", 0)
+        real_p = ri.get("price", 0)
+        
+        base_p = fake_p if fake_p > 0 else real_p
+        selling_p = real_p
+        
         has_pct = bool(slash_pct_str and slash_pct_str not in ("0%", "0", ""))
         has_rp = bool(slash_rp_val and slash_rp_val > 0)
         
         has_promo_col = ri["is_promo_col"] in ("ya", "yes", "true", "1")
-        has_price_diff = ri["original_price"] > ri["price"] and ri["original_price"] > 0
+        has_price_diff = base_p > selling_p and selling_p > 0
         has_audit_lock = ri["id"] in promo_item_ids
         
         is_in_promo = has_pct or has_rp or has_promo_col or has_price_diff or has_audit_lock
@@ -4240,52 +4368,76 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
         promo_type = "NONE"
         promo_value = ""
         is_price_locked = False
+        is_flash_sale = False
+        promo_details = None
 
-        name_lower = ri["name"].lower()
-        is_name_nominal = "nominal" in name_lower
-        is_name_percentage = "persen" in name_lower or "percentage" in name_lower or "%" in name_lower
+        # Check Shopee live snapshot metadata first if present
+        dish_snapshot = shopee_dish_map.get(str(ri["id"]))
+        if dish_snapshot:
+            shopee_promo = _extract_shopee_dish_promo_info(dish_snapshot)
+            if shopee_promo.get("is_flash_sale") or shopee_promo.get("promo_details"):
+                is_flash_sale = shopee_promo.get("is_flash_sale", False)
+                is_price_locked = shopee_promo.get("is_price_locked", False)
+                promo_type = shopee_promo.get("promo_type", "NONE")
+                promo_value = shopee_promo.get("promo_value", "")
+                promo_details = shopee_promo.get("promo_details")
+                is_in_promo = True
 
-        if is_name_nominal:
-            promo_type = "NOMINAL"
-            diff = (ri["original_price"] - ri["price"]) if (ri["original_price"] > ri["price"] and ri["original_price"] > 0) else slash_rp_val
-            promo_value = f"Rp {diff:,}" if diff > 0 else (f"Rp {slash_rp_val:,}" if slash_rp_val > 0 else "Nominal")
-            is_price_locked = True
-        elif is_name_percentage:
-            promo_type = "PERCENTAGE"
-            if has_pct:
+        if not promo_details:
+            name_lower = ri["name"].lower()
+            is_name_nominal = "nominal" in name_lower
+            is_name_percentage = "persen" in name_lower or "percentage" in name_lower or "%" in name_lower
+
+            if is_name_nominal:
+                promo_type = "NOMINAL"
+                diff = (base_p - selling_p) if (base_p > selling_p and base_p > 0) else slash_rp_val
+                promo_value = f"Rp {diff:,}" if diff > 0 else (f"Rp {slash_rp_val:,}" if slash_rp_val > 0 else "Nominal")
+                is_price_locked = True
+            elif is_name_percentage:
+                promo_type = "PERCENTAGE"
+                if has_pct:
+                    promo_value = slash_pct_str
+                elif base_p > selling_p and base_p > 0:
+                    pct_calc = round(((base_p - selling_p) / base_p) * 100)
+                    promo_value = f"{pct_calc}%"
+                else:
+                    promo_value = "%"
+                is_price_locked = False
+            elif has_pct:
+                promo_type = "PERCENTAGE"
                 promo_value = slash_pct_str
-            elif ri["original_price"] > ri["price"] and ri["original_price"] > 0:
-                pct_calc = round(((ri["original_price"] - ri["price"]) / ri["original_price"]) * 100)
-                promo_value = f"{pct_calc}%"
-            else:
-                promo_value = "%"
-            is_price_locked = False
-        elif has_pct:
-            promo_type = "PERCENTAGE"
-            promo_value = slash_pct_str
-            is_price_locked = False  # Percentage promo allows base price changes
-        elif has_rp:
-            promo_type = "NOMINAL"
-            promo_value = f"Rp {slash_rp_val:,}"
-            is_price_locked = True   # Nominal promo locks base price
-        elif is_in_promo:
-            # Fallback deduction if % or Rp not explicitly formatted
-            if has_price_diff:
-                diff = ri["original_price"] - ri["price"]
-                pct_exact = (diff / ri["original_price"]) * 100
-                # If exact standard round discount tier (e.g. 10%, 15%, 20%, 25%, 30%, 50%), treat as percentage
-                if abs(pct_exact - round(pct_exact)) < 0.01 and int(round(pct_exact)) % 5 == 0:
-                    promo_type = "PERCENTAGE"
-                    promo_value = f"{int(round(pct_exact))}%"
-                    is_price_locked = False
+                is_price_locked = False  # Percentage promo allows base price changes
+            elif has_rp:
+                promo_type = "NOMINAL"
+                promo_value = f"Rp {slash_rp_val:,}"
+                is_price_locked = True   # Nominal promo locks base price
+            elif is_in_promo:
+                # Fallback deduction if % or Rp not explicitly formatted
+                if has_price_diff:
+                    diff = base_p - selling_p
+                    pct_exact = (diff / base_p) * 100
+                    # If exact standard round discount tier (e.g. 10%, 15%, 20%, 25%, 30%, 50%), treat as percentage
+                    if abs(pct_exact - round(pct_exact)) < 0.01 and int(round(pct_exact)) % 5 == 0:
+                        promo_type = "PERCENTAGE"
+                        promo_value = f"{int(round(pct_exact))}%"
+                        is_price_locked = False
+                    else:
+                        promo_type = "NOMINAL"
+                        promo_value = f"Rp {diff:,}"
+                        is_price_locked = True
                 else:
                     promo_type = "NOMINAL"
-                    promo_value = f"Rp {diff:,}"
+                    promo_value = "Promo Aktif"
                     is_price_locked = False
-            else:
-                promo_type = "NOMINAL"
-                promo_value = "Promo Aktif"
-                is_price_locked = False
+
+        # Discounted selling price if item is in promo:
+        disc_price = None
+        if promo_details and promo_details.get("discount_price"):
+            disc_price = int(promo_details["discount_price"])
+        elif is_in_promo and selling_p > 0 and selling_p < base_p:
+            disc_price = selling_p
+        elif is_in_promo and (has_pct or has_rp):
+            disc_price = selling_p
 
         items.append({
             "id": ri["id"],
@@ -4293,15 +4445,18 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
             "category": ri["category"],
             "name": ri["name"],
             "description": ri["description"],
-            "price": ri["price"],
-            "original_price": ri["original_price"],
+            "price": base_p,                       # Base fake price to display & edit (e.g. 11.000)
+            "original_price": base_p,              # Base normal price (11.000)
+            "discounted_price": disc_price,        # Selling price after promo (e.g. 9.900)
             "slash_pct": ri.get("slash_pct", ""),
             "slash_rp": ri.get("slash_rp", 0),
             "availability": ri["availability"],
             "is_in_promo": is_in_promo,
+            "is_flash_sale": is_flash_sale,
             "promo_type": promo_type,
             "promo_value": promo_value,
-            "is_price_locked": is_price_locked
+            "is_price_locked": is_price_locked,
+            "promo_details": promo_details
         })
     return items
 
@@ -4436,6 +4591,27 @@ class ShopeeOTPRequest(BaseModel):
 class ShopeeOTPChannelRequest(BaseModel):
     username: str
     channel: str  # "sms" | "whatsapp"
+
+@app.post("/api/shopee/cancel-otp")
+def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
+    """Cancels OTP waiting state for the given username and cleans up request files."""
+    username = req.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+
+    shopee_data_dirs = [
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data"
+    ]
+    for d in shopee_data_dirs:
+        fpath = d / f"otp_request_{username}.json"
+        if fpath.exists():
+            try:
+                fpath.unlink(missing_ok=True)
+            except Exception as e:
+                log.error(f"Error removing OTP request file {fpath}: {e}")
+
+    return {"status": "SUCCESS", "message": f"OTP request cancelled for {username}"}
 
 @app.post("/api/shopee/select-otp-channel")
 def select_shopee_otp_channel(req: ShopeeOTPChannelRequest):

@@ -85,7 +85,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         headless=headless,
         close_browser=True,
         target_name=target_name,
-        interactive=False
+        interactive=True
     )
     
     if not session_data or "shopee_tob_token" not in session_data:
@@ -174,6 +174,8 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             shopee_api_dir.mkdir(parents=True, exist_ok=True)
             snapshot_path = shopee_api_dir / f"menu-response-{store_id}.json"
             snapshot_path.write_text(json.dumps({"data": {"catalogs": catalogs}}, indent=2), encoding="utf-8")
+            # Also keep default snapshot fallback updated
+            (shopee_api_dir / "menu-response.json").write_text(json.dumps({"data": {"catalogs": catalogs}}, indent=2), encoding="utf-8")
             print(f"   💾 Snapshot menu Shopee berhasil disimpan ke: {snapshot_path}")
         except Exception as e:
             print(f"   ⚠️ Gagal menyimpan snapshot menu Shopee: {e}")

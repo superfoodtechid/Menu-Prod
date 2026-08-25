@@ -1,2103 +1,243 @@
 {
-    "code": 0,
-    "msg": "success",
-    "data": {
-        "catalogs": [
-            {
-                "id": "2048582784943104",
-                "name": "Rekomendasi",
-                "rank": 1,
-                "sync_item_group_id": "",
-                "dishes": []
+  "data": {
+    "catalogs": [
+      {
+        "id": "3148480950140416",
+        "name": "Category A",
+        "rank": 1,
+        "sync_item_group_id": "",
+        "dishes": [
+          {
+            "id": "3148482929458688",
+            "store_id": "22459819",
+            "catalog_id": "3148480950140416",
+            "name": "Item A",
+            "price": "1500000000",
+            "list_price": "1500000000",
+            "picture": "id-11134505-822wp-mpyl3mwg1vyk4f",
+            "description": "Desc A",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 1,
+            "create_source": null,
+            "discount_type": null,
+            "discount_amount": "0",
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": null,
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
             },
-            {
-                "id": "595704065476096",
-                "name": "Aneka Nasi Padang",
-                "rank": 2,
-                "sync_item_group_id": "",
-                "dishes": [
-                    {
-                        "id": "595704247682562",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Ati Sapi Gulai",
-                        "price": "3230000000",
-                        "list_price": "4037500000",
-                        "picture": "id-11134505-822wi-mnayz69yja4h36",
-                        "description": "Nasi Padang dengan lauk Ati Gulai, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 1065,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 2,
-                        "create_source": 1,
-                        "discount_type": 1,
-                        "discount_amount": "0",
-                        "discount_percentage": 2000,
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": {
-                            "id": "3064992739765760",
-                            "dish_id": "595704247682562",
-                            "discount_price": "3230000000",
-                            "limit_per_order": 4294967295,
-                            "discount_status": 1,
-                            "campaign_id": "3064992739716608492",
-                            "store_id": "1344375",
-                            "creator": "484548726",
-                            "create_time": "1777437110772",
-                            "update_time": "1781240413618",
-                            "campaign_start_time": 1777437240000,
-                            "campaign_end_time": 4102329600000,
-                            "discount_percentage": 2000,
-                            "group_id": "b4cac52aa3444a4687b3e1ee0085b6b1",
-                            "discount_type": 1,
-                            "discount_amount": "0",
-                            "creator_source": 1,
-                            "stock": 9999999,
-                            "sold_num": 26
-                        },
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763841",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Perkedel",
-                        "price": "2630000000",
-                        "list_price": "3287500000",
-                        "picture": "id-11134505-822wi-mn9rgqaesd8m65",
-                        "description": "Nasi Padang dengan lauk 2 Perkedel, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 2829,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 4,
-                        "create_source": 1,
-                        "discount_type": 1,
-                        "discount_amount": "0",
-                        "discount_percentage": 2000,
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": {
-                            "id": "3064992739765761",
-                            "dish_id": "595704249763841",
-                            "discount_price": "2630000000",
-                            "limit_per_order": 4294967295,
-                            "discount_status": 1,
-                            "campaign_id": "3064992739716608492",
-                            "store_id": "1344375",
-                            "creator": "484548726",
-                            "create_time": "1777437110772",
-                            "update_time": "1781486551171",
-                            "campaign_start_time": 1777437240000,
-                            "campaign_end_time": 4102329600000,
-                            "discount_percentage": 2000,
-                            "group_id": "b4cac52aa3444a4687b3e1ee0085b6b1",
-                            "discount_type": 1,
-                            "discount_amount": "0",
-                            "creator_source": 1,
-                            "stock": 9999999,
-                            "sold_num": 56
-                        },
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763845",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Paru Goreng",
-                        "price": "3430000000",
-                        "list_price": "4287500000",
-                        "picture": "id-11134505-822wg-mn9rh4ldci685e",
-                        "description": "Nasi Padang dengan lauk Paru Goreng, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 2983,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 5,
-                        "create_source": 1,
-                        "discount_type": 1,
-                        "discount_amount": "0",
-                        "discount_percentage": 2000,
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": {
-                            "id": "3064992739765762",
-                            "dish_id": "595704249763845",
-                            "discount_price": "3430000000",
-                            "limit_per_order": 4294967295,
-                            "discount_status": 1,
-                            "campaign_id": "3064992739716608492",
-                            "store_id": "1344375",
-                            "creator": "484548726",
-                            "create_time": "1777437110772",
-                            "update_time": "1781599034102",
-                            "campaign_start_time": 1777437240000,
-                            "campaign_end_time": 4102329600000,
-                            "discount_percentage": 2000,
-                            "group_id": "b4cac52aa3444a4687b3e1ee0085b6b1",
-                            "discount_type": 1,
-                            "discount_amount": "0",
-                            "creator_source": 1,
-                            "stock": 9999999,
-                            "sold_num": 71
-                        },
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763846",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Telur Bulat Balado",
-                        "price": "2530000000",
-                        "list_price": "3162500000",
-                        "picture": "id-11134505-822wt-mn9rf7cy13418a",
-                        "description": "Nasi Padang dengan lauk Telur Bulat Balado, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 1540,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 6,
-                        "create_source": 1,
-                        "discount_type": 1,
-                        "discount_amount": "0",
-                        "discount_percentage": 2000,
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": {
-                            "id": "3077965615036416",
-                            "dish_id": "595704249763846",
-                            "discount_price": "2530000000",
-                            "limit_per_order": 4294967295,
-                            "discount_status": 1,
-                            "campaign_id": "3048021287498752492",
-                            "store_id": "1344375",
-                            "creator": "",
-                            "create_time": "1778228912246",
-                            "update_time": "1780893380050",
-                            "campaign_start_time": 1776401400000,
-                            "campaign_end_time": 4102329600000,
-                            "discount_percentage": 2000,
-                            "group_id": "3c27e9fe3ad84c958f7541a7fc95eef7",
-                            "discount_type": 1,
-                            "discount_amount": "0",
-                            "creator_source": 1,
-                            "stock": 9999,
-                            "sold_num": 28
-                        },
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763847",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Udang Tusuk Balado",
-                        "price": "3450000000",
-                        "list_price": "3450000000",
-                        "picture": "id-11134505-822wg-mn9rhs0btnno1a",
-                        "description": "Nasi Padang dengan lauk Udang Tusuk Balado, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 757,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 7,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763849",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Usus Sapi Gulai",
-                        "price": "3450000000",
-                        "list_price": "3450000000",
-                        "picture": "id-11134505-822wj-mn9rifn83z0j9e",
-                        "description": "Nasi Padang dengan lauk Usus Sapi Gulai, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 1555,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 8,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763842",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Telur Dadar",
-                        "price": "2830000000",
-                        "list_price": "3537500000",
-                        "picture": "id-11134505-822wt-mn9rix2ehe691d",
-                        "description": "Nasi Padang dengan lauk Telur Dadar, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 3674,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 9,
-                        "create_source": 1,
-                        "discount_type": 1,
-                        "discount_amount": "0",
-                        "discount_percentage": 2000,
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": {
-                            "id": "3048021287562754",
-                            "dish_id": "595704249763842",
-                            "discount_price": "2830000000",
-                            "limit_per_order": 4294967295,
-                            "discount_status": 1,
-                            "campaign_id": "3048021287498752492",
-                            "store_id": "1344375",
-                            "creator": "484548726",
-                            "create_time": "1776401255534",
-                            "update_time": "1781590635898",
-                            "campaign_start_time": 1776401400000,
-                            "campaign_end_time": 4102329600000,
-                            "discount_percentage": 2000,
-                            "group_id": "3c27e9fe3ad84c958f7541a7fc95eef7",
-                            "discount_type": 1,
-                            "discount_amount": "0",
-                            "creator_source": 1,
-                            "stock": 9999,
-                            "sold_num": 123
-                        },
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763843",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Ikan Gulai",
-                        "price": "3450000000",
-                        "list_price": "3450000000",
-                        "picture": "id-11134505-822wh-mn9rjekq4jyg40",
-                        "description": "Nasi Padang dengan lauk Ikan Gulai, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 1411,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 10,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763844",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Ikan Goreng",
-                        "price": "3450000000",
-                        "list_price": "3450000000",
-                        "picture": "id-11134505-822wj-mn9rkw6mve9tf2",
-                        "description": "Nasi Padang dengan lauk Ikan Goreng, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 1319,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 11,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704247682563",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Otak Sapi Gulai",
-                        "price": "3400000000",
-                        "list_price": "3400000000",
-                        "picture": "id-11134505-822wg-mn9rljsik4xsfb",
-                        "description": "Nasi Padang dengan lauk Otak Sapi Gulai, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 2129,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 12,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704247682560",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Ayam Gulai",
-                        "price": "3480000000",
-                        "list_price": "4350000000",
-                        "picture": "id-11134505-822wi-mn9rmgzxslc1eb",
-                        "description": "Nasi Padang dengan lauk Ayam Gulai, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 3664,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 13,
-                        "create_source": 1,
-                        "discount_type": 1,
-                        "discount_amount": "0",
-                        "discount_percentage": 2000,
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": {
-                            "id": "3077965615036417",
-                            "dish_id": "595704247682560",
-                            "discount_price": "3480000000",
-                            "limit_per_order": 4294967295,
-                            "discount_status": 1,
-                            "campaign_id": "3048021287498752492",
-                            "store_id": "1344375",
-                            "creator": "",
-                            "create_time": "1778228912246",
-                            "update_time": "1781665048987",
-                            "campaign_start_time": 1776401400000,
-                            "campaign_end_time": 4102329600000,
-                            "discount_percentage": 2000,
-                            "group_id": "3c27e9fe3ad84c958f7541a7fc95eef7",
-                            "discount_type": 1,
-                            "discount_amount": "0",
-                            "creator_source": 1,
-                            "stock": 9999,
-                            "sold_num": 74
-                        },
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849388313817600",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Kepala Ikan Mubara",
-                        "price": "6450000000",
-                        "list_price": "6450000000",
-                        "picture": "id-11134505-822wo-mn9rn4nymb5wcb",
-                        "description": "Nasi Padang dengan lauk Kepala Ikan, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 130,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 18,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849404317545472",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Gulai Limpa",
-                        "price": "3450000000",
-                        "list_price": "3450000000",
-                        "picture": "id-11134505-822wn-mn9rnvmts2df2f",
-                        "description": "Nasi Padang dengan lauk Ikan Limpa, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 1355,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 19,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "1023820772181504",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Telur Bulat",
-                        "price": "2750000000",
-                        "list_price": "2750000000",
-                        "picture": "id-11134505-822wj-mn9rognx0pvsd6",
-                        "description": "Nasi Padang dengan lauk Telur Bulat, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 165,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 21,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "1025016319018496",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Ayam Goreng",
-                        "price": "3430000000",
-                        "list_price": "4287500000",
-                        "picture": "id-11134505-822wq-mn9rozwa48w6d1",
-                        "description": "Nasi Padang dengan lauk Ayam Goreng, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 3607,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 22,
-                        "create_source": 1,
-                        "discount_type": 1,
-                        "discount_amount": "0",
-                        "discount_percentage": 2000,
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": {
-                            "id": "3048021287562752",
-                            "dish_id": "1025016319018496",
-                            "discount_price": "3430000000",
-                            "limit_per_order": 4294967295,
-                            "discount_status": 1,
-                            "campaign_id": "3048021287498752492",
-                            "store_id": "1344375",
-                            "creator": "484548726",
-                            "create_time": "1776401255534",
-                            "update_time": "1781590635902",
-                            "campaign_start_time": 1776401400000,
-                            "campaign_end_time": 4102329600000,
-                            "discount_percentage": 2000,
-                            "group_id": "53ea08ab59a94d3fa7918ae18f31fce7",
-                            "discount_type": 1,
-                            "discount_amount": "0",
-                            "creator_source": 1,
-                            "stock": 9999,
-                            "sold_num": 259
-                        },
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "1022597799609344",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Daging Rendang",
-                        "price": "3090000000",
-                        "list_price": "3090000000",
-                        "picture": "id-11134505-822wq-mn9rpv0llx4za8",
-                        "description": "Nasi Padang dengan lauk Daging Rendang, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 9323,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 25,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "595704249763850",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Ayam Bakar",
-                        "price": "3480000000",
-                        "list_price": "4350000000",
-                        "picture": "id-11134505-822wk-mn9rqec9lgjlf9",
-                        "description": "Nasi Padang dengan lauk Ayam Bakar, disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 6041,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 26,
-                        "create_source": 1,
-                        "discount_type": 1,
-                        "discount_amount": "0",
-                        "discount_percentage": 2000,
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": {
-                            "id": "3048021287562753",
-                            "dish_id": "595704249763850",
-                            "discount_price": "3480000000",
-                            "limit_per_order": 4294967295,
-                            "discount_status": 1,
-                            "campaign_id": "3048021287498752492",
-                            "store_id": "1344375",
-                            "creator": "484548726",
-                            "create_time": "1776401255534",
-                            "update_time": "1781589819150",
-                            "campaign_start_time": 1776401400000,
-                            "campaign_end_time": 4102329600000,
-                            "discount_percentage": 2000,
-                            "group_id": "9778de46a1ae4a5891815ca9af7c3153",
-                            "discount_type": 1,
-                            "discount_amount": "0",
-                            "creator_source": 1,
-                            "stock": 9999,
-                            "sold_num": 188
-                        },
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "3052449642442240",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Ikan Peyek",
-                        "price": "2550000000",
-                        "list_price": "2550000000",
-                        "picture": "id-11134505-822wu-mn9r3am3vuo8cd",
-                        "description": "Nasi Padang dengan lauk Ikan Peyek disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": false,
-                        "option_group_count": 0,
-                        "sales_volume": 0,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 0,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 27,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "3053673520197120",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Cumi Gulai",
-                        "price": "3450000000",
-                        "list_price": "3450000000",
-                        "picture": "id-11134505-822wk-mnazq8vd45xf80",
-                        "description": "Nasi Padang dengan lauk Cumi Gulai disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": false,
-                        "option_group_count": 0,
-                        "sales_volume": 0,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 0,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 28,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "3053678128049664",
-                        "store_id": "1344375",
-                        "catalog_id": "595704065476096",
-                        "name": "Nasi Ikan Goreng",
-                        "price": "3500000000",
-                        "list_price": "3500000000",
-                        "picture": "id-11134505-822ws-mnazw3v23tvl58",
-                        "description": "Nasi Padang dengan lauk Ikan Goreng disajikan dengan sayur singkong, nangka muda (tewel), dan sambal hijau yang gurih.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 8,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 29,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    }
-                ]
+            "picture_type": 0,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          },
+          {
+            "id": "3148483367975936",
+            "store_id": "22459819",
+            "catalog_id": "3148480950140416",
+            "name": "Item B",
+            "price": "2800000000",
+            "list_price": "2800000000",
+            "picture": "id-11134505-822wr-mpyl4e26z9c148",
+            "description": "Desc B",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 2,
+            "create_source": null,
+            "discount_type": null,
+            "discount_amount": "0",
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": null,
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
             },
-            {
-                "id": "848740261048832",
-                "name": "Minuman",
-                "rank": 3,
-                "sync_item_group_id": "",
-                "dishes": [
-                    {
-                        "id": "849496954270720",
-                        "store_id": "1344375",
-                        "catalog_id": "848740261048832",
-                        "name": "Air Mineral (600ml)",
-                        "price": "900000000",
-                        "list_price": "900000000",
-                        "picture": "id-11134505-822wm-mn9rwlnt6mfa4d",
-                        "description": "",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 258,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 18,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849504436318720",
-                        "store_id": "1344375",
-                        "catalog_id": "848740261048832",
-                        "name": "Sinom Abah Kosim",
-                        "price": "1600000000",
-                        "list_price": "1600000000",
-                        "picture": "id-11134505-822wj-mn9rx7mp0p375c",
-                        "description": "Sinom Abah Qosim, minuman herbal tradisional dengan rasa yang khas",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 161,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 19,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849499437184512",
-                        "store_id": "1344375",
-                        "catalog_id": "848740261048832",
-                        "name": "Teh Hangat Manis",
-                        "price": "600000000",
-                        "list_price": "600000000",
-                        "picture": "id-11134505-822wk-mn9rxuqpokqo85",
-                        "description": "Teh hangat dengan rasa manis yang seimbang. Memberi sensasi hangat yang pas",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 377,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 20,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849506018424320",
-                        "store_id": "1344375",
-                        "catalog_id": "848740261048832",
-                        "name": "Air Mineral (250ml)",
-                        "price": "200000000",
-                        "list_price": "200000000",
-                        "picture": "id-11134505-822wg-mn9rybxyy4921e",
-                        "description": "",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 903,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 23,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849493629089280",
-                        "store_id": "1344375",
-                        "catalog_id": "848740261048832",
-                        "name": "Es Teh Manis",
-                        "price": "700000000",
-                        "list_price": "700000000",
-                        "picture": "id-11134505-822wj-mn9rysajg07cdd",
-                        "description": "Es teh manis dengan rasa segar yang pas. Enak dinikmati saat makan",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 2238,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 24,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "3052503573835264",
-                        "store_id": "1344375",
-                        "catalog_id": "848740261048832",
-                        "name": "Es Jeruk",
-                        "price": "900000000",
-                        "list_price": "900000000",
-                        "picture": "id-11134505-822wo-mn9t92hlbz7o80",
-                        "description": "Es jeruk dengan rasa segar yang pas. Enak dinikmati saat makan",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 64,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 25,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "3052505086734848",
-                        "store_id": "1344375",
-                        "catalog_id": "848740261048832",
-                        "name": "Jeruk Hangat",
-                        "price": "900000000",
-                        "list_price": "900000000",
-                        "picture": "id-11134505-822wl-mn9tbg8qp0ckff",
-                        "description": "Jeruk hangat dengan rasa manis yang seimbang. Memberi sensasi hangat yang pas",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 2,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 26,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    }
-                ]
-            },
-            {
-                "id": "3043643210329600",
-                "name": "Nasi Kotak",
-                "rank": 4,
-                "sync_item_group_id": "",
-                "dishes": [
-                    {
-                        "id": "1253559889419776",
-                        "store_id": "1344375",
-                        "catalog_id": "3043643210329600",
-                        "name": "Nasi Kotak Box Full Color (Komplit)",
-                        "price": "4600000000",
-                        "list_price": "4600000000",
-                        "picture": "id-11134505-822wn-mn9ruekqiwp08d",
-                        "description": "Nasi kotak dengan isian nasi, sayur singkong, nangka muda (tewel), dan sambal hijau. Lengkap dengan kerupuk udang, bah, dan air mineral. Tulis pilihan lauk di catatan pesanan.",
-                        "available": false,
-                        "option_group_count": 0,
-                        "sales_volume": 158,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 0,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 1,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "1253554599631872",
-                        "store_id": "1344375",
-                        "catalog_id": "3043643210329600",
-                        "name": "Nasi Kotak Full Color (Biasa)",
-                        "price": "4100000000",
-                        "list_price": "4100000000",
-                        "picture": "id-11134505-822wu-mn9rw3u7wkqrbe",
-                        "description": "Nasi kotak dengan isian nasi, sayur singkong, nangka muda (tewel), dan sambal hijau.Lengkap dengan kerupuk udang, bah, dan air mineral. Tulis pilihan lauk di catatan pesanan",
-                        "available": false,
-                        "option_group_count": 0,
-                        "sales_volume": 23,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 0,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 2,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    }
-                ]
-            },
-            {
-                "id": "3043644941988352",
-                "name": "Aneka Jus",
-                "rank": 5,
-                "sync_item_group_id": "",
-                "dishes": [
-                    {
-                        "id": "849480519545856",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Mangga",
-                        "price": "1400000000",
-                        "list_price": "1400000000",
-                        "picture": "id-11134505-822wq-mn9s32lpgs9494",
-                        "description": "Jus mangga dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 487,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 1,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849481946870784",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Nanas",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wo-mn9s3ksxehaba2",
-                        "description": "Jus nanas dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 272,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 2,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849486112470528",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Apel",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wu-mn9s425mqght3f",
-                        "description": "Jus apel dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 241,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 3,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849487074866176",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Belimbing",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wh-mn9s4iglaf467c",
-                        "description": "Jus belimbing dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 59,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 4,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849484985742848",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Alpukat",
-                        "price": "1700000000",
-                        "list_price": "1700000000",
-                        "picture": "id-11134505-822wk-mn9s51611pfn2d",
-                        "description": "Jus alpukat dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 1298,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 5,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849483654525440",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Jambu Merah",
-                        "price": "1900000000",
-                        "list_price": "1900000000",
-                        "picture": "id-11134505-822wq-mn9s5ji3h24o7a",
-                        "description": "Jus jambu merah dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 657,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 6,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849488928354816",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Strawberry",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wu-mn9s61hwwweg31",
-                        "description": "Jus strawberry dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 369,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 7,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849491807745536",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Wortel",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wo-mn9s6jb1djb728",
-                        "description": "Jus wortel dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": false,
-                        "option_group_count": 0,
-                        "sales_volume": 88,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 0,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 8,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849492602122752",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Timun",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wn-mn9s6zz1h81td6",
-                        "description": "Jus timun dengan rasa segar. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 50,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 9,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849494408820224",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Buah Naga",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wj-mn9s7vhkb0nc86",
-                        "description": "Jus buah naga dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 249,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 10,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849508649611776",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Semangka",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wr-mn9s8c9t5ypyae",
-                        "description": "Jus semangka dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 192,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 11,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "849509870908928",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Melon",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wo-mn9s8swh4ao3c4",
-                        "description": "Jus melon dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang.",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 374,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 12,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "3052499528431616",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Jeruk",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wl-mn9t44fice10b7",
-                        "description": "Jus jeruk dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 3,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 13,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "3052500511879680",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Sirsak",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wo-mn9t5ehjib5sd5",
-                        "description": "Jus sirsak dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang",
-                        "available": false,
-                        "option_group_count": 0,
-                        "sales_volume": 0,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 0,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 14,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    },
-                    {
-                        "id": "3052501227418624",
-                        "store_id": "1344375",
-                        "catalog_id": "3043644941988352",
-                        "name": "Jus Tomat",
-                        "price": "1500000000",
-                        "list_price": "1500000000",
-                        "picture": "id-11134505-822wj-mn9t6bus701y37",
-                        "description": "Jus tomat dengan rasa segar dan manis. Pas untuk melengkapi hidangan padang",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 2,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 15,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    }
-                ]
-            },
-            {
-                "id": "3043648837367296",
-                "name": "Aneka Lauk Padang",
-                "rank": 6,
-                "sync_item_group_id": "",
-                "dishes": [
-                    {
-                        "id": "849438132089344",
-                        "store_id": "1344375",
-                        "catalog_id": "3043648837367296",
-                        "name": "Lauk Masakan Padang",
-                        "price": "2750000000",
-                        "list_price": "2750000000",
-                        "picture": "id-11134505-822wt-mn9rsrbl1hj76b",
-                        "description": "Bebas pilih lauk sesuai selera (kecuali kikil, aneka telur, perkedel, dan kepala ikan).",
-                        "available": true,
-                        "option_group_count": 1,
-                        "sales_volume": 6552,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 1,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "flash_sale_price": "2149900000",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": {
-                            "discount": {
-                                "id": 3117764767707648375,
-                                "timeslot_id": 3085251379360784985,
-                                "store_id": 1344375,
-                                "dish_id": 849438132089344,
-                                "dish_name": "Lauk Masakan Padang",
-                                "flash_sale_dish_name": "Lauk Masakan Padang",
-                                "stock": 10,
-                                "sold_num": 0,
-                                "limit_per_user": 2,
-                                "discount_price": 2149900000,
-                                "discount_status": 1,
-                                "discount_type": 1,
-                                "discount_percentage": 2182,
-                                "operator": "rifki.kanijaya@shopee.com",
-                                "create_time": 1780658059748,
-                                "update_time": 1780658059748,
-                                "category_ids": "[12]",
-                                "self_pick_up_price": 2149900000,
-                                "co_fund_rule": {},
-                                "co_fund_rule_content": "{\"self_pick_cofund\":null,\"delivery_cofund\":null}",
-                                "is_deleted": 0,
-                                "qc_result": 1,
-                                "is_need_qc": 0,
-                                "qc_fail_reason": ""
-                            },
-                            "start_time": 1781661600000,
-                            "end_time": 1781668799999,
-                            "campaign_id": 3085250938025984,
-                            "timezone": "Asia/Jakarta"
-                        },
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    }
-                ]
-            },
-            {
-                "id": "3043791297050112",
-                "name": "Pelengkap",
-                "rank": 7,
-                "sync_item_group_id": "",
-                "dishes": [
-                    {
-                        "id": "849512154706432",
-                        "store_id": "1344375",
-                        "catalog_id": "3043791297050112",
-                        "name": "Nasi Putih",
-                        "price": "1250000000",
-                        "list_price": "1250000000",
-                        "picture": "id-11134505-822wp-mn9rr5mw581ub7",
-                        "description": "Nasi putih pulen dengan tekstur yang enak.Cocok dipadukan dengan berbagai lauk",
-                        "available": true,
-                        "option_group_count": 0,
-                        "sales_volume": 484,
-                        "sale_start_time": 0,
-                        "sale_end_time": 86399,
-                        "sale_week_bit": 127,
-                        "in_sale_time": true,
-                        "listing_status": 1,
-                        "sale_status": 1,
-                        "time_for_sales": [
-                            {
-                                "sale_start_time": 0,
-                                "sale_end_time": 86399
-                            }
-                        ],
-                        "rank": 1,
-                        "create_source": null,
-                        "discount_type": null,
-                        "discount_amount": "0",
-                        "sync_item_group_id": "",
-                        "blocked": false,
-                        "item_discount": null,
-                        "flash_sale_dish_discount": null,
-                        "flag": {
-                            "alcoholic": false,
-                            "qc_frozen": false
-                        },
-                        "picture_type": 5,
-                        "is_prepaid_sku": false,
-                        "stock_type": 0
-                    }
-                ]
-            }
+            "picture_type": 0,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          }
         ]
-    }
+      },
+      {
+        "id": "3148481062563328",
+        "name": "Category B",
+        "rank": 2,
+        "sync_item_group_id": "",
+        "dishes": [
+          {
+            "id": "3148483850695168",
+            "store_id": "22459819",
+            "catalog_id": "3148481062563328",
+            "name": "Item C",
+            "price": "3000000000",
+            "list_price": "3000000000",
+            "picture": "id-11134505-822wl-mpyl50nuv5la00",
+            "description": "Desc C",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 1,
+            "create_source": null,
+            "discount_type": null,
+            "discount_amount": "0",
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": null,
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
+            },
+            "picture_type": 0,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          },
+          {
+            "id": "3148484252139008",
+            "store_id": "22459819",
+            "catalog_id": "3148481062563328",
+            "name": "Item D",
+            "price": "4500000000",
+            "list_price": "4500000000",
+            "picture": "id-11134505-822wt-mpyl5jm2lerxe3",
+            "description": "Desc D",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 2,
+            "create_source": null,
+            "discount_type": null,
+            "discount_amount": "0",
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": null,
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
+            },
+            "picture_type": 5,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          },
+          {
+            "id": "3148484649480704",
+            "store_id": "22459819",
+            "catalog_id": "3148481062563328",
+            "name": "Item E",
+            "price": "6300000000",
+            "list_price": "7000000000",
+            "picture": "id-11134505-822wm-mpyl622u366l5c",
+            "description": "Desc E",
+            "available": true,
+            "option_group_count": 0,
+            "sales_volume": 0,
+            "sale_start_time": 0,
+            "sale_end_time": 86399,
+            "sale_week_bit": 127,
+            "in_sale_time": true,
+            "listing_status": 1,
+            "sale_status": 1,
+            "time_for_sales": [
+              {
+                "sale_start_time": 0,
+                "sale_end_time": 86399
+              }
+            ],
+            "rank": 3,
+            "create_source": 1,
+            "discount_type": 1,
+            "discount_amount": "0",
+            "discount_percentage": 1000,
+            "sync_item_group_id": "",
+            "blocked": false,
+            "item_discount": {
+              "id": "3148522146836992",
+              "dish_id": "3148484649480704",
+              "discount_price": "6300000000",
+              "limit_per_order": 4294967295,
+              "discount_status": 1,
+              "campaign_id": "3148522146774528835",
+              "store_id": "22459819",
+              "creator": "1305465393",
+              "create_time": "1782535341183",
+              "update_time": "1782535341183",
+              "campaign_start_time": 1782535500000,
+              "campaign_end_time": 4102329600000,
+              "discount_percentage": 1000,
+              "group_id": "7604ecaaec15413d9cdfcc61f46c8dbe",
+              "discount_type": 1,
+              "discount_amount": "0",
+              "creator_source": 1,
+              "stock": 1,
+              "sold_num": 0
+            },
+            "flash_sale_dish_discount": null,
+            "flag": {
+              "alcoholic": false,
+              "qc_frozen": false
+            },
+            "picture_type": 0,
+            "is_prepaid_sku": false,
+            "stock_type": 0
+          }
+        ]
+      }
+    ]
+  }
 }
