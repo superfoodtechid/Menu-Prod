@@ -1568,19 +1568,19 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                           </td>
                           <td className="p-3.5 text-center align-middle">
                             {item.is_flash_sale ? (
-                              <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-bold border border-amber-300 dark:border-amber-800 inline-block">
-                                ⚡ Flash Sale (Dikunci)
+                              <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold border border-amber-300 dark:border-amber-800 inline-block">
+                                Flash Sale (Dikunci)
                               </span>
                             ) : isViolation ? (
-                              <span className="px-2.5 py-1 rounded-lg bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-bold border border-red-200 dark:border-red-900/60 inline-block">
-                                ⚠️ {violationMsg}
+                              <span className="px-2.5 py-1 rounded bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-semibold border border-red-200 dark:border-red-900/60 inline-block">
+                                {violationMsg}
                               </span>
                             ) : isEdited ? (
-                              <span className="px-2.5 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-bold border border-emerald-200 dark:border-emerald-900/60 inline-block">
-                                ✓ {pctFmt} (Valid)
+                              <span className="px-2.5 py-1 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold border border-emerald-200 dark:border-emerald-900/60 inline-block">
+                                {pctFmt} (Valid)
                               </span>
                             ) : item.is_in_promo ? (
-                              <span className="px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 text-[11px] font-bold border border-purple-200 dark:border-purple-900/60 inline-block">
+                              <span className="px-2.5 py-1 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 text-[11px] font-semibold border border-zinc-300 dark:border-zinc-700 inline-block">
                                 Promo ({item.promo_value || "Aktif"})
                               </span>
                             ) : (

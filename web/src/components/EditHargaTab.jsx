@@ -1387,8 +1387,8 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                 </td>
                                 <td className="p-3.5 text-center align-middle">
                                   {item.is_price_locked ? (
-                                    <span title="Harga menu dikunci karena sedang dalam promo nominal aktif" className="px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 text-[11px] font-bold border border-purple-200 dark:border-purple-900/60 inline-block">
-                                      🔒 Promo Nominal (Dikunci)
+                                    <span title="Harga menu dikunci karena sedang dalam promo nominal aktif" className="px-2.5 py-1 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 text-[11px] font-semibold border border-zinc-300 dark:border-zinc-700 inline-block">
+                                      Promo Nominal (Dikunci)
                                     </span>
                                   ) : isViolation ? (
                                     <span className="px-2.5 py-1 rounded-lg bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-bold border border-red-200 dark:border-red-900/60 inline-block">
