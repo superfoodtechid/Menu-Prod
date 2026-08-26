@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -45,4 +46,4 @@ jobs:
           ssh-keygen -l -f ~/.ssh/id_ed25519 || { echo "ERROR: Invalid SSH private key format!"; exit 1; }
           ssh-keyscan -p 2222 "$HOST" >> ~/.ssh/known_hosts
           rsync -avz -e "ssh -p 2222 -o StrictHostKeyChecking=no" --delete web/dist/ "pi@$HOST":/home/pi/project/menu-prod/web/dist/
-          ssh -p 2222 -o StrictHostKeyChecking=no pi@$HOST "cd /home/pi/project/menu-prod && git pull origin main && [ -f .env ] || cp .env.example .env && mkdir -p src/goscrapperv2 && [ -f src/goscrapperv2/.env ] || cp .env src/goscrapperv2/.env && sudo DOCKER_BUILDKIT=1 docker build -t foodmaster-backend-api:latest . && (sudo docker rm -f foodmaster_backend_container 2>/dev/null || true) && sudo docker run -d --name foodmaster_backend_container --init --restart unless-stopped --net=host -v /home/pi/project/menu-prod/data:/app/data -v /home/pi/project/menu-prod/.env:/app/.env -v /home/pi/project/menu-prod/src/goscrapperv2/.env:/app/src/goscrapperv2/.env foodmaster-backend-api:latest"
+          ssh -p 2222 -o StrictHostKeyChecking=no pi@$HOST "cd /home/pi/project/menu-prod && git pull origin main && [ -f .env ] || cp .env.example .env && mkdir -p src/goscrapperv2 && [ -f src/goscrapperv2/.env ] || cp .env src/goscrapperv2/.env && sudo DOCKER_BUILDKIT=1 docker build -t foodmaster-backend-api:latest . && (sudo docker rm -f foodmaster_backend_container 2>/dev/null || true) && sudo docker run -d --name foodmaster_backend_container --init --restart unless-stopped --net=host -v /home/pi/project/menu-prod/data:/app/data -v /home/pi/project/menu-prod/web/dist:/app/web/dist -v /home/pi/project/menu-prod/.env:/app/.env -v /home/pi/project/menu-prod/src/goscrapperv2/.env:/app/src/goscrapperv2/.env foodmaster-backend-api:latest"
