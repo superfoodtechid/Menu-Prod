@@ -611,10 +611,11 @@ def ambil_otp_dari_endpoint(url_dasar, action="getOtp", label_email=None):
         return response.read().decode("utf-8").strip()
 
 
-def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_detik=3, otp_awal_override=None, timeout_detik=15):
+def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_detik=1, otp_awal_override=None, timeout_detik=15):
     """
     Menunggu OTP terbaru yang berbeda dari nilai awal agar tidak memakai OTP sebelumnya.
     otp_awal_override: Jika diisi, gunakan nilai ini sebagai baseline (snapshot sebelum OTP dikirim).
+    Jika dalam batas waktu tidak ada OTP baru yang masuk, kembalikan None.
     """
     if otp_awal_override is not None:
         otp_awal = otp_awal_override
@@ -625,7 +626,7 @@ def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_de
             otp_awal = ""
     
     batas_waktu = time.time() + timeout_detik
-    console.print(f"   [info]🤖 Menunggu OTP baru masuk ke inbox (maksimal {timeout_detik} detik)...[/info]")
+    console.print(f"   [info]🤖 Polling OTP baru dari Gmail (interval: {interval_detik}s, max: {timeout_detik}s)...[/info]")
 
     while time.time() < batas_waktu:
         time.sleep(interval_detik)
@@ -636,7 +637,8 @@ def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_de
         except Exception:
             pass
 
-    return otp_awal
+    return None
+
 
 
 def login_outlet_gofood_flow(outlet_info):
