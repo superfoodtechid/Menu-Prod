@@ -226,11 +226,17 @@ def _wait_for_otp_code(username: str, timeout: int = OTP_WAIT_TIMEOUT) -> str | 
         try:
             if otp_file.exists():
                 data = json.loads(otp_file.read_text())
+                if data.get("status") == "CANCELLED":
+                    log.info(f"❌ [OTP] User membatalkan OTP untuk '{username}'")
+                    otp_file.unlink(missing_ok=True)
+                    raise RuntimeError("user membatalkan otp")
                 if data.get("status") == "RECEIVED" and data.get("code"):
                     code = str(data["code"]).strip()
                     otp_file.unlink(missing_ok=True)
                     log.info(f"✅ [OTP] Kode OTP diterima: {code}")
                     return code
+        except RuntimeError as re:
+            raise re
         except Exception as e:
             log.debug(f"  OTP file read error: {e}")
         time.sleep(2)
@@ -580,6 +586,11 @@ def get_push_session(
                             if otp_file.exists():
                                 data = json.loads(otp_file.read_text())
                                 
+                                if data.get("status") == "CANCELLED":
+                                    log.info(f"❌ [PUSH_BROWSER] User membatalkan OTP untuk '{username}'")
+                                    otp_file.unlink(missing_ok=True)
+                                    raise RuntimeError("user membatalkan otp")
+
                                 # Cek jika pengguna memilih saluran WhatsApp via Web UI
                                 req_channel = (data.get("requested_channel") or "").lower()
                                 if req_channel == "whatsapp" and not whatsapp_triggered:

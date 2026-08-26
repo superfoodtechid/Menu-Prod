@@ -813,9 +813,13 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
     except Exception as e:
         logger.error(f"❌ Job {job_id} failed: {e}")
         job.status = "FAILED"
-        job.error_message = str(e)
-        err_msg = f"Terjadi kesalahan: {str(e)}"
-        job.current_step = err_msg if len(err_msg) <= 255 else err_msg[:252] + "..."
+        if "user membatalkan otp" in str(e).lower():
+            job.error_message = "user membatalkan otp"
+            job.current_step = "Gagal: user membatalkan otp"
+        else:
+            job.error_message = str(e)
+            err_msg = f"Terjadi kesalahan: {str(e)}"
+            job.current_step = err_msg if len(err_msg) <= 255 else err_msg[:252] + "..."
         job.completed_at = datetime.utcnow()
         db.commit()
     finally:
@@ -2019,8 +2023,13 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
             job.current_step = f"Sebagian item gagal diperbarui ({success_count} sukses, {fail_count} gagal)."
         else:
             job.status = "FAILED"
-            job.error_message = f"Pembaruan harga gagal! 0 dari {total_updates} item berhasil diperbarui."
-            job.current_step = f"Gagal memperbarui harga! (0/{total_updates} berhasil)."
+            trails_fails = db.query(AuditTrail).filter(AuditTrail.job_id == job.id, AuditTrail.status == "FAILED").all()
+            if trails_fails and any("user membatalkan otp" in str(tf.error_message).lower() for tf in trails_fails if tf.error_message):
+                job.error_message = "user membatalkan otp"
+                job.current_step = "Gagal: user membatalkan otp"
+            else:
+                job.error_message = f"Pembaruan harga gagal! 0 dari {total_updates} item berhasil diperbarui."
+                job.current_step = f"Gagal memperbarui harga! (0/{total_updates} berhasil)."
 
         trails = db.query(AuditTrail).filter(AuditTrail.job_id == job.id).all()
         breakdown_list = []
@@ -2122,9 +2131,13 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
     except Exception as e:
         logger.error(f"❌ Job {job_id} failed: {e}")
         job.status = "FAILED"
-        job.error_message = str(e)
-        err_msg = f"Terjadi kesalahan: {str(e)}"
-        job.current_step = err_msg if len(err_msg) <= 255 else err_msg[:252] + "..."
+        if "user membatalkan otp" in str(e).lower():
+            job.error_message = "user membatalkan otp"
+            job.current_step = "Gagal: user membatalkan otp"
+        else:
+            job.error_message = str(e)
+            err_msg = f"Terjadi kesalahan: {str(e)}"
+            job.current_step = err_msg if len(err_msg) <= 255 else err_msg[:252] + "..."
         job.completed_at = datetime.utcnow()
         db.commit()
 
@@ -4618,12 +4631,38 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
         BASE_DIR / "shopee" / "data"
     ]
     for d in shopee_data_dirs:
+        d.mkdir(parents=True, exist_ok=True)
         fpath = d / f"otp_request_{username}.json"
-        if fpath.exists():
-            try:
-                fpath.unlink(missing_ok=True)
-            except Exception as e:
-                log.error(f"Error removing OTP request file {fpath}: {e}")
+        request_data = {
+            "status": "CANCELLED",
+            "username": username,
+            "error_msg": "user membatalkan otp",
+            "cancelled_at": datetime.now().isoformat()
+        }
+        try:
+            fpath.write_text(json.dumps(request_data, indent=2))
+            log.info(f"🛑 [OTP] Updated OTP status to CANCELLED for {username} in {fpath}")
+        except Exception as e:
+            log.error(f"Error writing CANCELLED to OTP file {fpath}: {e}")
+
+    try:
+        from menu_core.database import SessionLocal
+        db = SessionLocal()
+        running_jobs = db.query(Job).filter(
+            Job.status.in_(["RUNNING", "PENDING"]),
+            Job.platform == "shopee"
+        ).all()
+        for j in running_jobs:
+            if j.outlet and j.outlet.account and (j.outlet.account.username or "").strip().lower() == username.lower():
+                j.status = "FAILED"
+                j.error_message = "user membatalkan otp"
+                j.current_step = "Gagal: user membatalkan otp"
+                j.completed_at = datetime.utcnow()
+                log.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id}")
+        db.commit()
+        db.close()
+    except Exception as dbe:
+        log.error(f"Error updating DB for cancelled OTP: {dbe}")
 
     return {"status": "SUCCESS", "message": f"OTP request cancelled for {username}"}
 
