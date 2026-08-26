@@ -36,8 +36,8 @@ def safe_goto_with_retry(
     page,
     url,
     wait_until="domcontentloaded",
-    timeout=30000,
-    max_attempts=3,
+    timeout=25000,
+    max_attempts=2,
     ready_selector=None,
     ready_timeout=15000,
 ):
@@ -625,7 +625,8 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                 
             max_login_attempts = 2
             attempts_made = 0
-            email_input_selector = 'input[type="email"]:visible, input[name="email"]:visible, input[placeholder*="email" i]:visible, input[type="text"]:visible'
+            email_input_selector = 'input[type="email"]:visible, input[name*="email" i]:visible, input[placeholder*="email" i]:visible, input[data-testid*="email" i]:visible, input[type="text"]:not([placeholder*="●"]):not([placeholder*="otp" i]):visible'
+            otp_input_selector = 'input[autocomplete="one-time-code"], input[placeholder*="●" i], input[placeholder*="otp" i], input[aria-label*="digit" i], input[aria-label*="otp" i], div[class*="otp" i] input:not([type="checkbox"]):not([type="radio"]), input[name*="otp" i]:not([type="checkbox"]):not([type="radio"]), input[maxlength="1"]:not([type="checkbox"]):not([type="radio"])'
             
             while attempts_made < max_login_attempts:
                 attempt = attempts_made
@@ -642,9 +643,9 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                             page,
                             "https://portal.gofoodmerchant.co.id/auth/login/email",
                             wait_until="domcontentloaded",
-                            timeout=45000,
-                            ready_selector=email_input_selector,
-                            ready_timeout=25000,
+                            timeout=25000,
+                            ready_selector='input:visible',
+                            ready_timeout=15000,
                         )
                     except Exception as email_nav_err:
                         print(f"   ⚠️ Halaman /auth/login/email gagal ({email_nav_err}). Mencoba buka /auth/login lalu pindah ke login Email...")
@@ -652,7 +653,7 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                             page,
                             "https://portal.gofoodmerchant.co.id/auth/login",
                             wait_until="domcontentloaded",
-                            timeout=45000,
+                            timeout=25000,
                         )
                         switched_to_email = False
                         for sel in [
@@ -676,20 +677,20 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                                     page,
                                     "https://portal.gofoodmerchant.co.id/auth/login/email",
                                     wait_until="domcontentloaded",
-                                    timeout=45000,
+                                    timeout=25000,
                                 )
                             except Exception:
                                 pass
-                        page.wait_for_selector(email_input_selector, timeout=25000, state="visible")
+                        page.wait_for_selector('input:visible', timeout=15000, state="visible")
                 else:
                     print(f"\n   ➡️ Membuka halaman login... (Percobaan {attempt + 1}/{max_login_attempts})")
                     safe_goto_with_retry(
                         page,
                         "https://portal.gofoodmerchant.co.id/auth/login",
                         wait_until="domcontentloaded",
-                        timeout=45000,
-                        ready_selector=email_input_selector,
-                        ready_timeout=25000,
+                        timeout=25000,
+                        ready_selector='input:visible',
+                        ready_timeout=15000,
                     )
 
                 time.sleep(1.0)
@@ -702,131 +703,142 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                 action_type = "getOtpEmail" if current_email else "getOtp"
                 otp_snapshot_awal = ""
 
-                # --- STEP 4: Ketik email secara human-like ---
+                # --- STEP 4: Cek apakah halaman sudah di layar OTP atau perlu ketik email ---
                 if current_email:
                     try:
-                        email_input = page.wait_for_selector(
-                            email_input_selector,
-                            timeout=15000
-                        )
-                        if email_input:
-                            email_input.click()
-                            time.sleep(0.3)
-                            email_input.focus()
-                            time.sleep(0.3)
-                            for char in current_email:
-                                email_input.type(char, delay=0)
-                                time.sleep(random.uniform(0.05, 0.15))
-                            time.sleep(0.5)
+                        already_on_otp = False
+                        try:
+                            if page.locator('text=/Kode OTP/i, text=/Kami telah mengirim kode/i, input[placeholder*="●"]').count() > 0:
+                                already_on_otp = True
+                                print("   ℹ️ Terdeteksi halaman sudah berada di layar OTP. Melewati pengisian email...")
+                        except Exception:
+                            pass
 
-                            submit_btn = page.locator('button:has-text("Lanjut"), button:has-text("Submit"), button:has-text("Masuk"), button[type="submit"]')
-                            if submit_btn.count() > 0:
-                                submit_btn.first.click()
-                            else:
-                                email_input.press("Enter")
-                            time.sleep(3)
+                        if not already_on_otp:
+                            email_input = page.wait_for_selector(
+                                email_input_selector,
+                                timeout=10000
+                            )
+                            if email_input:
+                                email_input.click()
+                                time.sleep(0.3)
+                                email_input.focus()
+                                time.sleep(0.3)
+                                for char in current_email:
+                                    email_input.type(char, delay=0)
+                                    time.sleep(random.uniform(0.02, 0.08))
+                                time.sleep(0.5)
 
-                            # --- Pre-snapshot OTP sebelum tombol OTP diklik ---
-                            if otp_endpoint:
-                                try:
-                                    otp_snapshot_awal = ambil_otp_dari_endpoint(otp_endpoint, action=action_type, label_email=label_email_cfg)
-                                    print(f"   📸 Snapshot OTP awal: '{otp_snapshot_awal or '(kosong)'}' (sebelum OTP dikirim)")
-                                except Exception:
-                                    otp_snapshot_awal = ""
+                                submit_btn = page.locator('button:has-text("Lanjut"), button:has-text("Submit"), button:has-text("Masuk"), button[type="submit"]')
+                                if submit_btn.count() > 0 and submit_btn.first.is_visible():
+                                    submit_btn.first.click()
+                                else:
+                                    email_input.press("Enter")
+                                time.sleep(2.5)
 
-                            # Jika ada halaman pilihan login (password/OTP)
-                            try:
-                                btn_otp = page.locator('button:has-text("Masuk dengan OTP"), a:has-text("Masuk dengan OTP")').first
-                                if btn_otp.count() > 0 and btn_otp.is_visible():
-                                    btn_otp.click()
-                                    print("   ✅ Tombol 'Masuk dengan OTP' diklik. OTP sedang dikirim...")
-                                    time.sleep(2)
-                            except Exception:
-                                pass
-
-                            # --- STEP 5: Automated OTP Polling & Fill ---
-                            if otp_endpoint:
-                                try:
-                                    print("   🤖 Menunggu field OTP muncul...")
-                                    otp_input_selector = 'input[autocomplete="one-time-code"], input[aria-label*="digit" i], div[class*="otp" i] input:not([type="checkbox"]):not([type="radio"]), input[name*="otp" i]:not([type="checkbox"]):not([type="radio"]), input[maxlength="1"]:not([type="checkbox"]):not([type="radio"])'
-                                    
-                                    otp_appeared = False
-                                    start_wait_otp = time.time()
-                                    while time.time() - start_wait_otp < 15:
-                                        if page.locator(otp_input_selector).count() > 0 and page.locator(otp_input_selector).first.is_visible():
-                                            otp_appeared = True
-                                            break
-                                        
-                                        # Fast-fail deteksi Limit/Banned
-                                        try:
-                                            ban_msg1 = page.locator('text=/terlalu banyak/i')
-                                            ban_msg2 = page.locator('text=/coba lagi/i')
-                                            ban_msg3 = page.locator('text=/15 menit/i')
-                                            if (ban_msg1.count() > 0 and ban_msg1.first.is_visible()) or \
-                                               (ban_msg2.count() > 0 and ban_msg2.first.is_visible()) or \
-                                               (ban_msg3.count() > 0 and ban_msg3.first.is_visible()):
-                                                print("   ⚠️ Terdeteksi teks peringatan Limit/Banned. Membatalkan tunggu OTP...")
-                                                break
-                                        except Exception:
-                                            pass
-                                            
-                                        time.sleep(1.0)
-                                        
-                                    if not otp_appeared:
-                                        raise Exception("OTP Field timeout atau akun terindikasi banned")
-                                        
-                                    time.sleep(1)
-                                except Exception as e:
-                                    print(f"   ⚠️ {e}: Field OTP tidak muncul. Indikasi limit/banned 15 menit untuk email {current_email}. Menghentikan percobaan dan rotasi akun.")
-                                    is_banned = True
+                                # --- Pre-snapshot OTP sebelum tombol OTP diklik ---
+                                if otp_endpoint:
                                     try:
-                                        page.close()
+                                        otp_snapshot_awal = ambil_otp_dari_endpoint(otp_endpoint, action=action_type, label_email=label_email_cfg)
+                                        print(f"   📸 Snapshot OTP awal: '{otp_snapshot_awal or '(kosong)'}' (sebelum OTP dikirim)")
+                                    except Exception:
+                                        otp_snapshot_awal = ""
+
+                                # Jika ada halaman pilihan login (password/OTP)
+                                try:
+                                    btn_otp = page.locator('button:has-text("Masuk dengan OTP"), a:has-text("Masuk dengan OTP")').first
+                                    if btn_otp.count() > 0 and btn_otp.is_visible():
+                                        btn_otp.click()
+                                        print("   ✅ Tombol 'Masuk dengan OTP' diklik. OTP sedang dikirim...")
+                                        time.sleep(2)
+                                except Exception:
+                                    pass
+
+                        # --- STEP 5: Automated OTP Polling & Fill ---
+                        if otp_endpoint:
+                            try:
+                                print("   🤖 Menunggu field OTP muncul...")
+                                
+                                otp_appeared = False
+                                start_wait_otp = time.time()
+                                while time.time() - start_wait_otp < 15:
+                                    if page.locator(otp_input_selector).count() > 0 and page.locator(otp_input_selector).first.is_visible():
+                                        otp_appeared = True
+                                        break
+                                    
+                                    # Fast-fail deteksi Limit/Banned
+                                    try:
+                                        ban_msg1 = page.locator('text=/terlalu banyak/i')
+                                        ban_msg2 = page.locator('text=/coba lagi/i')
+                                        ban_msg3 = page.locator('text=/15 menit/i')
+                                        if (ban_msg1.count() > 0 and ban_msg1.first.is_visible()) or \
+                                           (ban_msg2.count() > 0 and ban_msg2.first.is_visible()) or \
+                                           (ban_msg3.count() > 0 and ban_msg3.first.is_visible()):
+                                            print("   ⚠️ Terdeteksi teks peringatan Limit/Banned. Membatalkan tunggu OTP...")
+                                            break
                                     except Exception:
                                         pass
-                                    break  # Keluar dari loop attempt, langsung rotasi ke email berikutnya
+                                        
+                                    time.sleep(1.0)
+                                    
+                                if not otp_appeared:
+                                    raise Exception("OTP Field timeout atau akun terindikasi banned")
+                                    
+                                time.sleep(1)
+                            except Exception as e:
+                                print(f"   ⚠️ {e}: Field OTP tidak muncul. Indikasi limit/banned 15 menit untuk email {current_email}. Menghentikan percobaan dan rotasi akun.")
+                                is_banned = True
+                                try:
+                                    page.close()
+                                except Exception:
+                                    pass
+                                break  # Keluar dari loop attempt, langsung rotasi ke email berikutnya
 
-                                # 2. Lakukan polling dan input OTP
-                                if not is_banned:
-                                    try:
-                                        print("   🤖 Polling OTP dari Gmail (snapshot awal sudah diambil sebelumnya)...")
+                            # 2. Lakukan polling dan input OTP
+                            if not is_banned:
+                                try:
+                                    print("   🤖 Polling OTP dari Gmail...")
+                                    
+                                    otp_code = tunggu_otp_terbaru(otp_endpoint, action=action_type, label_email=label_email_cfg, interval_detik=3, otp_awal_override=otp_snapshot_awal, timeout_detik=25)
+                                    
+                                    if otp_code and not (otp_code.isdigit() and len(otp_code) in (4, 6)):
+                                        print(f"   ⚠️ OTP dari endpoint bukan format angka valid: {otp_code[:50]}...")
+                                        otp_code = None
                                         
-                                        otp_code = tunggu_otp_terbaru(otp_endpoint, action=action_type, label_email=label_email_cfg, interval_detik=3, otp_awal_override=otp_snapshot_awal, timeout_detik=15)
-                                        
-                                        if otp_code and not (otp_code.isdigit() and len(otp_code) in (4, 6)):
-                                            print(f"   ⚠️ OTP dari endpoint bukan format angka valid: {otp_code[:50]}...")
-                                            otp_code = None
+                                    if otp_code:
+                                        print(f"   🤖 OTP didapat: {otp_code}. Memasukkan OTP...")
+                                        otp_fields = page.locator(otp_input_selector).all()
+                                        if len(otp_fields) > 0:
+                                            otp_fields[0].focus()
+                                            time.sleep(0.5)
+                                            try:
+                                                otp_fields[0].fill(otp_code)
+                                            except Exception:
+                                                otp_fields[0].type(otp_code, delay=100)
+                                            print("   ✅ OTP berhasil diisi otomatis.")
                                             
-                                        if otp_code:
-                                            print(f"   🤖 OTP didapat: {otp_code}. Memasukkan OTP...")
-                                            otp_fields = page.locator(otp_input_selector).all()
-                                            if len(otp_fields) > 0:
-                                                otp_fields[0].focus()
-                                                time.sleep(0.5)
-                                                otp_fields[0].type(otp_code, delay=300)
-                                                print("   ✅ OTP berhasil diisi otomatis.")
-                                                
-                                                time.sleep(1)
-                                                submit_otp_btn = page.locator('button:has-text("Masuk"), button:has-text("Konfirmasi"), button:has-text("Verifikasi"), button:has-text("Lanjut"), button[type="submit"]')
-                                                clicked = False
-                                                for i in range(submit_otp_btn.count()):
-                                                    btn = submit_otp_btn.nth(i)
-                                                    if btn.is_visible() and btn.is_enabled():
-                                                        print(f"   🤖 Mengklik tombol OTP: '{btn.text_content().strip()}'")
-                                                        btn.click()
-                                                        clicked = True
-                                                        break
-                                                if not clicked:
-                                                    print("   🤖 Mengirim Enter sebagai fallback...")
-                                                    page.keyboard.press("Enter")
-                                                time.sleep(2)
-                                        else:
-                                            print("   ⚠️ Gagal mendapatkan OTP dalam 15 detik (atau format tidak valid).")
-                                            otp_failed_timeout = True
-                                    except Exception as e:
-                                        print(f"   ⚠️ Gagal melakukan automasi OTP: {e}.")
+                                            time.sleep(1)
+                                            submit_otp_btn = page.locator('button:has-text("Masuk"), button:has-text("Konfirmasi"), button:has-text("Verifikasi"), button:has-text("Lanjut"), button[type="submit"]')
+                                            clicked = False
+                                            for i in range(submit_otp_btn.count()):
+                                                btn = submit_otp_btn.nth(i)
+                                                if btn.is_visible() and btn.is_enabled():
+                                                    print(f"   🤖 Mengklik tombol OTP: '{btn.text_content().strip()}'")
+                                                    btn.click()
+                                                    clicked = True
+                                                    break
+                                            if not clicked:
+                                                print("   🤖 Mengirim Enter sebagai fallback...")
+                                                page.keyboard.press("Enter")
+                                            time.sleep(2)
+                                    else:
+                                        print("   ⚠️ Gagal mendapatkan OTP dalam batas waktu (atau format tidak valid).")
                                         otp_failed_timeout = True
-                            else:
-                                print("   👉 Silakan isi kode OTP secara MANUAL di browser.")
+                                except Exception as e:
+                                    print(f"   ⚠️ Gagal melakukan automasi OTP: {e}.")
+                                    otp_failed_timeout = True
+                        else:
+                            print("   👉 Silakan isi kode OTP secara MANUAL di browser.")
                     except Exception as e:
                         print(f"   ⚠️ Gagal ketik email: {e}")
 

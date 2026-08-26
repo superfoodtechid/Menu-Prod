@@ -1434,7 +1434,10 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
                         t = threading.Thread(target=_worker)
                         t.start()
-                        t.join()
+                        t.join(timeout=180)
+
+                        if t.is_alive():
+                            raise TimeoutError("Login GoFood timeout setelah 180 detik.")
 
                         if err_box[0]:
                             raise err_box[0]
@@ -2465,7 +2468,10 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
 
                 t = threading.Thread(target=_worker)
                 t.start()
-                t.join()
+                t.join(timeout=180)
+
+                if t.is_alive():
+                    raise TimeoutError("Login GoFood timeout setelah 180 detik.")
 
                 if err_box[0]:
                     raise err_box[0]

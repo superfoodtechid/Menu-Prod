@@ -250,44 +250,53 @@ def login_dan_ambil_sesi(nomor_hp, nama_resto_final="", mode_otp="manual", otp_e
             if is_email_login:
                 print("Membuka halaman login email langsung...")
                 page.goto("https://portal.gofoodmerchant.co.id/auth/login/email")
-                time.sleep(2.5) # Jeda setelah memuat halaman
+                time.sleep(2.0) # Jeda setelah memuat halaman
 
-                print(f"Mencoba memasukkan email {nomor_hp}...")
-                input_email = page.locator('input[type="email"], input[placeholder*="email" i], input[name*="email" i], input[type="text"]').first
-                input_email.wait_for(state="visible", timeout=15000)
-                time.sleep(1.0)
-                input_email.focus()
-                time.sleep(0.5)
-                # Ketik secara bertahap seperti manusia
-                input_email.type(nomor_hp, delay=120)
-                time.sleep(1.0)
-                input_email.press("Enter")
-                print("Email berhasil dimasukkan.")
-                time.sleep(2.5)
-
-                # Klik "Masuk dengan OTP" pada halaman berikutnya
-                print("Menunggu halaman pilihan login (password/OTP)...")
+                already_on_otp = False
                 try:
-                    # Cari tombol "Masuk dengan OTP"
-                    btn_otp = page.locator('button:has-text("Masuk dengan OTP"), a:has-text("Masuk dengan OTP")').first
-                    btn_otp.wait_for(state="visible", timeout=15000)
-                    time.sleep(1.5)
-                    btn_otp.click()
-                    print("Tombol 'Masuk dengan OTP' berhasil diklik. OTP telah dikirim.")
-                    time.sleep(2.0)
-                except Exception as e:
-                    print(f"⚠️ Gagal mengklik tombol 'Masuk dengan OTP' secara otomatis: {e}")
-                    print("👉 Silakan klik tombol 'Masuk dengan OTP' secara manual pada browser.")
+                    if page.locator('text=/Kode OTP/i, text=/Kami telah mengirim/i, input[placeholder*="●"]').count() > 0:
+                        already_on_otp = True
+                        print("ℹ️ Terdeteksi halaman sudah berada di layar OTP. Melewati pengisian email...")
+                except Exception:
+                    pass
+
+                if not already_on_otp:
+                    print(f"Mencoba memasukkan email {nomor_hp}...")
+                    input_email = page.locator('input[type="email"], input[placeholder*="email" i], input[name*="email" i], input[data-testid*="email" i], input[type="text"]:not([placeholder*="●"]):not([placeholder*="otp" i])').first
+                    input_email.wait_for(state="visible", timeout=15000)
+                    time.sleep(1.0)
+                    input_email.focus()
+                    time.sleep(0.5)
+                    # Ketik secara bertahap seperti manusia
+                    input_email.type(nomor_hp, delay=80)
+                    time.sleep(1.0)
+                    input_email.press("Enter")
+                    print("Email berhasil dimasukkan.")
+                    time.sleep(2.5)
+
+                    # Klik "Masuk dengan OTP" pada halaman berikutnya
+                    print("Menunggu halaman pilihan login (password/OTP)...")
+                    try:
+                        # Cari tombol "Masuk dengan OTP"
+                        btn_otp = page.locator('button:has-text("Masuk dengan OTP"), a:has-text("Masuk dengan OTP")').first
+                        btn_otp.wait_for(state="visible", timeout=15000)
+                        time.sleep(1.5)
+                        btn_otp.click()
+                        print("Tombol 'Masuk dengan OTP' berhasil diklik. OTP telah dikirim.")
+                        time.sleep(2.0)
+                    except Exception as e:
+                        print(f"⚠️ Gagal mengklik tombol 'Masuk dengan OTP' secara otomatis: {e}")
+                        print("👉 Silakan klik tombol 'Masuk dengan OTP' secara manual pada browser.")
             else:
                 page.goto("https://portal.gofoodmerchant.co.id/")
                 time.sleep(2.5)
                 print(f"Mencoba memasukkan nomor {nomor_hp}...")
-                input_nomor = page.locator('input[type="tel"], input[name*="phone" i], input[type="text"]').first
+                input_nomor = page.locator('input[type="tel"], input[name*="phone" i], input[type="text"]:not([placeholder*="●"]):not([placeholder*="otp" i])').first
                 input_nomor.wait_for(state="visible", timeout=15000)
                 time.sleep(1.0)
                 input_nomor.focus()
                 time.sleep(0.5)
-                input_nomor.type(nomor_hp, delay=120)
+                input_nomor.type(nomor_hp, delay=80)
                 time.sleep(1.0)
                 input_nomor.press("Enter")
                 print("Nomor berhasil dimasukkan.")
@@ -296,9 +305,9 @@ def login_dan_ambil_sesi(nomor_hp, nama_resto_final="", mode_otp="manual", otp_e
             try:
                 # Tunggu hingga field OTP muncul dan minta input dari terminal
                 print("Menunggu halaman OTP...")
-                otp_input_selector = 'input[autocomplete="one-time-code"], input[aria-label*="digit" i], div[class*="otp" i] input, input[name*="otp" i], input[maxlength="1"]'
+                otp_input_selector = 'input[autocomplete="one-time-code"], input[placeholder*="●" i], input[placeholder*="otp" i], input[aria-label*="digit" i], div[class*="otp" i] input, input[name*="otp" i], input[maxlength="1"]'
                 page.locator(otp_input_selector).first.wait_for(state="visible", timeout=15000)
-                time.sleep(2.0)
+                time.sleep(1.5)
 
                 otp_code = None
                 if mode_otp == "auto":
