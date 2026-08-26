@@ -4764,3 +4764,21 @@ def submit_shopee_otp(req: ShopeeOTPRequest):
             
     return {"status": "SUCCESS", "message": f"OTP {code} ({channel.upper()}) berhasil dikirim untuk user {username}."}
 
+
+# ─── FRONTEND SPA STATIC MOUNTING ─────────────────────────────────────────────
+web_dist = BASE_DIR / "web" / "dist"
+if web_dist.exists():
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse
+    assets_dir = web_dist / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/{full_path:path}")
+    def serve_frontend_spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+        target_file = web_dist / full_path
+        if target_file.exists() and target_file.is_file():
+            return FileResponse(target_file)
+        return FileResponse(web_dist / "index.html")
