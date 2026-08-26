@@ -80,6 +80,11 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 600, error_msg: 
             try:
                 data = json.loads(otp_file.read_text())
 
+                if data.get("status") == "CANCELLED":
+                    log.info(f"❌ [OTP] User membatalkan OTP untuk '{username}'")
+                    otp_file.unlink(missing_ok=True)
+                    raise RuntimeError("user membatalkan otp")
+
                 # Cek jika pengguna memilih saluran WhatsApp di Web UI
                 req_channel = (data.get("requested_channel") or "").lower()
                 if driver and req_channel == "whatsapp" and not whatsapp_triggered:
@@ -97,6 +102,8 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 600, error_msg: 
                     log.info(f"✅ [OTP] Kode OTP diterima ({data.get('channel', 'sms')}): {otp_code}")
                     otp_file.unlink(missing_ok=True)
                     return otp_code
+            except RuntimeError as re:
+                raise re
             except Exception as e:
                 log.error(f"Error membaca file OTP: {e}")
         time.sleep(2)
@@ -771,6 +778,12 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: 
             try:
                 data = json.loads(target_fpath.read_text())
 
+                if data.get("status") == "CANCELLED":
+                    log.info(f"❌ [OTP] User membatalkan OTP untuk '{username}'")
+                    otp_file.unlink(missing_ok=True)
+                    otp_file_alt.unlink(missing_ok=True)
+                    raise RuntimeError("user membatalkan otp")
+
                 # Cek jika pengguna memilih saluran WhatsApp di Web UI
                 req_channel = (data.get("requested_channel") or "").lower()
                 if driver and req_channel == "whatsapp" and not whatsapp_triggered:
@@ -789,6 +802,8 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: 
                     otp_file.unlink(missing_ok=True)
                     otp_file_alt.unlink(missing_ok=True)
                     return otp_code
+            except RuntimeError as re:
+                raise re
             except Exception as e:
                 log.error(f"Error membaca file OTP: {e}")
         time.sleep(1)
@@ -2452,9 +2467,9 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
         except Exception as e:
             err_msg = str(e)
             log.error(f"Browser session error on attempt {attempt+1}: {err_msg}")
-            # Jika errornya adalah merchant tidak ditemukan, tidak ada gunanya login ulang 3x. Langsung abort.
-            if "MERCHANT_NOT_FOUND" in err_msg:
-                log.error("❌ Fatal Error: Merchant belum ditambahkan. Membatalkan antrean tanpa login ulang.")
+            # Jika errornya adalah merchant tidak ditemukan atau user membatalkan OTP, tidak ada gunanya login ulang 3x. Langsung abort.
+            if "MERCHANT_NOT_FOUND" in err_msg or "user membatalkan otp" in err_msg.lower():
+                log.error("❌ Fatal Error: Sesi dibatalkan (merchant tidak ditemukan / user membatalkan OTP). Membatalkan antrean tanpa login ulang.")
                 raise e
         finally:
             if (close_browser or not session_success) and driver is not None:

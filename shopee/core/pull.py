@@ -79,14 +79,19 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
     browser.set_session_file(session_file)
             
     print(f"[*] Membuka browser (headless={headless}) dan memilih merchant: '{target_name}'...")
-    session_data = browser.get_session(
-        username=username,
-        password=password,
-        headless=headless,
-        close_browser=True,
-        target_name=target_name,
-        interactive=True
-    )
+    try:
+        session_data = browser.get_session(
+            username=username,
+            password=password,
+            headless=headless,
+            close_browser=True,
+            target_name=target_name,
+            interactive=True
+        )
+    except Exception as e:
+        if "user membatalkan otp" in str(e).lower():
+            return False, "user membatalkan otp"
+        return False, f"Gagal menginisialisasi browser: {e}"
     
     if not session_data or "shopee_tob_token" not in session_data:
         return False, "Gagal menginisialisasi browser atau memilih merchant."

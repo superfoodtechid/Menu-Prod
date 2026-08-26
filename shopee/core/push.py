@@ -54,6 +54,8 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
             interactive=True
         )
     except Exception as e:
+        if "user membatalkan otp" in str(e).lower():
+            return None, "user membatalkan otp"
         print(f"[WARN] get_session with target_name '{target_name}' failed ({e}). Retrying without target_name filter...")
         try:
             session_data = browser.get_session(
@@ -65,6 +67,8 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
                 interactive=True
             )
         except Exception as ex:
+            if "user membatalkan otp" in str(ex).lower():
+                return None, "user membatalkan otp"
             return None, f"Gagal menginisialisasi browser session: {ex}"
 
     if not session_data or "shopee_tob_token" not in session_data:
@@ -185,6 +189,17 @@ def push_price_update_batch(
     results = []
     total = len(updates)
 
+    if not client and err and "user membatalkan otp" in str(err).lower():
+        for update in updates:
+            results.append({
+                "item_id": str(update["item_id"]),
+                "item_name": update.get("item_name") or str(update["item_id"]),
+                "new_price": float(update["new_price"]),
+                "success": False,
+                "error_message": "user membatalkan otp"
+            })
+        return results
+
     for idx, update in enumerate(updates):
         # ── Rate Limit Safeguard / Batching Delays ──
         if idx > 0:
@@ -205,16 +220,26 @@ def push_price_update_batch(
                 pass
 
         if not client:
+            if err and "user membatalkan otp" in str(err).lower():
+                results.append({
+                    "item_id": dish_id,
+                    "item_name": item_name,
+                    "new_price": new_price,
+                    "success": False,
+                    "error_message": "user membatalkan otp"
+                })
+                continue
             print(f"[PUSH_BATCH] Retrying _boot_push_client for item {item_name}...")
             client, err = _boot_push_client(store_metadata, headless=headless)
 
         if not client:
+            err_msg = "user membatalkan otp" if (err and "user membatalkan otp" in str(err).lower()) else f"Boot client failed: {err}"
             results.append({
                 "item_id": dish_id,
                 "item_name": item_name,
                 "new_price": new_price,
                 "success": False,
-                "error_message": f"Boot client failed: {err}"
+                "error_message": err_msg
             })
             continue
 
