@@ -81,3 +81,22 @@ shopee/API/menu-response-*.json
 catanan/
 
 
+# Archives & compressed dumps
+*.zip
+*.tar.gz
+*.tar
+*.rar
+*.7z
+
+# Excel exports & working sheets
+*.xlsx
+*.xls
+*.csv
+
+# Council AI run transcripts & reports
+council-report-*.html
+council-transcript-*.md
+
+# Temporary API responses
+shopee/API/menu-response-*.json
+

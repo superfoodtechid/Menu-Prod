@@ -21,16 +21,31 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [activeJob, setActiveJob] = useState(null);
   const pollingRef = useRef(null);
 
-  // Handle File Select & Upload to /api/jobs/parse-c5
-  const handleFileUpload = async (uploadedFile) => {
-    if (!uploadedFile) return;
+  // Input Mode ('file' | 'drive')
+  const [inputMode, setInputMode] = useState("file");
+  const [driveUrl, setDriveUrl] = useState("");
+
+  // Handle File or GDrive Parse
+  const handleParse = async ({ uploadedFile = null, gdriveLink = null } = {}) => {
+    const fileToUpload = uploadedFile;
+    const linkToFetch = gdriveLink !== null ? gdriveLink : driveUrl;
+
+    if (!fileToUpload && (!linkToFetch || !linkToFetch.trim())) {
+      setErrorMsg("Harap pilih file Excel C5 atau masukkan link Google Drive / Sheets.");
+      return;
+    }
+
     setParsing(true);
     setErrorMsg("");
     setParseResult(null);
     setSelectedSids([]);
 
     const formData = new FormData();
-    formData.append("file", uploadedFile);
+    if (fileToUpload) {
+      formData.append("file", fileToUpload);
+    } else if (linkToFetch && linkToFetch.trim()) {
+      formData.append("drive_url", linkToFetch.trim());
+    }
 
     try {
       const res = await fetch(`${API_BASE_URL}/api/jobs/parse-c5`, {
@@ -50,14 +65,20 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
         }
       } else {
         const errData = await res.json();
-        setErrorMsg(errData.detail || "Gagal mengurai file Excel C5.");
+        setErrorMsg(errData.detail || "Gagal mengurai C5.");
       }
     } catch (err) {
-      console.error("Error parsing C5 file:", err);
-      setErrorMsg("Terjadi kesalahan jaringan saat mengunggah file C5.");
+      console.error("Error parsing C5:", err);
+      setErrorMsg("Terjadi kesalahan jaringan saat memproses C5.");
     } finally {
       setParsing(false);
     }
+  };
+
+  // Handle File Select & Upload to /api/jobs/parse-c5
+  const handleFileUpload = (uploadedFile) => {
+    if (!uploadedFile) return;
+    handleParse({ uploadedFile });
   };
 
   // Toggle Single Store ID (SID) selection
@@ -244,6 +265,92 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
       {/* Upload Dropzone Section */}
       {!parseResult && (
         <section className="surface-card p-8 text-center">
+          {/* Segmented Mode Switcher */}
+          <div className="mb-6 inline-flex rounded-xl bg-slate-100 p-1 dark:bg-zinc-900 border border-slate-200/80 dark:border-zinc-800">
+            <button
+              type="button"
+              onClick={() => setInputMode("file")}
+              className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
+                inputMode === "file"
+                  ? "bg-white text-slate-900 shadow-sm dark:bg-zinc-800 dark:text-white"
+                  : "text-slate-500 hover:text-slate-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+              }`}
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <span>Upload File Excel (.xlsx)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setInputMode("drive")}
+              className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
+                inputMode === "drive"
+                  ? "bg-white text-slate-900 shadow-sm dark:bg-zinc-800 dark:text-white"
+                  : "text-slate-500 hover:text-slate-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+              }`}
+            >
+              <svg className="h-4 w-4 text-emerald-600 dark:text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4 0-2.05 1.53-3.76 3.56-3.97l1.07-.11.5-.95C8.08 7.14 9.94 6 12 6c2.62 0 4.88 1.86 5.39 4.43l.3 1.5 1.53.11c1.56.1 2.78 1.41 2.78 2.96 0 1.65-1.35 3-3 3z" />
+              </svg>
+              <span>Link Google Drive / GSheets</span>
+            </button>
+          </div>
+
+          {inputMode === "drive" ? (
+            <div className="mx-auto flex max-w-2xl flex-col items-center justify-center rounded-3xl border-2 border-dashed border-emerald-200 bg-emerald-50/30 px-6 py-10 dark:border-zinc-800 dark:bg-zinc-950/40">
+              <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-600 dark:bg-zinc-900 dark:text-emerald-400">
+                <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-bold text-slate-900 dark:text-white">Tempel Link Google Drive / Sheets C5</h3>
+              <p className="mt-1 max-w-md text-[13px] text-slate-500 dark:text-zinc-400">
+                Masukkan link file Excel Google Drive atau Spreadsheet C5. Pastikan share disetel <em>&quot;Anyone with the link can view&quot;</em>.
+              </p>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleParse();
+                }}
+                className="mt-6 w-full max-w-lg space-y-3"
+              >
+                <input
+                  type="url"
+                  value={driveUrl}
+                  onChange={(e) => setDriveUrl(e.target.value)}
+                  placeholder="https://docs.google.com/spreadsheets/d/... atau https://drive.google.com/file/d/..."
+                  disabled={parsing}
+                  required
+                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 dark:border-zinc-700 dark:bg-zinc-900 dark:text-white"
+                />
+
+                <button
+                  type="submit"
+                  disabled={parsing || !driveUrl.trim()}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-md shadow-emerald-900/15 transition hover:bg-emerald-700 disabled:opacity-50 dark:bg-emerald-500 dark:text-black dark:shadow-none"
+                >
+                  {parsing ? (
+                    <>
+                      <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      <span>Mengunduh & Mengurai C5...</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                      </svg>
+                      <span>Ambil & Pratinjau Perubahan</span>
+                    </>
+                  )}
+                </button>
+              </form>
+            </div>
+          ) : (
           <div
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
@@ -294,6 +401,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
               </div>
             )}
           </div>
+          )}
         </section>
       )}
 
@@ -453,7 +561,14 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                         className="h-4 w-4 rounded border-slate-300 text-red-600 focus:ring-red-500 dark:border-zinc-700"
                       />
                       <div>
-                        <p className="text-xs font-bold text-slate-900 dark:text-white">{store.name}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-bold text-slate-900 dark:text-white">{store.name}</p>
+                          {store.baseline_found === false && (
+                            <span className="rounded bg-amber-100 px-1.5 py-0.2 text-[9px] font-bold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300" title="Baseline PULL belum tersedia untuk Store ID ini. Semua item akan diperlakukan sebagai Item Baru.">
+                              ⚠️ No Baseline
+                            </span>
+                          )}
+                        </div>
                         <p className="text-[11px] font-mono text-slate-400 dark:text-zinc-500">SID: {store.sid}</p>
                       </div>
                     </div>

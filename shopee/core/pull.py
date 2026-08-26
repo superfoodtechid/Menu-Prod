@@ -54,7 +54,7 @@ def get_shopee_master_credentials() -> tuple[str, str]:
     return "allvbadmin", "Master!00!"
 
 
-def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = None):
+def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = True):
     store_id = store_metadata.get('store_id', '')
     if isinstance(store_id, str):
         store_id = store_id.strip().split('.')[0]
@@ -167,6 +167,19 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             return False, "Tidak ada data catalog/dishes yang ditemukan. Sesi token Shopee kedaluwarsa atau invalid."
             
         print(f"[*] Ditemukan {len(catalogs)} kategori menu.")
+
+        # Save raw Shopee catalog snapshot to shopee/API/menu-response-<store_id>.json for baseline comparison
+        try:
+            shopee_api_dir = WORKSPACE_DIR / "shopee" / "API"
+            shopee_api_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_path = shopee_api_dir / f"menu-response-{store_id}.json"
+            snapshot_path.write_text(json.dumps({"data": {"catalogs": catalogs}}, indent=2), encoding="utf-8")
+            # Also keep default snapshot fallback updated
+            (shopee_api_dir / "menu-response.json").write_text(json.dumps({"data": {"catalogs": catalogs}}, indent=2), encoding="utf-8")
+            print(f"   💾 Snapshot menu Shopee berhasil disimpan ke: {snapshot_path}")
+        except Exception as e:
+            print(f"   ⚠️ Gagal menyimpan snapshot menu Shopee: {e}")
+
         all_dishes = []
         dish_ids_with_modifiers = []
         

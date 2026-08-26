@@ -77,7 +77,18 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
         print(f"[!] Gagal membaca data JSON menu GrabFood: {e}")
         return False, f"Gagal membaca data JSON menu Grab: {e}"
 
-    # 4. Clean up temporary json file immediately
+    # 4. Save structured Grab snapshot to grab/API/menu-response-<store_id>.json for Baseline comparison & Clean up temp file
+    grab_api_dir = os.path.join(project_root, "grab", "API")
+    os.makedirs(grab_api_dir, exist_ok=True)
+    if store_id:
+        try:
+            snapshot_path = os.path.join(grab_api_dir, f"menu-response-{store_id}.json")
+            with open(snapshot_path, "w", encoding="utf-8") as f:
+                json.dump(scraped_data, f, indent=2)
+            print(f"   💾 Snapshot menu Grab berhasil disimpan ke: {snapshot_path}")
+        except Exception as e:
+            print(f"   ⚠️ Gagal menyimpan snapshot menu Grab ke {grab_api_dir}: {e}")
+
     try:
         os.unlink(json_path)
     except Exception as e:

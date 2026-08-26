@@ -248,6 +248,29 @@ def push_price_update_batch(
                 opt_groups = dish.get("option_groups", [])
                 existing_dish = dish
 
+            # ── Active Promo / Slash Price / Flash Sale Handling ──
+            fs_info = dish.get("flash_sale_dish_discount") if dish else None
+            if fs_info and isinstance(fs_info, dict):
+                print(f"[PUSH_BATCH] 🔒 Item '{target_name}' (ID: {dish_id}) sedang dalam Flash Sale Shopee aktif. Perubahan harga dasar diblokir.")
+                results.append({
+                    "item_id": dish_id,
+                    "item_name": target_name,
+                    "old_price": orig_p,
+                    "new_price": new_price,
+                    "status": "FAILED",
+                    "error_message": "Item sedang dalam promo Flash Sale aktif di Shopee (Harga dikunci)."
+                })
+                fail_count += 1
+                continue
+
+            orig_p = float(dish.get("price", 0)) / 100000.0 if dish else 0
+            list_p = float(dish.get("list_price", 0)) / 100000.0 if (dish and dish.get("list_price")) else orig_p
+            disc_pct = float(dish.get("discount_percentage", 0)) if dish else 0
+            is_in_promo = (list_p > orig_p > 0) or (disc_pct > 0) or (dish and dish.get("discount_status") == 1)
+
+            if is_in_promo:
+                print(f"[PUSH_BATCH] ℹ️ Item '{target_name}' (ID: {dish_id}) memiliki promo aktif di ShopeeFood. Mengirim update harga baru Rp {new_price:,.0f}...")
+
             ok = update_dish(
                 client=client,
                 store_id=store_id,

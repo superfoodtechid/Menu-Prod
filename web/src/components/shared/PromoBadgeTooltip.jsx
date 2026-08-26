@@ -1,0 +1,132 @@
+import React, { useState, useRef, useEffect, useId } from "react";
+import { createPortal } from "react-dom";
+
+export default function PromoBadgeTooltip({ item, platform = "shopee", fmt }) {
+  const [coords, setCoords] = useState(null);
+  const [isVisible, setIsVisible] = useState(false);
+  const triggerRef = useRef(null);
+  const tooltipId = useId();
+
+  const updateCoords = () => {
+    if (!triggerRef.current) return;
+    const r = triggerRef.current.getBoundingClientRect();
+    const placeBelow = r.top < 220;
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - 296));
+    const top = placeBelow ? r.bottom + 8 : r.top - 8;
+    setCoords({ top, left, placeBelow });
+  };
+
+  const showTooltip = () => {
+    updateCoords();
+    setIsVisible(true);
+  };
+
+  const hideTooltip = () => {
+    setIsVisible(false);
+  };
+
+  useEffect(() => {
+    if (!isVisible) return;
+    const handleDismiss = () => setIsVisible(false);
+    window.addEventListener("scroll", handleDismiss, true);
+    window.addEventListener("resize", handleDismiss);
+    return () => {
+      window.removeEventListener("scroll", handleDismiss, true);
+      window.removeEventListener("resize", handleDismiss);
+    };
+  }, [isVisible]);
+
+  if (!item || (!item.is_flash_sale && !item.is_in_promo)) return null;
+  const isFs = Boolean(item.is_flash_sale);
+
+  return (
+    <div
+      ref={triggerRef}
+      onMouseEnter={showTooltip}
+      onMouseLeave={hideTooltip}
+      onFocus={showTooltip}
+      onBlur={hideTooltip}
+      tabIndex={0}
+      role="button"
+      aria-describedby={isVisible ? tooltipId : undefined}
+      className="inline-flex items-center outline-none focus:ring-2 focus:ring-offset-1 focus:ring-zinc-400 rounded cursor-help"
+    >
+      {isFs || item.is_price_locked ? (
+        <span className="px-2 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-semibold text-[11px] border border-rose-300 dark:border-rose-800 shrink-0 inline-flex items-center gap-1">
+          <span>{isFs ? `Flash Sale ${item.promo_value ? `(${item.promo_value})` : ""}` : `Promo Dikunci ${item.promo_value ? `(${item.promo_value})` : ""}`}</span>
+        </span>
+      ) : (
+        <span className="px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold text-[11px] border border-amber-300 dark:border-amber-700 shrink-0 inline-flex items-center gap-1">
+          <span>Promo {item.promo_value ? `(${item.promo_value})` : "Aktif"}</span>
+        </span>
+      )}
+
+      {isVisible && coords &&
+        createPortal(
+          <div
+            id={tooltipId}
+            role="tooltip"
+            style={{
+              position: "fixed",
+              top: `${coords.top}px`,
+              left: `${coords.left}px`,
+              transform: coords.placeBelow ? "none" : "translateY(-100%)",
+              zIndex: 9999
+            }}
+            className="w-72 p-3 bg-zinc-900 text-zinc-100 rounded-lg shadow-xl text-xs space-y-2 border border-zinc-800 pointer-events-none transition-opacity duration-150"
+          >
+            <div className="font-semibold border-b border-zinc-800 pb-1.5 flex items-center justify-between">
+              <span>{isFs ? "Flash Sale Shopee" : (platform === "shopee" ? "Rincian Promo Shopee" : "Rincian Promo Aktif")}</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-medium">
+                {isFs ? "Terkunci" : (item.promo_type || "Promo")}
+              </span>
+            </div>
+
+            <div className="flex justify-between text-zinc-400">
+              <span>{isFs ? "Harga Normal:" : "Harga Normal / Coret:"}</span>
+              <span className="font-mono line-through">
+                Rp {fmt(isFs ? (item.original_price || item.price) : item.price)}
+              </span>
+            </div>
+
+            <div className="flex justify-between text-emerald-400 font-semibold">
+              <span>{isFs ? "Harga Promo:" : "Harga Jual Promo:"}</span>
+              <span className="font-mono">
+                Rp {fmt(isFs ? item.price : (item.discounted_price || item.price))}
+              </span>
+            </div>
+
+            {isFs && item.promo_details?.stock !== undefined && (
+              <div className="flex justify-between text-zinc-400">
+                <span>Kuota Promo:</span>
+                <span className="font-mono">{item.promo_details.stock} (Terjual: {item.promo_details.sold_num || 0})</span>
+              </div>
+            )}
+
+            {!isFs && item.promo_value && (
+              <div className="flex justify-between text-zinc-300">
+                <span>Besaran Diskon:</span>
+                <span className="font-mono font-semibold">{item.promo_value}</span>
+              </div>
+            )}
+
+            {item.promo_details?.start_time && (
+              <div className="text-[10px] text-zinc-400 border-t border-zinc-800 pt-1.5 space-y-0.5">
+                <div>Mulai: {item.promo_details.start_time}</div>
+                {item.promo_details.end_time && <div>Selesai: {item.promo_details.end_time}</div>}
+              </div>
+            )}
+
+            <div className="pt-1.5 border-t border-zinc-800 text-[11px] leading-relaxed text-zinc-400">
+              {isFs
+                ? "Harga dikunci selama Flash Sale aktif."
+                : (platform === "shopee"
+                  ? "Promo aktif. Harga dasar dapat disesuaikan."
+                  : "Harga dasar dikunci otomatis untuk validitas promo.")}
+            </div>
+          </div>,
+          document.body
+        )}
+    </div>
+  );
+}

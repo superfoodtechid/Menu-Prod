@@ -4,7 +4,19 @@ import time
 import requests
 import pandas as pd
 
-GSHEETS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ3tLKBNXDqRgBw0mNhKZFxgvKx-JoiTDzm_s5Ix1cm7O6HCv4IvExOLR2HSRVaXSsx82V348mcr9X4/pub?output=csv&gid=0&single=true"
+# Force urllib3 to use IPv4 only because IPv6 is broken/blocked on some hosts and causes 2.5m connection hangs
+try:
+    import urllib3.util.connection
+    import socket
+    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
+
+GSHEETS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ3tLKBNXDqRgBw0mNhKZFxgvKx-JoiTDzm_s5Ix1cm7O6HCv4IvExOLR2HSRVaXSsx82V348mcr9X4/pub?output=csv"
+GSHEETS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/csv,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+}
 CACHE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "master_merchants_cache.csv")
 
 def get_master_df(force_download=False):
@@ -20,8 +32,7 @@ def get_master_df(force_download=False):
     
     if df is None:
         try:
-            cache_buster = f"&t={int(time.time())}" if "?" in GSHEETS_URL else f"?t={int(time.time())}"
-            resp = requests.get(GSHEETS_URL + cache_buster, timeout=30)
+            resp = requests.get(GSHEETS_URL, headers=GSHEETS_HEADERS, timeout=30)
             resp.raise_for_status()
             df = pd.read_csv(io.StringIO(resp.text))
             df.to_csv(CACHE_PATH, index=False)

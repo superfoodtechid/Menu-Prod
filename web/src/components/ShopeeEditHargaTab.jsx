@@ -1,8 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import PlatformBadge from "./PlatformBadge";
+import { fmt, parse, applyAdj, checkShopeeViolation } from "./shared/priceUtils";
+import StepLabel from "./shared/StepLabel";
+import AdjustBar from "./shared/AdjustBar";
+import PushConfirmModal from "./shared/PushConfirmModal";
+import StickyBottomBar from "./shared/StickyBottomBar";
+import SearchFilterInput from "./shared/SearchFilterInput";
+import PromoBadgeTooltip from "./shared/PromoBadgeTooltip";
 
-const fmt = (v) => (!v && v !== 0) ? "" : Number(v).toLocaleString("id-ID");
-const parse = (s) => parseInt(String(s).replace(/\D/g, ""), 10) || 0;
 const group = (items) => {
   if (!items || !Array.isArray(items)) return {};
   return items.reduce((a, i) => {
@@ -13,31 +18,11 @@ const group = (items) => {
   }, {});
 };
 
-function applyAdj(price, mode, type, val) {
-  const n = parseFloat(val) || 0;
-  if (!n) return price;
-  if (type === "pct") {
-    const d = Math.round(price * n / 100);
-    return mode === "add" ? price + d : Math.max(1, price - d);
-  }
-  return mode === "add" ? price + n : Math.max(1, price - n);
-}
-
-function checkShopeeViolation(oldPrice, newPrice) {
-  const o = Number(oldPrice) || 0;
-  const n = Number(newPrice) || 0;
-  if (n <= o || o <= 0) return { isViolation: false, message: "" };
-  const diff = n - o;
-  const pct = (diff / o) * 100;
-  if (pct > 25) return { isViolation: true, message: "ShopeeFood: Maksimal kenaikan 25% per update." };
-  return { isViolation: false, message: "" };
-}
-
 function formatUserFriendlyError(rawMsg) {
   if (!rawMsg) return "";
   const s = String(rawMsg);
   if (s.includes("1100036") || s.includes("exceed the limit times") || s.includes("edit times exceed")) {
-    return "Batas kuota harian ubah harga ShopeeFood tercapai (maksimal 1x per hari).";
+    return "Batas kuota harian ubah harga ShopeeFood tercapai (maks. 1x per hari).";
   }
   if (s.includes("25") && (s.includes("exceed") || s.includes("limit") || s.includes("%"))) {
     return "Kenaikan harga melebihi batas maksimal ShopeeFood (25%).";
@@ -57,132 +42,13 @@ function formatUserFriendlyError(rawMsg) {
   return s;
 }
 
-function StepLabel({ number, label, active, done, className = "mb-2.5" }) {
-  return (
-    <div className={`flex items-center gap-2 ${className}`}>
-      <span className={`w-6 h-6 rounded-full text-[13px] font-bold flex items-center justify-center shrink-0 transition-colors ${
-        done ? "bg-orange-600 text-white dark:bg-white dark:text-black"
-        : active ? "bg-orange-100 text-orange-700 ring-4 ring-orange-50 dark:bg-zinc-800 dark:text-white dark:ring-zinc-700"
-        : "bg-zinc-100 text-zinc-400 dark:bg-zinc-900 dark:text-zinc-500"
-      }`}>{done ? "✓" : number}</span>
-      <span className={`text-[15px] font-bold uppercase tracking-wider transition-colors ${
-        active || done ? "text-zinc-800 dark:text-white" : "text-zinc-400 dark:text-zinc-500"
-      }`}>{label}</span>
-    </div>
-  );
-}
-
-// ─── Inline Adjust Bar ───────────────────────────────────────────────────────
-const CHIPS_NOM = [1000, 2000, -1000, -2000];
-const CHIPS_PCT = [5, 10, -5, -10];
-
-function AdjustBar({ onApply, buttonText = "OK", extraActions = null }) {
-  const [type, setType] = useState("nominal");
-  const [val, setVal] = useState("");
-
-  const parsedNum = parseFloat(val);
-  const isNegative = !isNaN(parsedNum) && (parsedNum < 0 || String(val).trim().startsWith("-"));
-  const isValid = !isNaN(parsedNum) && parsedNum !== 0;
-
-  const fire = () => {
-    if (!isValid) return;
-    const mode = isNegative ? "sub" : "add";
-    onApply(mode, type, Math.abs(parsedNum));
-  };
-
-  return (
-    <div className="flex flex-wrap items-end gap-3 bg-orange-50/60 dark:bg-orange-950/20 p-3.5 rounded-2xl border border-orange-200/60 dark:border-orange-900/40">
-      <div>
-        <p className="mb-1 text-[12px] font-bold uppercase tracking-wider text-orange-800 dark:text-orange-300">Metode</p>
-        <div className="inline-flex overflow-hidden rounded-xl border border-orange-200 dark:border-orange-800 bg-white dark:bg-zinc-900 p-0.5 shadow-xs">
-          {[["nominal", "Rp"], ["pct", "%"]].map(([t, label]) => (
-            <button key={t} type="button" onClick={() => setType(t)} aria-pressed={type === t}
-              className={`px-3 py-1.5 text-[13px] font-bold rounded-lg transition-colors cursor-pointer ${
-                type === t ? "bg-orange-600 text-white shadow-xs" : "text-zinc-600 dark:text-zinc-400 hover:text-orange-600"
-              }`}
-            >{label}</button>
-          ))}
-        </div>
-      </div>
-
-      <div className="flex-1 min-w-[200px]">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-[12px] font-bold uppercase tracking-wider text-zinc-600 dark:text-zinc-400">Nilai Perubahan (Positif / Negatif)</span>
-          {val && isValid && (
-            <span className={`text-[11px] font-bold uppercase px-2 py-0.5 rounded-md ${
-              isNegative ? "bg-red-100 text-red-700 border border-red-200" : "bg-emerald-100 text-emerald-700 border border-emerald-200"
-            }`}>
-              {isNegative ? "↓ Potongan / Diskon" : "↑ Kenaikan Harga"}
-            </span>
-          )}
-        </div>
-        <div className="relative flex items-center">
-          <input
-            type="text"
-            inputMode="numeric"
-            placeholder={type === "nominal" ? "Contoh: 2000 atau -2000" : "Contoh: 10 atau -10"}
-            value={val}
-            onChange={(e) => setVal(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && fire()}
-            className={`w-full rounded-xl border bg-white dark:bg-zinc-900 px-3.5 py-2 text-[14px] font-semibold text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-none transition-all ${
-              !val ? "border-orange-200 dark:border-orange-900/50 focus:border-orange-500" :
-              isNegative ? "border-red-300 dark:border-red-800 text-red-700" : "border-emerald-300 dark:border-emerald-800 text-emerald-700"
-            }`}
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-          <span className="text-[11px] font-semibold text-zinc-400">Pintas:</span>
-          {(type === "nominal" ? CHIPS_NOM : CHIPS_PCT).map((num) => {
-            const isNeg = num < 0;
-            const labelStr = type === "nominal"
-              ? (isNeg ? `-${Math.abs(num).toLocaleString('id-ID')}` : `+${num.toLocaleString('id-ID')}`)
-              : (isNeg ? `-${Math.abs(num)}%` : `+${num}%`);
-            const isSelected = val === String(num);
-
-            return (
-              <button
-                key={num}
-                type="button"
-                onClick={() => setVal(String(num))}
-                className={`px-2 py-0.5 text-[11px] font-bold rounded-md transition-all cursor-pointer ${
-                  isSelected
-                    ? isNeg ? "text-red-600 dark:text-red-400 underline underline-offset-2" : "text-emerald-600 dark:text-emerald-400 underline underline-offset-2"
-                    : isNeg ? "text-red-500 dark:text-red-500 hover:text-red-700 dark:hover:text-red-300" : "text-emerald-600 dark:text-emerald-500 hover:text-emerald-800 dark:hover:text-emerald-300"
-                }`}
-              >
-                {labelStr}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <button
-        type="button"
-        onClick={fire}
-        disabled={!isValid}
-        className={`px-4 py-2 text-[13px] font-bold rounded-xl transition-all shadow-xs shrink-0 cursor-pointer disabled:bg-zinc-200 disabled:text-zinc-400 ${
-          !isValid ? "" : isNegative ? "bg-red-600 hover:bg-red-700 text-white" : "bg-orange-600 hover:bg-orange-700 text-white"
-        }`}
-      >
-        {buttonText}
-      </button>
-
-      {extraActions && (
-        <div className="flex items-center gap-2 shrink-0 ml-auto pt-2 sm:pt-0">
-          {extraActions}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── Shopee Interactive OTP Modal ────────────────────────────────────────────
 function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submitting, statusMsg, apiBaseUrl, apiKey }) {
   const [step, setStep] = useState(1); // 1: Select Channel, 2: 60s Timer (WhatsApp), 3: Enter OTP
   const [otpCode, setOtpCode] = useState("");
   const [otpChannel, setOtpChannel] = useState("sms"); // "sms" | "whatsapp"
   const [timer60, setTimer60] = useState(60);
+  const [whatsappSignalSent, setWhatsappSignalSent] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -190,10 +56,33 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       setOtpCode("");
       setOtpChannel("sms");
       setTimer60(60);
+      setWhatsappSignalSent(false);
     }
   }, [isOpen]);
 
+  // Fungsi kirim sinyal WhatsApp ke backend (dipanggil saat timer habis atau "Lewati Timer")
+  const sendWhatsappSignalToBackend = async () => {
+    if (whatsappSignalSent) return; // Jangan kirim 2x
+    setWhatsappSignalSent(true);
+    try {
+      const baseUrl = apiBaseUrl || "";
+      await fetch(`${baseUrl}/api/shopee/select-otp-channel`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": apiKey || ""
+        },
+        body: JSON.stringify({ username, channel: "whatsapp" })
+      });
+      console.log("[OTP] Sinyal WhatsApp dikirim ke backend — browser akan memicu pemicuan metode lainnya sekarang.");
+    } catch (err) {
+      console.error("Gagal mengirim pilihan channel ke backend:", err);
+    }
+  };
+
   // 60-Second Countdown Timer effect when on step 2
+  // Sinyal WhatsApp BARU dikirim ke backend ketika timer habis (bukan saat masuk step 2)
+  // sehingga backend memulai klik "metode verifikasi lainnya" tepat saat Shopee siap
   useEffect(() => {
     let interval = null;
     if (step === 2 && timer60 > 0) {
@@ -201,7 +90,10 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
         setTimer60((prev) => prev - 1);
       }, 1000);
     } else if (step === 2 && timer60 === 0) {
-      setStep(3);
+      // Timer habis → kirim sinyal ke backend SEKARANG, lalu lanjut ke step input OTP
+      sendWhatsappSignalToBackend().then(() => {
+        setStep(3);
+      });
     }
     return () => {
       if (interval) clearInterval(interval);
@@ -212,21 +104,11 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
 
   const handleProceedToNextStep = async () => {
     if (otpChannel === "whatsapp") {
+      // Reset timer & flag, masuk ke step 2 (countdown)
+      // TIDAK kirim sinyal ke backend dulu — sinyal dikirim setelah timer 60s habis
       setTimer60(60);
-      setStep(2); // Start 60-second countdown timer phase
-      try {
-        const baseUrl = apiBaseUrl || "";
-        await fetch(`${baseUrl}/api/shopee/select-otp-channel`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-API-Key": apiKey || ""
-          },
-          body: JSON.stringify({ username, channel: "whatsapp" })
-        });
-      } catch (err) {
-        console.error("Gagal mengirim pilihan channel ke backend:", err);
-      }
+      setWhatsappSignalSent(false);
+      setStep(2);
     } else {
       setStep(3); // Directly go to OTP code input for SMS
     }
@@ -411,7 +293,11 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
               </button>
               <button
                 type="button"
-                onClick={() => setStep(3)}
+                onClick={async () => {
+                  // Jika user lewati timer secara manual, tetap kirim sinyal ke backend
+                  await sendWhatsappSignalToBackend();
+                  setStep(3);
+                }}
                 className="py-2 px-4 text-xs font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-900/60 rounded-xl hover:bg-emerald-100 transition cursor-pointer"
               >
                 Lewati Timer & Input Kode →
@@ -505,6 +391,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [selectedParent, setSelectedParent] = useState("");
   const [branches, setBranches] = useState([]);
   const [selectedBrandId, setSelectedBrandId] = useState("");
+  const [menuSearch, setMenuSearch] = useState("");
   const [branchMenus, setBranchMenus] = useState({});
   const [edits, setEdits] = useState({});
   const [pushing, setPushing] = useState(false);
@@ -708,7 +595,14 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                   name: i.name,
                   category: i.category || "General",
                   price: Number(i.price || 0),
-                  is_in_promo: Boolean(i.is_in_promo || i.is_promo_col)
+                  is_in_promo: Boolean(i.is_in_promo || i.is_promo_col),
+                  is_flash_sale: Boolean(i.is_flash_sale),
+                  original_price: Number(i.original_price || 0),
+                  discounted_price: i.discounted_price ? Number(i.discounted_price) : null,
+                  promo_type: i.promo_type || "NONE",
+                  promo_value: i.promo_value || "",
+                  is_price_locked: Boolean(i.is_price_locked),
+                  promo_details: i.promo_details || null
                 }));
                 setBranchMenus(prev => ({ ...prev, [job.branchId]: items }));
                 const bEdits = {};
@@ -741,7 +635,14 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             name: i.name,
             category: i.category || "General",
             price: Number(i.price || 0),
-            is_in_promo: Boolean(i.is_in_promo || i.is_promo_col)
+            is_in_promo: Boolean(i.is_in_promo || i.is_promo_col),
+            is_flash_sale: Boolean(i.is_flash_sale),
+            original_price: Number(i.original_price || 0),
+            discounted_price: i.discounted_price ? Number(i.discounted_price) : null,
+            promo_type: i.promo_type || "NONE",
+            promo_value: i.promo_value || "",
+            is_price_locked: Boolean(i.is_price_locked),
+            promo_details: i.promo_details || null
           }));
           newMenus[b.id] = items;
 
@@ -836,7 +737,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     const updates = [];
 
     branchItems.forEach(i => {
-      if (i.is_in_promo) return;
+      if (i.is_price_locked) return;
       const curPrice = branchEdits[i.id];
       if (curPrice !== undefined && curPrice !== i.price) {
         updates.push({
@@ -878,6 +779,18 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
           current_step: job.current_step,
           error_message: null
         }]);
+        // Update local item baseline & reset pending edits
+        setBranchMenus(prev => {
+          const prevList = prev[selectedBrandId] || [];
+          return {
+            ...prev,
+            [selectedBrandId]: prevList.map(item => {
+              const newP = branchEdits[item.id];
+              return newP !== undefined ? { ...item, price: newP } : item;
+            })
+          };
+        });
+        setEdits(prev => ({ ...prev, [selectedBrandId]: {} }));
         startPollingPushJob(job.id, selectedBrandId);
         startOtpPolling(); // mulai polling OTP segera
       } else {
@@ -900,7 +813,6 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     const itemUpdates = [];
 
     branchItems.forEach(item => {
-      if (item.is_in_promo) return;
       const curPrice = branchEdits[item.id];
       if (curPrice !== undefined && curPrice !== item.price) {
         const diff = curPrice - item.price;
@@ -973,6 +885,25 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     }
   };
 
+  const handleCancelOTP = async () => {
+    const targetUser = otpModal.username;
+    setOtpModal(p => ({ ...p, isOpen: false, statusMsg: "" }));
+    if (targetUser) {
+      try {
+        await fetch(`${API_BASE_URL}/api/shopee/cancel-otp`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-API-Key": API_SECRET_KEY || ""
+          },
+          body: JSON.stringify({ username: targetUser, channel: "sms" })
+        });
+      } catch (err) {
+        console.error("Gagal membatalkan OTP request:", err);
+      }
+    }
+  };
+
   const handleLoadCache = async () => {
     const targetBranches = branches.filter(b => b.id === selectedBrandId);
     if (targetBranches.length > 0) {
@@ -989,23 +920,40 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const selectedBrandObj = useMemo(() => branches.find(b => b.id === selectedBrandId) || null, [branches, selectedBrandId]);
-  const items = useMemo(() => (selectedBrandId && Array.isArray(branchMenus[selectedBrandId])) ? branchMenus[selectedBrandId] : [], [branchMenus, selectedBrandId]);
+  const rawItems = useMemo(() => (selectedBrandId && Array.isArray(branchMenus[selectedBrandId])) ? branchMenus[selectedBrandId] : [], [branchMenus, selectedBrandId]);
+  
+  const items = useMemo(() => {
+    if (!menuSearch.trim()) return rawItems;
+    const q = menuSearch.toLowerCase();
+    return rawItems.filter(i => (i.name && i.name.toLowerCase().includes(q)) || (i.category && i.category.toLowerCase().includes(q)));
+  }, [rawItems, menuSearch]);
+
   const groups = useMemo(() => group(items), [items]);
   const changedCount = useMemo(() => {
-    if (!selectedBrandId || !items || items.length === 0) return 0;
+    if (!selectedBrandId || !rawItems || rawItems.length === 0) return 0;
     const bEdits = edits[selectedBrandId] || {};
-    return items.filter(i => !i.is_in_promo && (bEdits[i.id] !== undefined && bEdits[i.id] !== i.price)).length;
-  }, [items, edits, selectedBrandId]);
-  const promoCount = useMemo(() => items.filter(i => i.is_in_promo).length, [items]);
+    return rawItems.filter(i => (bEdits[i.id] !== undefined && bEdits[i.id] !== i.price)).length;
+  }, [rawItems, edits, selectedBrandId]);
 
-  const bulkAdj = (mode, type, val, itemIds = null) => {
+  const violationCount = useMemo(() => {
+    if (!selectedBrandId || !rawItems || rawItems.length === 0) return 0;
+    const bEdits = edits[selectedBrandId] || {};
+    return rawItems.filter(i => {
+      const curPrice = bEdits[i.id] ?? i.price;
+      const { isViolation } = checkShopeeViolation(i.price, curPrice);
+      return isViolation;
+    }).length;
+  }, [rawItems, edits, selectedBrandId]);
+
+  const promoLockedCount = useMemo(() => rawItems.filter(i => i.is_price_locked).length, [rawItems]);
+
+  // Bulk adjust prices with optional rounding and item ID filtering
+  const bulkAdj = (mode, type, val, rounding = "none", itemIds = null) => {
     setEdits(prev => {
       const bEdits = { ...(prev[selectedBrandId] || {}) };
-      items.forEach(i => {
-        if (!i.is_in_promo) {
-          if (!itemIds || itemIds.includes(i.id)) {
-            bEdits[i.id] = applyAdj(bEdits[i.id] ?? i.price, mode, type, val);
-          }
+      rawItems.forEach(i => {
+        if (!itemIds || itemIds.includes(i.id)) {
+          bEdits[i.id] = applyAdj(bEdits[i.id] ?? i.price, mode, type, val, rounding);
         }
       });
       return { ...prev, [selectedBrandId]: bEdits };
@@ -1017,19 +965,23 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const selectAllVisibleItems = () => {
-    setSelectedItemIds(items.filter(i => !i.is_in_promo).map(i => i.id));
+    // Only select items that are not price locked (e.g. active flash sale)
+    const selectable = items.filter(i => !i.is_price_locked).map(i => i.id);
+    setSelectedItemIds(selectable);
   };
   const deselectAllItems = () => {
     setSelectedItemIds([]);
   };
   const toggleSelectItem = (id) => {
+    const item = rawItems.find(i => String(i.id) === String(id));
+    if (item && item.is_price_locked) return; // Prevent selection of locked items
     setSelectedItemIds(prev =>
       prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
     );
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-28">
       {/* Header Banner */}
       <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-orange-600 via-orange-500 to-amber-600 p-6 text-white shadow-xl shadow-orange-950/20">
         <div className="relative z-10 flex flex-wrap items-center justify-between gap-4">
@@ -1396,9 +1348,9 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
               <StepLabel number={4} label="Sesuaikan Harga" active={true} done={false} className="mb-1" />
               <p className="text-[13px] text-zinc-500 dark:text-zinc-400 ml-8">
                 Total <strong>{items.length} menu item</strong> dimuat. Saat ini ada <strong className="text-orange-600 dark:text-orange-400">{changedCount} item disesuaikan</strong>.
-                {promoCount > 0 && (
+                {promoLockedCount > 0 && (
                   <span className="ml-2 text-purple-700 dark:text-purple-400 font-bold">
-                    ({promoCount} menu promo aktif dikunci)
+                    ({promoLockedCount} menu Flash Sale dikunci)
                   </span>
                 )}
               </p>
@@ -1437,15 +1389,16 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
           {/* Adjust Bar & Actions */}
           <div className="pt-1">
             <AdjustBar
-              onApply={(mode, type, val) => {
+              theme="orange"
+              onApply={(mode, type, val, rounding) => {
                 if (itemEditMode === "multi") {
                   if (selectedItemIds.length === 0) {
                     alert("Silakan pilih/centang item yang ingin diubah terlebih dahulu.");
                     return;
                   }
-                  bulkAdj(mode, type, val, selectedItemIds);
+                  bulkAdj(mode, type, val, rounding, selectedItemIds);
                 } else {
-                  bulkAdj(mode, type, val);
+                  bulkAdj(mode, type, val, rounding);
                 }
               }}
               buttonText={
@@ -1501,16 +1454,26 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             </div>
           )}
 
+          {/* Search Filter Input (Step 3 Roadmap) */}
+          <div className="pt-2">
+            <SearchFilterInput
+              value={menuSearch}
+              onChange={setMenuSearch}
+              placeholder="Cari nama menu atau kategori di brand ini..."
+              resultCount={items.length}
+            />
+          </div>
+
           {/* Menu Table */}
-          <div className="overflow-x-auto rounded-2xl border border-zinc-200 dark:border-zinc-800">
+          <div className="overflow-x-auto rounded-2xl border border-zinc-200 dark:border-zinc-800 mb-20">
             <table className="w-full text-left text-xs min-w-[700px]">
               <thead className="bg-zinc-100 dark:bg-zinc-950 font-bold uppercase tracking-wider text-zinc-600 dark:text-zinc-400 border-b border-zinc-200 dark:border-zinc-800">
                 <tr>
                   {itemEditMode === "multi" && <th className="p-3.5 w-12 text-center">Pilih</th>}
                   <th className="p-3.5 min-w-[200px]">Nama Menu</th>
                   <th className="p-3.5 w-36">Kategori</th>
-                  <th className="p-3.5 text-right w-36">Harga Saat Ini</th>
-                  <th className="p-3.5 text-right w-44">Harga Baru Shopee</th>
+                  <th className="p-3.5 text-right w-44">Harga Saat Ini</th>
+                  <th className="p-3.5 text-right w-48">Harga Fake Price Baru Shopee</th>
                   <th className="p-3.5 text-center w-40">Status Aturan</th>
                 </tr>
               </thead>
@@ -1525,27 +1488,34 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                     {catItems.map(item => {
                       const curPrice = edits[selectedBrandId]?.[item.id] ?? item.price;
                       const isEdited = curPrice !== item.price;
+                      const diff = curPrice - item.price;
+                      const pct = item.price > 0 ? (diff / item.price) * 100 : 0;
+                      const pctFmt = (pct > 0 ? "+" : "") + (Number.isInteger(pct) ? pct.toFixed(0) : pct.toFixed(1)) + "%";
                       const { isViolation, message: violationMsg } = checkShopeeViolation(item.price, curPrice);
                       const isChecked = selectedItemIds.includes(item.id);
 
                       return (
                         <tr key={item.id} className={`transition ${
-                          item.is_in_promo
-                            ? "bg-purple-50/40 dark:bg-purple-950/20 opacity-85 cursor-not-allowed"
-                            : isChecked
+                          isChecked
                             ? "bg-amber-50/80 dark:bg-amber-950/30"
+                            : item.is_price_locked
+                            ? "bg-rose-50/30 dark:bg-rose-950/20"
+                            : item.is_in_promo
+                            ? "bg-amber-50/40 dark:bg-amber-950/20"
                             : "hover:bg-zinc-50 dark:hover:bg-zinc-950/50"
                         }`}>
                           {itemEditMode === "multi" && (
                             <td className="p-3.5 text-center align-middle">
                               <input
                                 type="checkbox"
-                                disabled={item.is_in_promo}
-                                checked={!item.is_in_promo && isChecked}
-                                title={item.is_in_promo ? "Item sedang dalam promo aktif (tidak dapat diubah)" : ""}
-                                onChange={() => !item.is_in_promo && toggleSelectItem(item.id)}
+                                disabled={item.is_price_locked}
+                                title={item.is_price_locked ? "Item dalam Flash Sale tidak dapat diubah" : ""}
+                                checked={isChecked}
+                                onChange={() => toggleSelectItem(item.id)}
                                 className={`h-4 w-4 rounded border-zinc-300 ${
-                                  item.is_in_promo ? "opacity-40 cursor-not-allowed" : "text-orange-600 focus:ring-orange-500 cursor-pointer"
+                                  item.is_price_locked
+                                    ? "opacity-30 cursor-not-allowed text-zinc-400"
+                                    : "text-orange-600 focus:ring-orange-500 cursor-pointer"
                                 }`}
                               />
                             </td>
@@ -1553,23 +1523,33 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                           <td className="p-3.5 text-zinc-900 dark:text-white font-bold align-middle">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span>{item.name}</span>
-                              {item.is_in_promo && (
-                                <span title="Item sedang dalam promo aktif di ShopeeFood. Harga dasar dikunci oleh portal merchant." className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 font-bold text-[10px] border border-purple-200 dark:border-purple-800 shrink-0">
-                                  PROMO AKTIF
-                                </span>
-                              )}
+                              <PromoBadgeTooltip item={item} platform="shopee" fmt={fmt} />
                             </div>
                           </td>
                           <td className="p-3.5 text-zinc-500 font-medium align-middle">{item.category}</td>
-                          <td className="p-3.5 text-right text-zinc-600 dark:text-zinc-300 font-mono font-bold align-middle">Rp {fmt(item.price)}</td>
+                          <td className="p-3.5 text-right text-zinc-600 dark:text-zinc-300 font-mono font-bold align-middle whitespace-nowrap">
+                            {item.discounted_price && item.discounted_price < item.price ? (
+                              <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                <span className="line-through text-zinc-400 dark:text-zinc-500 font-normal">
+                                  Rp {fmt(item.price)}
+                                </span>
+                                <span className="text-zinc-400">→</span>
+                                <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                                  Rp {fmt(item.discounted_price)}
+                                </span>
+                              </div>
+                            ) : (
+                              <span>Rp {fmt(item.price)}</span>
+                            )}
+                          </td>
                           <td className="p-3.5 text-right align-middle">
                             <input
                               type="text"
-                              disabled={item.is_in_promo}
-                              title={item.is_in_promo ? "Harga dikunci oleh ShopeeFood karena menu sedang dalam promo aktif" : ""}
+                              disabled={item.is_price_locked}
+                              title={item.is_price_locked ? "Harga dikunci karena menu sedang dalam Flash Sale aktif" : ""}
                               value={fmt(curPrice)}
                               onChange={(e) => {
-                                if (item.is_in_promo) return;
+                                if (item.is_price_locked) return;
                                 const val = parse(e.target.value);
                                 setEdits(p => ({
                                   ...p,
@@ -1580,8 +1560,8 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                 }));
                               }}
                               className={`w-32 text-right p-2 rounded-xl border font-mono font-bold text-sm ${
-                                item.is_in_promo
-                                  ? "border-purple-200 dark:border-purple-900/60 bg-purple-50/50 dark:bg-purple-950/30 text-purple-900 dark:text-purple-300 cursor-not-allowed opacity-80"
+                                item.is_price_locked
+                                  ? "border-rose-300 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/30 text-rose-900 dark:text-rose-300 cursor-not-allowed opacity-80"
                                   : isEdited
                                   ? "border-orange-500 bg-orange-50 dark:bg-orange-950/40 text-orange-900 dark:text-orange-200 focus:ring-2 focus:ring-orange-500/20"
                                   : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white focus:border-orange-500"
@@ -1589,17 +1569,21 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                             />
                           </td>
                           <td className="p-3.5 text-center align-middle">
-                            {item.is_in_promo ? (
-                              <span title="Harga menu dikunci karena sedang dalam promo aktif di Shopee Partner Portal" className="px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 text-[11px] font-bold border border-purple-200 dark:border-purple-900/60 inline-block">
-                                🔒 Promo Aktif (Dikunci)
+                            {item.is_flash_sale ? (
+                              <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 text-[11px] font-semibold border border-rose-300 dark:border-rose-800 inline-block">
+                                Flash Sale (Dikunci)
                               </span>
                             ) : isViolation ? (
-                              <span className="px-2.5 py-1 rounded-lg bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-bold border border-red-200 dark:border-red-900/60 inline-block">
-                                ⚠️ {violationMsg}
+                              <span className="px-2.5 py-1 rounded bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-semibold border border-red-200 dark:border-red-900/60 inline-block">
+                                {violationMsg}
                               </span>
                             ) : isEdited ? (
-                              <span className="px-2.5 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-bold border border-emerald-200 dark:border-emerald-900/60 inline-block">
-                                ✓ Valid (Shopee OK)
+                              <span className="px-2.5 py-1 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold border border-emerald-200 dark:border-emerald-900/60 inline-block">
+                                {pctFmt} (Valid)
+                              </span>
+                            ) : item.is_in_promo ? (
+                              <span className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold border border-amber-300 dark:border-amber-700 inline-block">
+                                Promo ({item.promo_value || "Aktif"})
                               </span>
                             ) : (
                               <span className="text-zinc-400 text-xs">-</span>
@@ -1626,86 +1610,29 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         apiBaseUrl={API_BASE_URL}
         apiKey={API_SECRET_KEY}
         onSubmitOTP={handleSubmittedOTP}
-        onCancel={() => setOtpModal(p => ({ ...p, isOpen: false }))}
+        onCancel={handleCancelOTP}
       />
 
       {/* ── Pop-up Push Rich Confirmation Summary Modal ── */}
-      {showPushConfirmModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in"
-          onClick={() => setShowPushConfirmModal(false)}
-        >
-          <div className="bg-white dark:bg-zinc-950 rounded-2xl p-6 max-w-xl w-full shadow-2xl border border-orange-100 dark:border-zinc-800 space-y-4 animate-scale-up max-h-[85vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header */}
-            <div className="flex items-start justify-between border-b border-zinc-100 dark:border-zinc-800 pb-3">
-              <div>
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Ringkasan Update Harga Shopee Sebelum Push</h3>
-                <p className="text-[13px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                  Tinjau daftar rincian <strong>{pushSummaryList.reduce((acc, s) => acc + s.updates.length, 0)} item</strong> yang akan dikirim ke Merchant Portal.
-                </p>
-              </div>
-              <button type="button" onClick={() => setShowPushConfirmModal(false)}
-                className="text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 text-lg font-bold"
-              >×</button>
-            </div>
+      <PushConfirmModal
+        isOpen={showPushConfirmModal}
+        onClose={() => setShowPushConfirmModal(false)}
+        onConfirm={executePushFromModal}
+        pushSummaryList={pushSummaryList}
+        platform="shopee"
+        submitting={pushing}
+      />
 
-            {/* Content List */}
-            <div className="flex-1 overflow-y-auto space-y-4 pr-1">
-              {pushSummaryList.map(summary => (
-                <div key={summary.branchId} className="rounded-xl border border-orange-100 dark:border-zinc-800 bg-orange-50/20 dark:bg-zinc-900/40 p-4 space-y-3">
-                  <div className="flex items-center justify-between border-b border-orange-100 dark:border-zinc-800 pb-2">
-                    <span className="font-bold text-slate-800 dark:text-white text-[15px]">{summary.branchName}</span>
-                    <PlatformBadge platform={summary.platform} storeId={summary.storeId} />
-                  </div>
-
-                  <div className="space-y-2">
-                    {summary.updates.map(u => (
-                      <div key={u.id} className="flex flex-col sm:flex-row sm:items-center justify-between rounded-lg bg-zinc-50 dark:bg-zinc-900 p-2.5 border border-zinc-100 dark:border-zinc-800 gap-1 text-[13px]">
-                        <div className="min-w-0 flex-1">
-                          <p className="font-medium text-slate-800 dark:text-zinc-100 leading-snug text-wrap break-words">{u.name}</p>
-                          <span className="text-[12px] text-slate-400 dark:text-zinc-400 uppercase tracking-wider">{u.category}</span>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="line-through text-slate-400 dark:text-zinc-500">Rp {fmt(u.oldPrice)}</span>
-                          <span className="text-slate-400 dark:text-zinc-500">→</span>
-                          <span className="font-bold text-slate-900 dark:text-white">Rp {fmt(u.newPrice)}</span>
-                          <span className={`rounded px-1.5 py-0.5 text-[12px] font-bold ${
-                            u.diff > 0
-                              ? "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400"
-                              : "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400"
-                          }`}>
-                            ({u.diff > 0 ? "+" : ""}{u.pct.toFixed(1)}%)
-                          </span>
-                          {u.isViolation && (
-                            <span title={u.violationMsg} className="rounded bg-red-600 text-white text-[12px] font-bold px-1.5 py-0.5">! Batas Shopee</span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Footer Actions */}
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-100 dark:border-zinc-800">
-              <button type="button" onClick={() => setShowPushConfirmModal(false)}
-                className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-200 font-semibold text-[14px] rounded-xl transition-colors"
-              >
-                Batal
-              </button>
-              <button type="button" onClick={executePushFromModal}
-                className="px-5 py-2 bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 text-white font-bold text-[14px] rounded-xl transition-colors shadow-md flex items-center gap-1.5"
-              >
-                <span>Konfirmasi & Push Update</span>
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                </svg>
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* ── Sticky Bottom Floating Action Bar ── */}
+      {syncPhase === "done" && (
+        <StickyBottomBar
+          totalChanges={changedCount}
+          violationCount={violationCount}
+          onOpenPush={openPushConfirmationModal}
+          onReset={resetAll}
+          pushing={pushing}
+          theme="orange"
+        />
       )}
 
       {/* ── Pop-up Success Modal ── */}

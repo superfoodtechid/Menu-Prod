@@ -3,12 +3,21 @@ import json
 import sys
 import uuid
 import logging
+
+# Force urllib3 to use IPv4 only because IPv6 is broken/blocked on some hosts and causes connection hangs
+try:
+    import urllib3.util.connection
+    import socket
+    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
+
 import threading
 import time
 import builtins
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union, Dict, Any
 
 # Override standard print to include timestamp
 _original_print = builtins.print
@@ -88,6 +97,40 @@ def startup_event():
     cleanup_zombie_chromium()
     logger.info("🚀 Initializing database tables...")
     init_db()
+    # Ensure persistent shopee profile & session sync from /app/data
+    try:
+        import shutil
+        persistent_data_dir = BASE_DIR / "data"
+        shopee_auto_dir = BASE_DIR / "src" / "shopee-omzet-automation" / "data"
+        shopee_core_dir = BASE_DIR / "shopee" / "data"
+        shopee_auto_dir.mkdir(parents=True, exist_ok=True)
+        shopee_core_dir.mkdir(parents=True, exist_ok=True)
+
+        for src_f in persistent_data_dir.glob("session*.json"):
+            for dst_dir in [shopee_auto_dir, shopee_core_dir]:
+                dst_f = dst_dir / src_f.name
+                if not dst_f.exists() or src_f.stat().st_mtime > dst_f.stat().st_mtime:
+                    shutil.copy2(src_f, dst_f)
+            if src_f.name == "session_allvbadmin.json":
+                for dst_dir in [shopee_auto_dir, shopee_core_dir, persistent_data_dir]:
+                    dst_sess = dst_dir / "session.json"
+                    if not dst_sess.exists() or src_f.stat().st_mtime > dst_sess.stat().st_mtime:
+                        shutil.copy2(src_f, dst_sess)
+
+        for src_d in persistent_data_dir.glob("chrome_profile*"):
+            if src_d.is_dir():
+                for dst_dir in [shopee_auto_dir, shopee_core_dir]:
+                    dst_prof = dst_dir / (src_d.name if "allvbadmin" in src_d.name else "chrome_profile")
+                    if not dst_prof.exists():
+                        shutil.copytree(src_d, dst_prof, dirs_exist_ok=True)
+                # also mirror to standard chrome_profile name in shopee_core
+                dst_shopee_prof = shopee_core_dir / "chrome_profile"
+                if not dst_shopee_prof.exists():
+                    shutil.copytree(src_d, dst_shopee_prof, dirs_exist_ok=True)
+        logger.info("✅ Persistent Shopee sessions & Chrome profiles synced from /app/data")
+    except Exception as err:
+        logger.warning(f"⚠️ Shopee session persistence sync warning: {err}")
+
     # Ensure export directories exist dynamically
     exports_dir = BASE_DIR / "data" / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
@@ -247,10 +290,10 @@ import pandas as pd
 
 @app.post("/api/sync-sheets", status_code=status.HTTP_200_OK)
 def sync_sheets(db: Session = Depends(get_db)):
-    url = f"https://docs.google.com/spreadsheets/d/e/2PACX-1vQ3tLKBNXDqRgBw0mNhKZFxgvKx-JoiTDzm_s5Ix1cm7O6HCv4IvExOLR2HSRVaXSsx82V348mcr9X4/pub?gid=0&single=true&output=csv&t={int(datetime.utcnow().timestamp())}"
+    from menu_core.sheets import GSHEETS_URL, GSHEETS_HEADERS
     try:
         logger.info("⏳ Downloading latest merchant sheet for database sync...")
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(GSHEETS_URL, headers=GSHEETS_HEADERS, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
         try:
@@ -862,6 +905,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     success_count += 1
                     status_str = "SUCCESS"
                     err_msg = None
+                elif res.get("status") == "SKIPPED_ACTIVE_PROMO":
+                    status_str = "SKIPPED_ACTIVE_PROMO"
+                    err_msg = res.get("error_message") or "Item sedang dalam promo/slash price aktif di ShopeeFood."
                 else:
                     fail_count += 1
                     status_str = "FAILED"
@@ -1039,7 +1085,38 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             selling_time_id = item_info["sellingTimeID"]
                             old_p = float(orig_item.get("priceInMin", 0)) / 100.0
 
-                            # 1. Cek Kuota Bulanan Grab (Maksimal 15x Perubahan Harga per Item per 30 Hari)
+                            # 1. Cek Active Promo / Slash Price Grab (itemCampaignInfo)
+                            campaign = orig_item.get("itemCampaignInfo")
+                            if campaign and isinstance(campaign, dict):
+                                item_label = orig_item.get("itemName", real_item_id)
+                                err_promo = f"Item '{item_label}' sedang dalam promo/slash price aktif di GrabFood. Perubahan harga dasar dikunci."
+                                logger.warning(f"🔒 Promo Grab Terdeteksi: {err_promo}")
+                                trail = AuditTrail(
+                                    job_id=job.id,
+                                    outlet_id=outlet.id,
+                                    item_id=real_item_id,
+                                    item_name=item_label,
+                                    change_type="PRICE_UPDATE",
+                                    field_changed="price",
+                                    old_value=str(old_p),
+                                    new_value=str(new_price),
+                                    status="SKIPPED_ACTIVE_PROMO",
+                                    error_message=err_promo
+                                )
+                                thread_db.add(trail)
+                                thread_db.commit()
+                                items_breakdown.append({
+                                    "item_id": real_item_id,
+                                    "item_name": item_label,
+                                    "old_price": old_p,
+                                    "requested_price": new_price,
+                                    "verified_price": old_p,
+                                    "status": "SKIPPED_ACTIVE_PROMO",
+                                    "error_message": err_promo
+                                })
+                                continue
+
+                            # 2. Cek Kuota Bulanan Grab (Maksimal 15x Perubahan Harga per Item per 30 Hari)
                             thirty_days_ago = datetime.utcnow() - timedelta(days=30)
                             monthly_count = thread_db.query(AuditTrail).filter(
                                 AuditTrail.outlet_id == outlet.id,
@@ -1079,7 +1156,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                 })
                                 continue
 
-                            # 2. Hitung Tahapan Kenaikan / Penurunan (>15% Push Bertahap)
+                            # 3. Hitung Tahapan Kenaikan / Penurunan (>15% Push Bertahap)
                             steps = calculate_price_steps(old_p, new_price, max_step_pct=0.15)
                             if len(steps) > 1:
                                 logger.info(f"📊 Grab Push Bertahap (>15%) untuk {orig_item.get('itemName')}: Rp {old_p:,.0f} -> Rp {new_price:,.0f} via {len(steps)} tahapan: {steps}")
@@ -1651,6 +1728,15 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             "category_common_id": cat.get("common_id")
                         }
 
+                # Fetch active MPP promotions to prevent updating promo items
+                mpp_promos_map = {}
+                try:
+                    from menu_core.gofood import fetch_gofood_mpp_promotions
+                    clean_tok = token.replace("Bearer ", "").strip() if token else ""
+                    mpp_promos_map = fetch_gofood_mpp_promotions(clean_tok, rest_uuid)
+                except Exception as mpp_err:
+                    logger.warning(f"⚠️ Gagal fetch MPP promo map di run_push_price_job: {mpp_err}")
+
                 # ──────────────────────────────────────────────────────────────
                 # BARRIER: Tunggu x-passkey DAN menu_group_id dari SPA sebelum
                 # memulai PATCH. Kedua nilai ini dikirim SPA via background
@@ -1708,6 +1794,55 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
                     orig_item = item_info["item"]
                     cat_common_id = item_info["category_common_id"] or item_info["category_id"]
+
+                    # Cek active promo pada item GoFood
+                    item_name = (orig_item.get("name") or "").strip().lower()
+                    mpp_info = mpp_promos_map.get(str(item_id).strip()) or mpp_promos_map.get(item_name)
+                    promo_info = orig_item.get("promo_info") or orig_item.get("discount") or orig_item.get("campaign") or mpp_info
+                    original_p = float(orig_item.get("original_price") or orig_item.get("list_price") or 0)
+                    cur_p = float(orig_item.get("price") or 0)
+                    is_go_promo = bool(promo_info) or (original_p > cur_p > 0)
+
+                    # Klasifikasi tipe promo: Nominal vs Percentage
+                    is_nominal_promo = False
+                    promo_desc = ""
+                    if is_go_promo:
+                        if isinstance(promo_info, dict):
+                            pct = promo_info.get("discount_percentage") or promo_info.get("percentage")
+                            val = promo_info.get("discount_value") or promo_info.get("value") or promo_info.get("amount")
+                            if pct and float(pct) > 0:
+                                is_nominal_promo = False
+                                promo_desc = f"Persentase ({int(float(pct))}%)"
+                            elif val and float(val) > 0:
+                                is_nominal_promo = True
+                                promo_desc = f"Nominal (Rp {int(float(val)):,})"
+                            else:
+                                is_nominal_promo = False
+                        else:
+                            is_nominal_promo = False
+
+                    # Hanya LOCK jika promo bertipe NOMINAL (Fixed Amount)
+                    if is_go_promo and is_nominal_promo:
+                        item_label = orig_item.get("name", item_id)
+                        err_promo = f"Item '{item_label}' sedang dalam promo nominal tetap GoFood ({promo_desc}). Perubahan harga dasar dikunci untuk mencegah kerugian margin."
+                        logger.warning(f"🔒 Promo Nominal GoFood Terdeteksi: {err_promo}")
+                        trail = AuditTrail(
+                            job_id=job.id,
+                            outlet_id=outlet.id,
+                            item_id=item_id,
+                            item_name=item_label,
+                            change_type="PRICE_UPDATE",
+                            field_changed="price",
+                            old_value=str(cur_p),
+                            new_value=str(new_price),
+                            status="SKIPPED_ACTIVE_PROMO",
+                            error_message=err_promo
+                        )
+                        db.add(trail)
+                        db.commit()
+                        continue
+                    elif is_go_promo and not is_nominal_promo:
+                        logger.info(f"⚡ Item '{orig_item.get('name')}' sedang promo persentase ({promo_desc or 'Dynamic %'}). Push harga dasar tetap diizinkan.")
 
                     old_price = int(float(orig_item.get('price') or 0))
                     target_price = float(new_price)
@@ -1941,6 +2076,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                         try:
                             item_id_idx = header_row.index('Item ID') + 1
                             price_idx = header_row.index('Current Real Price (Rp)') + 1
+                            fake_price_idx = (header_row.index('Current Fake Price (Rp)') + 1) if 'Current Fake Price (Rp)' in header_row else None
                             
                             successful_updates = {}
                             for t in trails:
@@ -1953,7 +2089,15 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             for row_idx in range(2, sheet.max_row + 1):
                                 cell_item_id = str(sheet.cell(row=row_idx, column=item_id_idx).value).strip()
                                 if cell_item_id in successful_updates:
-                                    sheet.cell(row=row_idx, column=price_idx).value = successful_updates[cell_item_id]
+                                    new_val = successful_updates[cell_item_id]
+                                    if fake_price_idx:
+                                        curr_fake = sheet.cell(row=row_idx, column=fake_price_idx).value
+                                        if curr_fake is not None and str(curr_fake).strip() not in ("", "0"):
+                                            sheet.cell(row=row_idx, column=fake_price_idx).value = new_val
+                                        else:
+                                            sheet.cell(row=row_idx, column=price_idx).value = new_val
+                                    else:
+                                        sheet.cell(row=row_idx, column=price_idx).value = new_val
                                     
                             wb.save(excel_path)
                             logger.info(f"💾 Updated Excel catalog with new prices at: {excel_path}")
@@ -2211,7 +2355,7 @@ def calculate_price_steps(current_price: float, target_price: float, max_step_pc
 
 # ─── C5 MENU PUSH & PARSER ENDPOINTS ──────────────────────────────────────────
 
-def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, updates: list, progress_cb=None):
+def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, updates: list, progress_cb=None, item_result_cb=None):
     """Logs into GoFood for a single merchant and applies C5 name/price changes to the real store.
 
     Each entry in `updates` is a C5PushItemUpdate dict. Returns a list of per-item result dicts:
@@ -2460,6 +2604,15 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         "category_common_id": cat.get("common_id") or cat_group,
                     }
 
+            # Fetch active MPP promotions to prevent updating promo items
+            mpp_promos_map = {}
+            try:
+                from menu_core.gofood import fetch_gofood_mpp_promotions
+                clean_tok = token.replace("Bearer ", "").strip() if token else ""
+                mpp_promos_map = fetch_gofood_mpp_promotions(clean_tok, rest_uuid)
+            except Exception as mpp_err:
+                logger.warning(f"⚠️ Gagal fetch MPP promo map di run_push_c5_job: {mpp_err}")
+
             passkey = api_headers.get('x-passkey') or "1729b182-c60e-4568-849d-5eb7d794fd09"
             passkey = api_headers.get('x-passkey') or "1729b182-c60e-4568-849d-5eb7d794fd09"
             headers_direct = {
@@ -2616,8 +2769,46 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 except (ValueError, TypeError):
                     final_price = int(float(orig_item.get('price') or 0))
 
-                orig_price = float(orig_item.get('price') or 0)
-                price_steps = calculate_price_steps(orig_price, final_price) if want_price and orig_price > 0 else [final_price]
+                # ── Active Promo Protection for GoFood C5 Push ──
+                item_name_key = (orig_item.get("name") or "").strip().lower()
+                mpp_info = mpp_promos_map.get(str(item_id).strip()) or mpp_promos_map.get(item_name_key)
+                promo_info = orig_item.get("promo_info") or orig_item.get("discount") or orig_item.get("campaign") or mpp_info
+                original_p = float(orig_item.get("original_price") or orig_item.get("list_price") or 0)
+                cur_p = float(orig_item.get("price") or 0)
+                is_go_promo = bool(promo_info) or (original_p > cur_p > 0)
+
+                # Klasifikasi promo: hanya lock harga jika diskon NOMINAL
+                is_nominal_promo = False
+                promo_desc = ""
+                if is_go_promo:
+                    if isinstance(promo_info, dict):
+                        pct = promo_info.get("discount_percentage") or promo_info.get("percentage")
+                        val = promo_info.get("discount_value") or promo_info.get("value") or promo_info.get("amount")
+                        if pct and float(pct) > 0:
+                            is_nominal_promo = False
+                            promo_desc = f"Persentase ({int(float(pct))}%)"
+                        elif val and float(val) > 0:
+                            is_nominal_promo = True
+                            promo_desc = f"Nominal (Rp {int(float(val)):,})"
+                        else:
+                            is_nominal_promo = False
+                    else:
+                        is_nominal_promo = False
+
+                if is_go_promo and is_nominal_promo and want_price and raw_price is not None and int(float(raw_price)) != int(cur_p):
+                    logger.info(f"🔒 [GoFood C5 Push] Item '{final_name}' ({item_id}) sedang promo nominal ({promo_desc}). Mempertahankan harga asli Rp{cur_p:,.0f} dan tetap mengupdate nama/foto/kategori.")
+                    final_price = int(cur_p)
+                    price_steps = [final_price]
+                    promo_note = f" (Harga tidak diubah karena promo nominal aktif: {promo_desc})"
+                elif is_go_promo and not is_nominal_promo and want_price:
+                    logger.info(f"⚡ [GoFood C5 Push] Item '{final_name}' ({item_id}) sedang promo persentase ({promo_desc or 'Dynamic %'}). Push harga baru diizinkan.")
+                    orig_price = float(orig_item.get('price') or 0)
+                    price_steps = calculate_price_steps(orig_price, final_price) if want_price and orig_price > 0 else [final_price]
+                    promo_note = ""
+                else:
+                    orig_price = float(orig_item.get('price') or 0)
+                    price_steps = calculate_price_steps(orig_price, final_price) if want_price and orig_price > 0 else [final_price]
+                    promo_note = ""
 
                 res = None
                 if len(price_steps) > 1:
@@ -2677,7 +2868,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         break
 
                 if res and res.get('ok'):
-                    results.append({
+                    res_entry = {
                         "item_id": item_id, "item_name": orig_item.get('name', item_id),
                         "new_name": final_name if want_name else None,
                         "new_price": final_price if want_price else None,
@@ -2685,14 +2876,27 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         "new_desc": final_desc if want_desc else None,
                         "new_category": new_cat if upd.get("category_id") in category_renames else None,
                         "status": "SUCCESS", "error": None,
-                    })
+                    }
+                    results.append(res_entry)
+                    if item_result_cb:
+                        try:
+                            item_result_cb(upd, "SUCCESS", None, applied=res_entry)
+                        except Exception:
+                            pass
                 else:
-                    results.append({
+                    err_msg = (res.get('body') or res.get('error') or "GoFood API error.") if res else "GoFood API error."
+                    res_entry = {
                         "item_id": item_id, "item_name": orig_item.get('name', item_id),
                         "new_name": new_name or None, "new_price": raw_price,
                         "status": "FAILED",
-                        "error": (res.get('body') or res.get('error') or "GoFood API error.") if res else "GoFood API error.",
-                    })
+                        "error": err_msg,
+                    }
+                    results.append(res_entry)
+                    if item_result_cb:
+                        try:
+                            item_result_cb(upd, "FAILED", err_msg, applied=res_entry)
+                        except Exception:
+                            pass
 
                 # Pacing + batch breather to respect GoFood rate limits
                 time.sleep(random.uniform(1.2, 2.5))
@@ -2700,6 +2904,20 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                     logger.info(f"☕ Batch pause item {idx+1}/{total}: istirahat 3s...")
                     time.sleep(3.0)
         finally:
+            proc_killed = False
+            try:
+                if proc:
+                    from src.core.browser_factory import kill_process_tree
+                    kill_process_tree(proc)
+                    proc_killed = True
+            except Exception:
+                pass
+            if not proc_killed and proc:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
             try:
                 browser.close()
             except Exception:
@@ -2802,6 +3020,15 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                 job.progress_pct = int(15 + (processed / max(1, total_updates)) * 80)
                 db.commit()
 
+            def item_cb(upd, status_str, err_msg=None, applied=None):
+                if status_str == "SUCCESS":
+                    nonlocal success_count
+                    success_count += 1
+                else:
+                    nonlocal fail_count
+                    fail_count += 1
+                record_trail(upd, status_str, err_msg, applied=applied)
+
             try:
                 if platform == "grab":
                     from grab.core.push_c5 import push_c5_grab_for_merchant
@@ -2811,6 +3038,23 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                         store_id=outlet.store_id,
                         updates=sid_updates,
                         progress_cb=progress_cb,
+                        item_result_cb=item_cb,
+                    )
+                elif platform == "shopee":
+                    from shopee.core.push_c5 import push_c5_shopee_for_merchant
+                    store_meta = {
+                        "store_id": outlet.store_id,
+                        "username": account.username,
+                        "password": account.password,
+                        "merchant_name": outlet.merchant_name or outlet.outlet_name,
+                        "nama_resto_final": outlet.outlet_name,
+                        "nama_outlet": outlet.outlet_name,
+                    }
+                    results = push_c5_shopee_for_merchant(
+                        store_metadata=store_meta,
+                        updates=sid_updates,
+                        progress_cb=progress_cb,
+                        item_result_cb=item_cb,
                     )
                 else:
                     from concurrent.futures import ThreadPoolExecutor
@@ -2822,26 +3066,18 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                             merchant_id=outlet.store_id,
                             updates=sid_updates,
                             progress_cb=progress_cb,
+                            item_result_cb=item_cb,
                         ).result()
             except Exception as ex:
                 logger.error(f"❌ Gagal push {platform.title()} untuk SID {sid}: {ex}")
+                # Record trail only for remaining items not already recorded via item_result_cb
+                processed_in_results = {str(r.get("item_id")) for r in (results or [])}
                 for upd in sid_updates:
-                    processed += 1
-                    fail_count += 1
-                    record_trail(upd, "FAILED", str(ex))
+                    if str(upd.get("item_id")) not in processed_in_results:
+                        processed += 1
+                        fail_count += 1
+                        record_trail(upd, "FAILED", str(ex))
                 continue
-
-            # Match each result back to its source update to record an accurate trail.
-            results_by_id = {str(r.get("item_id")): r for r in results}
-            for upd in sid_updates:
-                processed += 1
-                r = results_by_id.get(str(upd.get("item_id")))
-                if r and r.get("status") == "SUCCESS":
-                    success_count += 1
-                    record_trail(upd, "SUCCESS", None, applied=r)
-                else:
-                    fail_count += 1
-                    record_trail(upd, "FAILED", (r.get("error") if r else "Item tidak diproses."))
 
             job.progress_pct = int(15 + (processed / max(1, total_updates)) * 80)
             db.commit()
@@ -2879,22 +3115,111 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
 
 
 
-@app.post("/api/jobs/parse-c5")
-async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Parses an uploaded C5 Excel file (.xlsx) and detects Store IDs (SIDs) plus menu changes
-    for GoFood by comparing each C5 row against the last PULL baseline
-    (Gofood/API/menu-response-<SID>.json). Scope tahap 1: name + price.
-    1. Name Change  — 'Item Name Improvement' terisi & berbeda dari nama baseline.
-    2. Price Change — 'New Fake Price (Rp)' terisi (TIDAK boleh kosong) & berbeda dari harga baseline.
-    Kategori & foto belum termasuk scope tahap ini.
-    """
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=400, detail="File harus berformat Excel (.xlsx / .xls)")
+def _download_gdrive_or_gsheet_bytes(url: str) -> tuple[bytes, str]:
+    """Mengunduh file C5 XLSX dari link Google Drive atau Google Sheets."""
+    import re
+    import urllib.request
+    import urllib.error
 
-    contents = await file.read()
+    clean_url = url.strip()
+    export_url = None
+    filename = "gdrive_c5.xlsx"
+
+    # 1. Google Sheets (/spreadsheets/d/<id> atau /spreadsheets/u/<num>/d/<id>)
+    m_sheet = re.search(r'/spreadsheets(?:/u/\d+)?/d/([a-zA-Z0-9-_]+)', clean_url)
+    if m_sheet:
+        sheet_id = m_sheet.group(1)
+        export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+        filename = f"gsheet_{sheet_id[:8]}.xlsx"
+    else:
+        # 2. Google Drive File (/file/d/<id> atau /file/u/<num>/d/<id>)
+        m_file = re.search(r'/file(?:/u/\d+)?/d/([a-zA-Z0-9-_]+)', clean_url)
+        if m_file:
+            file_id = m_file.group(1)
+            export_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            filename = f"gdrive_{file_id[:8]}.xlsx"
+        else:
+            # 3. Parameter id= atau /d/<id>
+            m_id = re.search(r'(?:[?&]id=|/d/)([a-zA-Z0-9-_]{20,})', clean_url)
+            if m_id:
+                file_id = m_id.group(1)
+                export_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                filename = f"gdrive_{file_id[:8]}.xlsx"
+
+    if not export_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Format Link Google Drive / Google Sheets tidak valid. Pastikan link berisi ID dokumen (contoh: https://docs.google.com/spreadsheets/d/...)"
+        )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        req = urllib.request.Request(export_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            # Cegah DoS / download raksasa (max 20 MB)
+            max_bytes = 20 * 1024 * 1024
+            data = resp.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise HTTPException(status_code=400, detail="Ukuran file Google Drive melebihi batas maksimal 20 MB.")
+            if not data:
+                raise HTTPException(status_code=400, detail="Data file kosong dari Google Drive.")
+            
+            # Cek jika respon HTML login/error google
+            if data[:100].strip().startswith(b"<!DOCTYPE") or b"<html" in data[:200].lower():
+                raise HTTPException(
+                    status_code=403,
+                    detail="Akses Google Drive ditolak atau memerlukan izin akses. Pastikan tautan disetel 'Siapa saja yang memiliki link / Anyone with link (Viewer)'."
+                )
+            return data, filename
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise HTTPException(
+                status_code=403,
+                detail="Akses Google Drive ditolak (403). Pastikan share setting disetel 'Anyone with the link can view'."
+            )
+        elif e.code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail="Dokumen Google Drive tidak ditemukan (404). Periksa kembali link Anda."
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"Gagal mengunduh file dari Google Drive (HTTP {e.code}): {e.reason}")
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=400, detail=f"Gagal menghubungi server Google: {e.reason}")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=400, detail=f"Terjadi kesalahan saat mengunduh Google Drive: {str(e)}")
+
+
+@app.post("/api/jobs/parse-c5")
+async def parse_c5_endpoint(
+    file: Optional[UploadFile] = File(None),
+    drive_url: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    """Parses an uploaded C5 Excel file (.xlsx) or Google Drive link and detects Store IDs (SIDs) plus menu changes
+    for GoFood/Grab by comparing each C5 row against the last PULL baseline.
+    """
     import io
     import openpyxl
     import re
+
+    filename = ""
+    contents = b""
+
+    if file and file.filename:
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="File harus berformat Excel (.xlsx / .xls)")
+        filename = file.filename
+        contents = await file.read()
+    elif drive_url and drive_url.strip():
+        contents, filename = _download_gdrive_or_gsheet_bytes(drive_url.strip())
+    else:
+        raise HTTPException(status_code=400, detail="Harap unggah file Excel C5 (.xlsx) atau masukkan Link Google Drive / Sheets.")
 
     try:
         wb_raw = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=False)
@@ -2916,7 +3241,7 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
     if len(rows) <= 1:
         return {
             "success": True,
-            "filename": file.filename,
+            "filename": filename,
             "stores": [],
             "items": [],
             "summary": {"total_stores": 0, "total_items": 0, "total_changes": 0}
@@ -3033,39 +3358,191 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
     def norm_str(s):
         return re.sub(r'\s+', ' ', str(s or '').strip().lower())
 
-    # ── Baseline PULL cache loader (Gofood/API/menu-response-<SID>.json) ──
-    baseline_dir = Path(__file__).parent / "Gofood" / "API"
+    # ── Baseline PULL cache loader (Multi-platform: GoFood / Grab / Shopee) ──
     _baseline_cache = {}
 
-    def load_baseline(sid):
-        """Loads the last-pulled GoFood menu for a SID and indexes items by id/name and categories."""
-        if sid in _baseline_cache:
-            return _baseline_cache[sid]
-        by_id, by_name, categories = {}, {}, set()
-        path = baseline_dir / f"menu-response-{sid}.json"
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                for menu in (data.get("menus") or []):
-                    cat_name = menu.get("name") or ""
+    def _find_baseline_file(sid):
+        sid_str = str(sid or "").strip()
+        candidates = [
+            sid_str,
+            sid_str.replace("GM", "M"),
+            sid_str.replace("GM", "G"),
+            sid_str.lstrip("G"),
+            sid_str.lstrip("M"),
+            f"G{sid_str.lstrip('G')}",
+            f"M{sid_str.lstrip('M')}",
+        ]
+        unique_cands = []
+        for c in candidates:
+            if c and c not in unique_cands:
+                unique_cands.append(c)
+
+        search_dirs = [
+            Path(__file__).parent / "Gofood" / "API",
+            Path(__file__).parent / "grab" / "API",
+            Path(__file__).parent / "shopee" / "API",
+        ]
+
+        for s_dir in search_dirs:
+            if not s_dir.exists():
+                continue
+            for cand in unique_cands:
+                p = s_dir / f"menu-response-{cand}.json"
+                if p.exists():
+                    return ("json", p)
+
+        # Fallback: scan existing exported C5 Excel workbooks in data/exports/
+        exports_dir = Path(__file__).parent / "data" / "exports"
+        if exports_dir.exists():
+            for p in sorted(exports_dir.rglob("*.xlsx"), key=lambda x: x.stat().st_mtime, reverse=True):
+                try:
+                    wb_exp = openpyxl.load_workbook(p, data_only=True, read_only=True)
+                    if "Item" not in wb_exp.sheetnames:
+                        continue
+                    ws_exp = wb_exp["Item"]
+                    exp_rows = list(ws_exp.iter_rows(values_only=True))
+                    if not exp_rows:
+                        continue
+                    exp_headers = [str(c).strip() if c is not None else "" for c in exp_rows[0]]
+                    exp_hmap = {h: i for i, h in enumerate(exp_headers) if h}
+                    exp_sid_idx = exp_hmap.get("SID") or exp_hmap.get("Store ID")
+                    if exp_sid_idx is None:
+                        continue
+
+                    for r in exp_rows[1:]:
+                        if r and exp_sid_idx < len(r) and str(r[exp_sid_idx] or "").strip().lower() == sid_str.lower():
+                            return ("xlsx", p)
+                except Exception:
+                    pass
+
+        return (None, None)
+    def _parse_json_baseline(path, sid, by_id, by_name, categories):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if "items" in data and isinstance(data.get("items"), list):
+                for it in data["items"]:
+                    it_sid = str(it.get("Store ID") or "").strip()
+                    if it_sid and sid and it_sid.lower() != str(sid).strip().lower():
+                        continue
+                    cat_name = it.get("Category") or it.get("Nama Kategori") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
-                    for it in (menu.get("menu_items") or []):
+                    price_val = parse_price(it.get("Current Fake Price (Rp)") or it.get("Harga Fake") or it.get("Current Real Price (Rp)") or it.get("Harga Real") or it.get("price"))
+                    rec = {
+                        "name": it.get("Item") or it.get("Nama Item") or it.get("name") or "",
+                        "price": price_val,
+                        "image": it.get("Photo Link") or it.get("Link Foto") or it.get("image") or "",
+                        "category": cat_name,
+                        "description": it.get("Description") or it.get("Deskripsi") or it.get("description") or "",
+                    }
+                    iid = str(it.get("Item ID") or it.get("common_id") or it.get("id") or "").strip()
+                    if iid:
+                        by_id[iid] = rec
+                    nn = norm_str(rec["name"])
+                    if nn and nn not in by_name:
+                        by_name[nn] = rec
+            elif "catalogs" in (data.get("data") or data if isinstance(data.get("data") or data, dict) else {}):
+                catalogs_list = data.get("data", {}).get("catalogs") or data.get("catalogs") or []
+                for cat in catalogs_list:
+                    cat_name = cat.get("name") or ""
+                    if cat_name:
+                        categories.add(norm_str(cat_name))
+                    for dish in cat.get("dishes", []):
+                        price_raw = dish.get("price", "0")
+                        price_val = float(price_raw) / 100000.0 if float(price_raw) > 1000 else float(price_raw)
                         rec = {
-                            "name": it.get("name") or "",
-                            "price": parse_price(it.get("price")),
-                            "image": it.get("image") or "",
+                            "name": dish.get("name") or "",
+                            "price": price_val,
+                            "image": dish.get("picture") or "",
                             "category": cat_name,
-                            "description": it.get("description") or "",
+                            "description": dish.get("description") or "",
                         }
-                        iid = str(it.get("common_id") or it.get("id") or "").strip()
+                        iid = str(dish.get("id") or "").strip()
                         if iid:
                             by_id[iid] = rec
                         nn = norm_str(rec["name"])
                         if nn and nn not in by_name:
                             by_name[nn] = rec
-            except Exception as ex:
-                logger.warning(f"Gagal membaca baseline PULL untuk SID {sid}: {ex}")
+            else:
+                for menu in (data.get("menus") or data.get("categories") or []):
+                    cat_name = menu.get("name") or menu.get("category_name") or ""
+                    if cat_name:
+                        categories.add(norm_str(cat_name))
+                    for it in (menu.get("menu_items") or menu.get("items") or []):
+                        rec = {
+                            "name": it.get("name") or it.get("item_name") or "",
+                            "price": parse_price(it.get("price")),
+                            "image": it.get("image") or it.get("photo_url") or "",
+                            "category": cat_name,
+                            "description": it.get("description") or "",
+                        }
+                        iid = str(it.get("common_id") or it.get("id") or it.get("item_id") or "").strip()
+                        if iid:
+                            by_id[iid] = rec
+                        nn = norm_str(rec["name"])
+                        if nn and nn not in by_name:
+                            by_name[nn] = rec
+        except Exception as ex:
+            logger.warning(f"Gagal membaca baseline PULL JSON untuk SID {sid}: {ex}")
+    def _parse_xlsx_baseline(path, sid, by_id, by_name, categories):
+        try:
+            wb_exp = openpyxl.load_workbook(path, data_only=True, read_only=True)
+            if "Item" in wb_exp.sheetnames:
+                ws_exp = wb_exp["Item"]
+                exp_rows = list(ws_exp.iter_rows(values_only=True))
+                if exp_rows:
+                    exp_headers = [str(c).strip() if c is not None else "" for c in exp_rows[0]]
+                    exp_hmap = {h: i for i, h in enumerate(exp_headers) if h}
+                    exp_sid_idx = exp_hmap.get("SID") or exp_hmap.get("Store ID")
+                    cat_idx = exp_hmap.get("Category") or exp_hmap.get("Nama Kategori")
+                    iid_idx = exp_hmap.get("Item ID")
+                    name_idx = exp_hmap.get("Item") or exp_hmap.get("Item Name")
+                    photo_idx = exp_hmap.get("Photo Link") or exp_hmap.get("Gambar")
+                    desc_idx = exp_hmap.get("Description") or exp_hmap.get("Deskripsi")
+                    price_idx = exp_hmap.get("Current Fake Price (Rp)") or exp_hmap.get("Current Real Price (Rp)") or exp_hmap.get("Current Fake Price")
+
+                    for r in exp_rows[1:]:
+                        if not r or exp_sid_idx is None or exp_sid_idx >= len(r):
+                            continue
+                        if str(r[exp_sid_idx] or "").strip().lower() != str(sid).strip().lower():
+                            continue
+                        cname = str(r[cat_idx]).strip() if cat_idx is not None and cat_idx < len(r) and r[cat_idx] is not None else ""
+                        if cname:
+                            categories.add(norm_str(cname))
+                        iname = str(r[name_idx]).strip() if name_idx is not None and name_idx < len(r) and r[name_idx] is not None else ""
+                        iid = str(r[iid_idx]).strip() if iid_idx is not None and iid_idx < len(r) and r[iid_idx] is not None else ""
+                        photo = str(r[photo_idx]).strip() if photo_idx is not None and photo_idx < len(r) and r[photo_idx] is not None else ""
+                        desc = str(r[desc_idx]).strip() if desc_idx is not None and desc_idx < len(r) and r[desc_idx] is not None else ""
+                        price = parse_price(r[price_idx]) if price_idx is not None and price_idx < len(r) else None
+
+                        rec = {
+                            "name": iname,
+                            "price": price,
+                            "image": photo,
+                            "category": cname,
+                            "description": desc,
+                        }
+                        if iid:
+                            by_id[iid] = rec
+                        nn = norm_str(iname)
+                        if nn and nn not in by_name:
+                            by_name[nn] = rec
+        except Exception as ex:
+            logger.warning(f"Gagal membaca baseline PULL XLSX untuk SID {sid}: {ex}")
+    def load_baseline(sid):
+        """Loads the last-pulled menu snapshot for a SID and indexes items by id/name and categories."""
+        if sid in _baseline_cache:
+            return _baseline_cache[sid]
+
+        by_id, by_name, categories = {}, {}, set()
+        ftype, path = _find_baseline_file(sid)
+
+        if path and path.exists():
+            if ftype == "json":
+                _parse_json_baseline(path, sid, by_id, by_name, categories)
+            elif ftype == "xlsx":
+                _parse_xlsx_baseline(path, sid, by_id, by_name, categories)
+
         result = {"by_id": by_id, "by_name": by_name, "categories": categories, "found": bool(by_id or by_name)}
         _baseline_cache[sid] = result
         return result
@@ -3171,6 +3648,7 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
             })
 
         # 1. New Item & New Category Indications
+        name_changed = False
         if is_new_item:
             diff_details.append({"column": "Item Status", "old_val": "(Item Baru)", "new_val": f"Tambah Item Baru: {display_name}"})
         elif display_name and norm_str(display_name) != norm_str(base_name):
@@ -3378,7 +3856,7 @@ async def parse_c5_endpoint(file: UploadFile = File(...), db: Session = Depends(
 
     return {
         "success": True,
-        "filename": file.filename,
+        "filename": filename,
         "stores": list(stores_dict.values()),
         "items": parsed_items,
         "summary": {
@@ -3586,7 +4064,119 @@ def get_menu_cache_status(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
         "human_age": human_age
     }
 
+def parse_c5_template_headers(wb) -> dict:
+    """
+    Parses headers from an openpyxl Workbook, prioritizing raw string column headers
+    and mapping ArrayFormula column headers only for unique formula calculation columns.
+    """
+    import re
+    if 'Item' not in wb.sheetnames:
+        return {}
+    ws = wb['Item']
+    header_map = {}
+    
+    # 1. Pass 1: standard string headers (e.g. Category at col 7, Item at col 9, Description at col 11)
+    for col in range(1, ws.max_column + 1):
+        val = ws.cell(row=1, column=col).value
+        if isinstance(val, str) and val.strip():
+            header_map[val.strip()] = col - 1
+            
+    # 2. Pass 2: formula headers (e.g. Current Slash Price (%) at col 33, Current Slash Price (Rp) at col 34)
+    for col in range(1, ws.max_column + 1):
+        val = ws.cell(row=1, column=col).value
+        if hasattr(val, 'text'):
+            m = re.search(r'\"([^\"]+)\"', val.text)
+            if m:
+                h_name = m.group(1).strip()
+                if h_name not in header_map:
+                    header_map[h_name] = col - 1
+                    
+    return header_map
+
 MENU_ITEMS_CACHE = {}  # excel_path -> (mtime, raw_items)
+
+def _format_epoch_ms_wib(epoch_ms: Union[int, float, str, None]) -> str:
+    """Format epoch ms timestamp to human-readable WIB datetime string."""
+    if not epoch_ms:
+        return ""
+    try:
+        val = int(epoch_ms)
+        # Check if timestamp is in seconds instead of milliseconds
+        if val < 10000000000:
+            val *= 1000
+        utc_dt = datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
+        wib_dt = utc_dt.astimezone(timezone(timedelta(hours=7)))
+        return wib_dt.strftime("%d %b %Y, %H:%M WIB")
+    except Exception:
+        return str(epoch_ms)
+
+def _extract_shopee_dish_promo_info(dish: dict) -> dict:
+    """Extract promo details and lock status from Shopee dish API response dictionary."""
+    if not isinstance(dish, dict):
+        return {"is_flash_sale": False, "is_price_locked": False, "promo_details": None}
+
+    fs = dish.get("flash_sale_dish_discount")
+    if fs and isinstance(fs, dict):
+        disc = fs.get("discount") or {}
+        # Shopee price in nano-units / 100,000
+        disc_p = float(disc.get("discount_price", 0)) / 100000.0 if disc.get("discount_price") else 0
+        raw_pct = disc.get("discount_percentage", 0)
+        pct_val = (float(raw_pct) / 100.0) if raw_pct else 0
+        pct_str = f"{int(pct_val)}%" if pct_val.is_integer() else f"{pct_val:.1f}%"
+
+        start_time_str = _format_epoch_ms_wib(fs.get("start_time") or disc.get("create_time"))
+        end_time_str = _format_epoch_ms_wib(fs.get("end_time"))
+
+        promo_details = {
+            "type": "FLASH_SALE",
+            "name": disc.get("flash_sale_dish_name") or disc.get("dish_name") or dish.get("name", ""),
+            "discount_price": disc_p,
+            "discount_percentage": pct_str,
+            "stock": disc.get("stock", 0),
+            "sold_num": disc.get("sold_num", 0),
+            "limit_per_user": disc.get("limit_per_user", 0),
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "campaign_id": str(fs.get("campaign_id") or disc.get("timeslot_id") or "")
+        }
+        return {
+            "is_flash_sale": True,
+            "is_price_locked": True,
+            "promo_type": "FLASH_SALE",
+            "promo_value": pct_str if pct_val > 0 else (f"Rp {disc_p:,.0f}" if disc_p > 0 else "Flash Sale"),
+            "promo_details": promo_details
+        }
+
+    it = dish.get("item_discount")
+    if it and isinstance(it, dict):
+        disc_p = float(it.get("discount_price", 0)) / 100000.0 if it.get("discount_price") else 0
+        raw_pct = it.get("discount_percentage", 0)
+        pct_val = (float(raw_pct) / 100.0) if raw_pct else 0
+        pct_str = f"{int(pct_val)}%" if pct_val.is_integer() else f"{pct_val:.1f}%"
+
+        start_time_str = _format_epoch_ms_wib(it.get("campaign_start_time"))
+        end_time_str = _format_epoch_ms_wib(it.get("campaign_end_time"))
+
+        promo_details = {
+            "type": "ITEM_DISCOUNT",
+            "discount_price": disc_p,
+            "discount_percentage": pct_str,
+            "stock": it.get("stock", 0),
+            "sold_num": it.get("sold_num", 0),
+            "limit_per_order": it.get("limit_per_order", 0),
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "campaign_id": str(it.get("campaign_id") or "")
+        }
+        return {
+            "is_flash_sale": False,
+            "is_price_locked": False,
+            "promo_type": "PERCENTAGE" if pct_val > 0 else "NOMINAL",
+            "promo_value": pct_str if pct_val > 0 else (f"Rp {disc_p:,.0f}" if disc_p > 0 else "Diskon Menu"),
+            "promo_details": promo_details
+        }
+
+    return {"is_flash_sale": False, "is_price_locked": False, "promo_details": None}
 
 def get_parsed_menu_items(excel_path: str) -> list:
     path = Path(excel_path)
@@ -3599,16 +4189,14 @@ def get_parsed_menu_items(excel_path: str) -> list:
             return cached[1]
             
         import openpyxl
-        wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
+        wb = openpyxl.load_workbook(excel_path, data_only=False)
         if 'Item' not in wb.sheetnames:
             return []
         sheet = wb['Item']
-        rows = list(sheet.iter_rows(values_only=True))
-        if len(rows) <= 1:
+        if sheet.max_row <= 1:
             return []
             
-        headers = rows[0]
-        header_map = {str(h).strip(): i for i, h in enumerate(headers) if h is not None}
+        header_map = parse_c5_template_headers(wb)
         
         required_cols = ['Item ID', 'Category', 'Item', 'Current Real Price (Rp)']
         for col in required_cols:
@@ -3616,32 +4204,46 @@ def get_parsed_menu_items(excel_path: str) -> list:
                 logger.warning(f"Missing column '{col}' in Excel sheet mapping: {list(header_map.keys())}")
                 return []
                 
+        # Also load data_only=True workbook to read evaluated/cached values if needed
         raw_items = []
-        for row in rows[1:]:
+        for row in sheet.iter_rows(min_row=2, values_only=True):
             if not row or all(v is None for v in row):
                 continue
                 
-            item_id = str(row[header_map['Item ID']]).strip() if row[header_map['Item ID']] is not None else ""
-            category_id = str(row[header_map['Category ID']]).strip() if 'Category ID' in header_map and row[header_map['Category ID']] is not None else ""
-            category_name = str(row[header_map['Category']]).strip() if row[header_map['Category']] is not None else ""
-            item_name = str(row[header_map['Item']]).strip() if row[header_map['Item']] is not None else ""
-            desc = str(row[header_map['Description']]).strip() if 'Description' in header_map and row[header_map['Description']] is not None else ""
+            def get_col_val(col_name, default=""):
+                if col_name in header_map:
+                    idx = header_map[col_name]
+                    if idx < len(row) and row[idx] is not None:
+                        return row[idx]
+                return default
+                
+            item_id = str(get_col_val('Item ID', '')).strip()
+            category_id = str(get_col_val('Category ID', '')).strip()
+            category_name = str(get_col_val('Category', '')).strip()
+            item_name = str(get_col_val('Item', '')).strip()
+            desc = str(get_col_val('Description', '')).strip()
             
-            p_val = row[header_map['Current Real Price (Rp)']]
-            fake_p_val = row[header_map['Current Fake Price (Rp)']] if 'Current Fake Price (Rp)' in header_map else None
+            p_val = get_col_val('Current Real Price (Rp)', 0)
+            fake_p_val = get_col_val('Current Fake Price (Rp)', 0)
             try:
-                price_val = int(float(p_val)) if p_val is not None else 0
+                price_val = int(float(p_val)) if p_val is not None and str(p_val).strip() != "" else 0
             except:
                 price_val = 0
 
             try:
-                fake_price_val = int(float(fake_p_val)) if fake_p_val is not None else 0
+                fake_price_val = int(float(fake_p_val)) if fake_p_val is not None and str(fake_p_val).strip() != "" else 0
             except:
                 fake_price_val = 0
                 
-            avail_val = str(row[header_map['Availability']]).strip() if 'Availability' in header_map and row[header_map['Availability']] is not None else "Available"
+            avail_val = str(get_col_val('Availability', 'Available')).strip() or "Available"
+            is_promo_col = str(get_col_val('Sedang promo', '')).strip().lower()
             
-            is_promo_col = str(row[header_map['Sedang promo']]).strip().lower() if 'Sedang promo' in header_map and row[header_map['Sedang promo']] is not None else ""
+            slash_pct_raw = str(get_col_val('Current Slash Price (%)', '')).strip()
+            slash_rp_raw = get_col_val('Current Slash Price (Rp)', 0)
+            try:
+                slash_rp_val = int(float(slash_rp_raw)) if slash_rp_raw is not None and str(slash_rp_raw).strip() != "" else 0
+            except:
+                slash_rp_val = 0
             
             raw_items.append({
                 "id": item_id,
@@ -3652,7 +4254,9 @@ def get_parsed_menu_items(excel_path: str) -> list:
                 "price": price_val,
                 "original_price": fake_price_val,
                 "availability": avail_val,
-                "is_promo_col": is_promo_col
+                "is_promo_col": is_promo_col,
+                "slash_pct": slash_pct_raw,
+                "slash_rp": slash_rp_val
             })
             
         MENU_ITEMS_CACHE[excel_path] = (mtime, raw_items)
@@ -3722,21 +4326,151 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
     except Exception as ex:
         logger.warning(f"Error querying promo audit trails: {ex}")
 
+    # If outlet is Shopee, load latest captured dishes JSON snapshot to enrich promo/flash-sale metadata
+    shopee_dish_map = {}
+    outlet_obj = db.query(Outlet).filter(Outlet.id == outlet_id).first()
+    if outlet_obj and (outlet_obj.platform or "").lower() == "shopee":
+        try:
+            shopee_api_dir = BASE_DIR / "shopee" / "API"
+            store_id_str = str(outlet_obj.store_id or "").strip()
+            cands = []
+            if store_id_str:
+                cands.append(shopee_api_dir / f"menu-response-{store_id_str}.json")
+            cands.append(shopee_api_dir / "menu-response.json")
+            for cp in cands:
+                if cp.exists():
+                    with open(cp, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    catalogs = data.get("data", {}).get("catalogs", []) if isinstance(data, dict) else []
+                    for cat in catalogs:
+                        for dish in cat.get("dishes", []):
+                            d_id = str(dish.get("id"))
+                            if d_id:
+                                shopee_dish_map[d_id] = dish
+                    if shopee_dish_map:
+                        break
+        except Exception as ex:
+            logger.warning(f"Failed loading Shopee menu snapshot: {ex}")
+
     raw_items = get_parsed_menu_items(excel_path)
     
     items = []
     for ri in raw_items:
-        is_in_promo = (ri["is_promo_col"] in ("ya", "yes", "true", "1")) or (ri["original_price"] > ri["price"] and ri["original_price"] > 0) or (ri["id"] in promo_item_ids)
+        slash_pct_str = ri.get("slash_pct", "")
+        slash_rp_val = ri.get("slash_rp", 0)
+        
+        # In catalog Excel (C5):
+        # 'Current Fake Price (Rp)' (ri["original_price"]) is base price (e.g. 11.000)
+        # 'Current Real Price (Rp)' (ri["price"]) is selling price after discount (e.g. 9.900)
+        # If no fake price, base price is price.
+        fake_p = ri.get("original_price", 0)
+        real_p = ri.get("price", 0)
+        
+        base_p = fake_p if fake_p > 0 else real_p
+        selling_p = real_p
+        
+        has_pct = bool(slash_pct_str and slash_pct_str not in ("0%", "0", ""))
+        has_rp = bool(slash_rp_val and slash_rp_val > 0)
+        
+        has_promo_col = ri["is_promo_col"] in ("ya", "yes", "true", "1")
+        has_price_diff = base_p > selling_p and selling_p > 0
+        has_audit_lock = ri["id"] in promo_item_ids
+        
+        is_in_promo = has_pct or has_rp or has_promo_col or has_price_diff or has_audit_lock
+        
+        # Determine promo type and price lock status
+        promo_type = "NONE"
+        promo_value = ""
+        is_price_locked = False
+        is_flash_sale = False
+        promo_details = None
+
+        # Check Shopee live snapshot metadata first if present
+        dish_snapshot = shopee_dish_map.get(str(ri["id"]))
+        if dish_snapshot:
+            shopee_promo = _extract_shopee_dish_promo_info(dish_snapshot)
+            if shopee_promo.get("is_flash_sale") or shopee_promo.get("promo_details"):
+                is_flash_sale = shopee_promo.get("is_flash_sale", False)
+                is_price_locked = shopee_promo.get("is_price_locked", False)
+                promo_type = shopee_promo.get("promo_type", "NONE")
+                promo_value = shopee_promo.get("promo_value", "")
+                promo_details = shopee_promo.get("promo_details")
+                is_in_promo = True
+
+        if not promo_details:
+            name_lower = ri["name"].lower()
+            is_name_nominal = "nominal" in name_lower
+            is_name_percentage = "persen" in name_lower or "percentage" in name_lower or "%" in name_lower
+
+            if is_name_nominal:
+                promo_type = "NOMINAL"
+                diff = (base_p - selling_p) if (base_p > selling_p and base_p > 0) else slash_rp_val
+                promo_value = f"Rp {diff:,}" if diff > 0 else (f"Rp {slash_rp_val:,}" if slash_rp_val > 0 else "Nominal")
+                is_price_locked = True
+            elif is_name_percentage:
+                promo_type = "PERCENTAGE"
+                if has_pct:
+                    promo_value = slash_pct_str
+                elif base_p > selling_p and base_p > 0:
+                    pct_calc = round(((base_p - selling_p) / base_p) * 100)
+                    promo_value = f"{pct_calc}%"
+                else:
+                    promo_value = "%"
+                is_price_locked = False
+            elif has_pct:
+                promo_type = "PERCENTAGE"
+                promo_value = slash_pct_str
+                is_price_locked = False  # Percentage promo allows base price changes
+            elif has_rp:
+                promo_type = "NOMINAL"
+                promo_value = f"Rp {slash_rp_val:,}"
+                is_price_locked = True   # Nominal promo locks base price
+            elif is_in_promo:
+                # Fallback deduction if % or Rp not explicitly formatted
+                if has_price_diff:
+                    diff = base_p - selling_p
+                    pct_exact = (diff / base_p) * 100
+                    # If exact standard round discount tier (e.g. 10%, 15%, 20%, 25%, 30%, 50%), treat as percentage
+                    if abs(pct_exact - round(pct_exact)) < 0.01 and int(round(pct_exact)) % 5 == 0:
+                        promo_type = "PERCENTAGE"
+                        promo_value = f"{int(round(pct_exact))}%"
+                        is_price_locked = False
+                    else:
+                        promo_type = "NOMINAL"
+                        promo_value = f"Rp {diff:,}"
+                        is_price_locked = True
+                else:
+                    promo_type = "NOMINAL"
+                    promo_value = "Promo Aktif"
+                    is_price_locked = False
+
+        # Discounted selling price if item is in promo:
+        disc_price = None
+        if promo_details and promo_details.get("discount_price"):
+            disc_price = int(promo_details["discount_price"])
+        elif is_in_promo and selling_p > 0 and selling_p < base_p:
+            disc_price = selling_p
+        elif is_in_promo and (has_pct or has_rp):
+            disc_price = selling_p
+
         items.append({
             "id": ri["id"],
             "category_id": ri["category_id"],
             "category": ri["category"],
             "name": ri["name"],
             "description": ri["description"],
-            "price": ri["price"],
-            "original_price": ri["original_price"],
+            "price": base_p,                       # Base fake price to display & edit (e.g. 11.000)
+            "original_price": base_p,              # Base normal price (11.000)
+            "discounted_price": disc_price,        # Selling price after promo (e.g. 9.900)
+            "slash_pct": ri.get("slash_pct", ""),
+            "slash_rp": ri.get("slash_rp", 0),
             "availability": ri["availability"],
-            "is_in_promo": is_in_promo
+            "is_in_promo": is_in_promo,
+            "is_flash_sale": is_flash_sale,
+            "promo_type": promo_type,
+            "promo_value": promo_value,
+            "is_price_locked": is_price_locked,
+            "promo_details": promo_details
         })
     return items
 
@@ -3871,6 +4605,27 @@ class ShopeeOTPRequest(BaseModel):
 class ShopeeOTPChannelRequest(BaseModel):
     username: str
     channel: str  # "sms" | "whatsapp"
+
+@app.post("/api/shopee/cancel-otp")
+def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
+    """Cancels OTP waiting state for the given username and cleans up request files."""
+    username = req.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+
+    shopee_data_dirs = [
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data"
+    ]
+    for d in shopee_data_dirs:
+        fpath = d / f"otp_request_{username}.json"
+        if fpath.exists():
+            try:
+                fpath.unlink(missing_ok=True)
+            except Exception as e:
+                log.error(f"Error removing OTP request file {fpath}: {e}")
+
+    return {"status": "SUCCESS", "message": f"OTP request cancelled for {username}"}
 
 @app.post("/api/shopee/select-otp-channel")
 def select_shopee_otp_channel(req: ShopeeOTPChannelRequest):
