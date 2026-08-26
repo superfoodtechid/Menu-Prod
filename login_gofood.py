@@ -36,10 +36,10 @@ def safe_goto_with_retry(
     page,
     url,
     wait_until="domcontentloaded",
-    timeout=25000,
+    timeout=40000,
     max_attempts=2,
     ready_selector=None,
-    ready_timeout=15000,
+    ready_timeout=35000,
 ):
     """
     Mekanisme navigasi aman dengan reload 2x (total 3 attempt) jika terjadi Timeout Error
@@ -417,66 +417,20 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
     chrome_process = None
     chrome_log = None
     try:
-        import socket
-        import subprocess
-        import time
-        use_system_chromium = os.path.exists("/usr/lib/chromium/chromium") or os.path.exists("/usr/bin/chromium")
-
-        if use_system_chromium:
-            def get_free_port():
-                s = socket.socket()
-                s.bind(('', 0))
-                port = s.getsockname()[1]
-                s.close()
-                return port
-
-            cdp_port = get_free_port()
-            chromium_bin = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else "/usr/bin/chromium"
-            chrome_args = [
-                chromium_bin,
-                "--no-sandbox",
-                "--no-zygote",
-                "--in-process-gpu",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--disable-gpu-sandbox",
-                "--dbus-stub",
-                f"--remote-debugging-port={cdp_port}",
-                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                '--window-size=1366,768'
+        p = sync_playwright().start()
+        chromium_bin = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else ("/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else None)
+        browser = p.chromium.launch(
+            headless=headless_mode,
+            executable_path=chromium_bin,
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--disable-infobars',
+                '--no-sandbox',
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--no-zygote'
             ]
-            if use_proxy and proxy_server:
-                chrome_args.append(f"--proxy-server={proxy_server}")
-
-            if headless_mode:
-                chrome_args.append("--headless=new")
-
-            os.makedirs("logs", exist_ok=True)
-            chrome_log = open("logs/chrome_err.log", "a")
-            chrome_process = subprocess.Popen(
-                chrome_args,
-                stdout=subprocess.DEVNULL,
-                stderr=chrome_log
-            )
-            time.sleep(4.0)
-            poll = chrome_process.poll()
-            if poll is not None:
-                print(f"ERROR: Chromium process exited immediately with code {poll}!")
-
-            p = sync_playwright().start()
-            browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
-        else:
-            p = sync_playwright().start()
-            browser = p.chromium.launch(
-                headless=headless_mode,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-infobars',
-                    '--no-sandbox',
-                    '--disable-gpu',
-                    '--disable-dev-shm-usage'
-                ]
-            )
+        )
 
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -643,9 +597,9 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                             page,
                             "https://portal.gofoodmerchant.co.id/auth/login/email",
                             wait_until="domcontentloaded",
-                            timeout=25000,
+                            timeout=40000,
                             ready_selector='input:visible',
-                            ready_timeout=15000,
+                            ready_timeout=35000,
                         )
                     except Exception as email_nav_err:
                         print(f"   ⚠️ Halaman /auth/login/email gagal ({email_nav_err}). Mencoba buka /auth/login lalu pindah ke login Email...")
@@ -653,7 +607,7 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                             page,
                             "https://portal.gofoodmerchant.co.id/auth/login",
                             wait_until="domcontentloaded",
-                            timeout=25000,
+                            timeout=40000,
                         )
                         switched_to_email = False
                         for sel in [
@@ -677,20 +631,20 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                                     page,
                                     "https://portal.gofoodmerchant.co.id/auth/login/email",
                                     wait_until="domcontentloaded",
-                                    timeout=25000,
+                                    timeout=40000,
                                 )
                             except Exception:
                                 pass
-                        page.wait_for_selector('input:visible', timeout=15000, state="visible")
+                        page.wait_for_selector('input:visible', timeout=35000, state="visible")
                 else:
                     print(f"\n   ➡️ Membuka halaman login... (Percobaan {attempt + 1}/{max_login_attempts})")
                     safe_goto_with_retry(
                         page,
                         "https://portal.gofoodmerchant.co.id/auth/login",
                         wait_until="domcontentloaded",
-                        timeout=25000,
+                        timeout=40000,
                         ready_selector='input:visible',
-                        ready_timeout=15000,
+                        ready_timeout=35000,
                     )
 
                 time.sleep(1.0)
