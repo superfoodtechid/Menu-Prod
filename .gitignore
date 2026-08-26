@@ -32,8 +32,8 @@ shopee/data/session.json
 shopee/credentials.json
 
 # Local Browser data, user profiles & chrome sessions (recursive)
-**/chrome_profile*/
-**/chrome-profile*/
+**/chrome_profile*
+**/chrome-profile*
 **/browser_data/
 **/browser-data/
 **/portal_f_user_test/
@@ -57,6 +57,10 @@ backend.log
 shopee/data_to_get/
 outlet\ -info/data/
 **/data/
+C5.*
+O.C5 Superfood test*.xlsx
+council-report*
+council-transcript*
 
 # Node/Frontend
 web/node_modules/
@@ -72,6 +76,8 @@ creds_testing.json
 *.bak
 
 Gofood/API/*.json
+shopee/API/menu-response-*.json
 
 catanan/
+
 

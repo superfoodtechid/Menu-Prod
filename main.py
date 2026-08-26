@@ -93,11 +93,11 @@ def startup_event():
     exports_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"📂 Exports directory verified at: {exports_dir}")
 
-    # Launch background near real-time auto-sync loop (syncs Google Sheets every 3 minutes)
+    # Launch background auto-sync loop (syncs Google Sheets once every 24 hours)
     def _bg_auto_sync_loop():
         import time
-        time.sleep(15)  # Initial grace period after startup
-        logger.info("🔄 Background GSheets auto-sync worker started (interval: 3 mins)")
+        time.sleep(600)  # Grace period: wait 10 minutes after startup before initial background sync
+        logger.info("🔄 Background GSheets auto-sync worker started (interval: 24 hours)")
         while True:
             try:
                 from menu_core.database import SessionLocal
@@ -108,7 +108,9 @@ def startup_event():
                     db.close()
             except Exception as ex:
                 logger.warning(f"⚠️ Background auto-sync iteration error: {ex}")
-            time.sleep(180)  # Sync every 3 minutes
+            time.sleep(86400)  # Sync once every 24 hours
+
+
 
     import threading
     t = threading.Thread(target=_bg_auto_sync_loop, daemon=True)
@@ -485,17 +487,17 @@ def create_account(account: AccountCreate, db: Session = Depends(get_db)):
 LAST_SYNC_TIMESTAMP = 0.0
 SYNC_LOCK = threading.Lock()
 
-def check_and_auto_sync_sheets(db: Session, force: bool = False, min_interval_seconds: float = 60.0):
+def check_and_auto_sync_sheets(db: Session, force: bool = False, min_interval_seconds: float = 3600.0):
     global LAST_SYNC_TIMESTAMP
     now = time.time()
-    if force or (now - LAST_SYNC_TIMESTAMP > min_interval_seconds):
+    if force or (LAST_SYNC_TIMESTAMP > 0 and now - LAST_SYNC_TIMESTAMP > min_interval_seconds):
         if SYNC_LOCK.acquire(blocking=False):
             try:
-                logger.info("🔄 Real-time Auto-sync: Fetching latest merchants from Google Sheets for dropdown...")
-                sync_sheets(db)
                 LAST_SYNC_TIMESTAMP = time.time()
+                logger.info("🔄 Auto-sync: Fetching latest merchants from Google Sheets...")
+                sync_sheets(db)
             except Exception as e:
-                logger.warning(f"⚠️ Real-time Auto-sync Google Sheets warning: {e}")
+                logger.warning(f"⚠️ Auto-sync Google Sheets warning: {e}")
             finally:
                 SYNC_LOCK.release()
 
@@ -504,7 +506,8 @@ def list_accounts(
     refresh: bool = Query(default=False, description="Paksa sync ulang dari Google Sheets"),
     db: Session = Depends(get_db),
 ):
-    check_and_auto_sync_sheets(db, force=refresh, min_interval_seconds=60.0)
+    if refresh:
+        check_and_auto_sync_sheets(db, force=True)
     return db.query(Account).all()
 
 
@@ -567,7 +570,9 @@ def list_outlets(
     refresh: bool = Query(default=False, description="Paksa sync ulang dari Google Sheets"),
     db: Session = Depends(get_db),
 ):
-    check_and_auto_sync_sheets(db, force=refresh, min_interval_seconds=60.0)
+    if refresh:
+        check_and_auto_sync_sheets(db, force=True)
+
     platforms = normalize_platform_filters(platform)
     query = db.query(Outlet).options(joinedload(Outlet.account))
     if platforms:
