@@ -4,6 +4,14 @@ import time
 import requests
 import pandas as pd
 
+# Force urllib3 to use IPv4 only because IPv6 is broken/blocked on some hosts and causes 2.5m connection hangs
+try:
+    import urllib3.util.connection
+    import socket
+    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
+
 GSHEETS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ3tLKBNXDqRgBw0mNhKZFxgvKx-JoiTDzm_s5Ix1cm7O6HCv4IvExOLR2HSRVaXSsx82V348mcr9X4/pub?output=csv"
 GSHEETS_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

@@ -3,6 +3,15 @@ import json
 import sys
 import uuid
 import logging
+
+# Force urllib3 to use IPv4 only because IPv6 is broken/blocked on some hosts and causes connection hangs
+try:
+    import urllib3.util.connection
+    import socket
+    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
+
 import threading
 import time
 import builtins
