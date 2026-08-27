@@ -685,10 +685,19 @@ def get_push_session(
                                             confirm_btn.click()
                                             log.info("  👆 Tombol konfirmasi diklik.")
                                             time.sleep(3)
-                                    except:
+                                    except Exception:
                                         pass
+                        except RuntimeError as re:
+                            if "user membatalkan otp" in str(re).lower():
+                                log.error(f"❌ [PUSH_BROWSER] User membatalkan OTP untuk '{username}'. Membatalkan proses segera.")
+                                raise re
+                            raise re
                         except Exception as otp_err:
                             log.warning(f"  OTP check error: {otp_err}")
+                except RuntimeError as re:
+                    if "user membatalkan otp" in str(re).lower():
+                        raise re
+                    raise re
                 except Exception as detect_err:
                     log.debug(f"  OTP detect error: {detect_err}")
 
