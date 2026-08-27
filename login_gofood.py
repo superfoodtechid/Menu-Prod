@@ -467,16 +467,33 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
             req = route.request
             rtype = req.resource_type
             rurl = req.url.lower()
-            if rtype in ("image", "media", "font", "imageset"):
-                route.abort()
+            if rtype in ("image", "media", "imageset"):
+                try:
+                    route.fulfill(status=200, body=b"", content_type="image/png")
+                except Exception:
+                    try: route.continue_()
+                    except Exception: pass
+            elif rtype == "font":
+                try:
+                    route.fulfill(status=200, body=b"", content_type="font/woff2")
+                except Exception:
+                    try: route.continue_()
+                    except Exception: pass
             elif any(t in rurl for t in (
                 "google-analytics.com", "googletagmanager.com",
                 "newrelic.com", "raccoon.gojekapi.com", "lens-fc.golabs.io",
                 "sentry.io", "segment.io", "datadoghq.com", "hotjar.com", "clarity.ms"
             )):
-                route.abort()
+                try:
+                    route.fulfill(status=200, body="// blocked", content_type="application/javascript")
+                except Exception:
+                    try: route.continue_()
+                    except Exception: pass
             else:
-                route.continue_()
+                try:
+                    route.continue_()
+                except Exception:
+                    pass
 
         context.route("**/*", _route_filter)
 
@@ -1098,7 +1115,11 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                         print("   🤖 Halaman sudah berada di Menu Items. Menunggu capture...")
                     elif store_id_clean:
                         print(f"   🤖 Langsung navigasi ke halaman menu outlet {store_id_clean}...")
-                        safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/menu-items", wait_until="domcontentloaded")
+                        try:
+                            safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/menu-items", wait_until="domcontentloaded", timeout=25000)
+                        except Exception as nav_direct_err:
+                            print(f"   ⚠️ Navigasi langsung /menu-items timeout ({nav_direct_err}). Mencoba fallback via /gofood...")
+                            safe_goto_with_retry(page, "https://portal.gofoodmerchant.co.id/gofood", wait_until="domcontentloaded", timeout=25000)
                     else:
                         print("   🤖 Mengklik tab Menu di sidebar...")
                         tutup_semua_popup(page)
