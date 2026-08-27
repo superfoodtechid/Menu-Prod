@@ -8,7 +8,6 @@ export default function AdjustBar({
 }) {
   const [type, setType] = useState("nominal");
   const [val, setVal] = useState("");
-  const [rounding, setRounding] = useState("none");
 
   const parsedNum = parseFloat(val);
   const isNegative = !isNaN(parsedNum) && (parsedNum < 0 || String(val).trim().startsWith("-"));
@@ -17,7 +16,7 @@ export default function AdjustBar({
   const fire = () => {
     if (!isValid) return;
     const mode = isNegative ? "sub" : "add";
-    onApply(mode, type, Math.abs(parsedNum), rounding);
+    onApply(mode, type, Math.abs(parsedNum), "none");
   };
 
   const isOrange = theme === "orange";
@@ -92,25 +91,6 @@ export default function AdjustBar({
               </button>
             );
           })}
-        </div>
-      </div>
-
-      {/* Rounding Toggle */}
-      <div>
-        <p className="mb-1 text-[12px] font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Pembulatan</p>
-        <div className="inline-flex overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-0.5 shadow-xs">
-          {[["none", "Normal"], ["500", "Rp 500"], ["1000", "Rp 1rb"]].map(([r, label]) => (
-            <button
-              key={r}
-              type="button"
-              onClick={() => setRounding(r)}
-              className={`px-2.5 py-1.5 text-[12px] font-bold rounded-lg transition-colors cursor-pointer ${
-                rounding === r ? activeToggleStyle : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
         </div>
       </div>
 
