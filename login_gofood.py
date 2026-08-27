@@ -5,6 +5,7 @@ import sys
 import json
 import time
 import csv
+import random
 import requests
 from pathlib import Path
 from urllib.request import urlopen
@@ -15,7 +16,7 @@ from playwright.sync_api import sync_playwright
 # Muat file .env dari folder menu
 MENU_DIR = Path(__file__).resolve().parent
 ENV_PATH = MENU_DIR / ".env"
-load_dotenv(ENV_PATH)
+load_dotenv(ENV_PATH, override=True)
 
 # Master credential Google Sheet
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ3tLKBNXDqRgBw0mNhKZFxgvKx-JoiTDzm_s5Ix1cm7O6HCv4IvExOLR2HSRVaXSsx82V348mcr9X4/pub?gid=0&single=true&output=csv"
@@ -216,35 +217,46 @@ def ambil_otp_dari_endpoint(url_dasar, action="getOtp", label_email=None):
         query_params["label"] = label_email
     url_final = urlunparse(parsed._replace(query=urlencode(query_params)))
 
-    with urlopen(url_final, timeout=30) as response:
-        return response.read().decode("utf-8").strip()
+    try:
+        resp = requests.get(url_final, timeout=10)
+        if resp.status_code == 200:
+            return resp.text.strip()
+    except Exception:
+        pass
+
+    try:
+        with urlopen(url_final, timeout=10) as response:
+            return response.read().decode("utf-8").strip()
+    except Exception:
+        return ""
 
 
-def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_detik=1, otp_awal_override=None, timeout_detik=15):
+def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_detik=2, otp_awal_override=None, timeout_detik=40):
     """
-    Menunggu OTP terbaru yang berbeda dari nilai awal agar tidak memakai OTP sebelumnya.
-    otp_awal_override: Jika diisi, gunakan nilai ini sebagai baseline (snapshot sebelum OTP dikirim).
+    Menunggu OTP terbaru yang valid dari endpoint Gmail Apps Script.
     Jika dalam batas waktu tidak ada OTP baru yang masuk, kembalikan None.
     """
-    if otp_awal_override is not None:
-        otp_awal = otp_awal_override
-    else:
-        try:
-            otp_awal = ambil_otp_dari_endpoint(url_dasar, action=action, label_email=label_email)
-        except Exception:
-            otp_awal = ""
-    
     batas_waktu = time.time() + timeout_detik
-    print(f"   🤖 Polling OTP baru dari Gmail (interval: {interval_detik}s, max: {timeout_detik}s)...")
+    print(f"   🤖 Polling OTP dari Gmail (interval: {interval_detik}s, max: {timeout_detik}s)...")
 
+    attempt_count = 0
     while time.time() < batas_waktu:
-        time.sleep(interval_detik)
+        attempt_count += 1
+        sisa = max(0, int(batas_waktu - time.time()))
         try:
             otp_baru = ambil_otp_dari_endpoint(url_dasar, action=action, label_email=label_email)
-            if otp_baru and otp_baru != otp_awal:
-                return otp_baru
-        except Exception:
-            pass
+            if otp_baru and otp_baru.strip() and not otp_baru.strip().startswith("Error"):
+                val = otp_baru.strip()
+                if otp_awal_override and val == str(otp_awal_override).strip():
+                    print(f"   ⏳ [Polling #{attempt_count}] Menunggu email baru... (OTP lama terdeteksi: {val}, sisa: {sisa}s)")
+                else:
+                    print(f"   🎉 [Polling #{attempt_count}] OTP baru berhasil diterima dari Gmail: '{val}'!")
+                    return val
+            else:
+                print(f"   ⏳ [Polling #{attempt_count}] Email OTP belum masuk ke Gmail (sisa waktu: {sisa}s)...")
+        except Exception as e:
+            print(f"   ⚠️ [Polling #{attempt_count}] Error cek endpoint: {e}")
+        time.sleep(interval_detik)
 
     return None
 
@@ -428,7 +440,19 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                 '--no-sandbox',
                 '--disable-gpu',
                 '--disable-dev-shm-usage',
-                '--no-zygote'
+                '--no-zygote',
+                '--blink-settings=imagesEnabled=false',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-breakpad',
+                '--disable-component-update',
+                '--disable-default-apps',
+                '--disable-extensions',
+                '--disable-sync',
+                '--mute-audio',
+                '--no-first-run',
+                '--disable-features=Translate,OptimizationHints,MediaRouter,PaintHolding'
             ]
         )
 
@@ -438,7 +462,23 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
             proxy=proxy_config
         )
 
-        import random
+        # Block images, fonts, media, and 3rd party tracking analytics to speed up loading on high-CPU servers
+        def _route_filter(route):
+            req = route.request
+            rtype = req.resource_type
+            rurl = req.url.lower()
+            if rtype in ("image", "media", "font", "imageset"):
+                route.abort()
+            elif any(t in rurl for t in (
+                "google-analytics.com", "googletagmanager.com",
+                "newrelic.com", "raccoon.gojekapi.com", "lens-fc.golabs.io",
+                "sentry.io", "segment.io", "datadoghq.com", "hotjar.com", "clarity.ms"
+            )):
+                route.abort()
+            else:
+                route.continue_()
+
+        context.route("**/*", _route_filter)
 
         def normalize_token(raw_token):
             token = str(raw_token or "").strip()
@@ -472,10 +512,9 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                 context.add_cookies(cached_data['cookies'])
                 
                 page = context.new_page()
-                safe_goto_with_retry(page, "https://portal.gofoodmerchant.co.id/dashboard", wait_until="domcontentloaded")
-                time.sleep(2.0)
-
-                # Check if we are logged in (i.e. URL does not contain /auth or /login)
+                initial_dest = f"https://portal.gofoodmerchant.co.id/gofood/{str(store_id).strip()}/menu-items" if store_id else "https://portal.gofoodmerchant.co.id/dashboard"
+                safe_goto_with_retry(page, initial_dest, wait_until="domcontentloaded")
+                time.sleep(1.0)
                 current_url = page.url
                 if "/auth" not in current_url and "login" not in current_url:
                     token_candidate = normalize_token(cached_data.get('access_token'))
@@ -515,35 +554,10 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                             pass
 
                     if token_candidate:
-                        # Sesi terdeteksi, uji apakah navigasi ke menu-items tetap valid
-                        if store_id:
-                            store_id_cached = str(store_id).strip()
-                            safe_goto_with_retry(
-                                page,
-                                f"https://portal.gofoodmerchant.co.id/gofood/{store_id_cached}/menu-items",
-                                wait_until="domcontentloaded",
-                                timeout=45000,
-                            )
-                            time.sleep(2.0)
-                        
-                        # Verifikasi apakah URL di-redirect kembali ke auth/login
-                        if "/auth" in page.url or "login" in page.url:
-                            print(f"   ⚠️ Sesi kedaluwarsa saat membuka halaman menu ({page.url}). Memaksa fresh login ulang...")
-                            context.clear_cookies()
-                            try:
-                                page.close()
-                            except Exception:
-                                pass
-                            sanitized_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(cached_identifier).strip().lower())
-                            old_session = MENU_DIR / "Gofood" / f"session_gofood_{sanitized_id}.json"
-                            if old_session.exists():
-                                try: os.remove(old_session)
-                                except Exception: pass
-                        else:
-                            print(f"   ✅ Sesi berhasil dimuat! Melewati login OTP untuk {cached_identifier}.")
-                            access_token = token_candidate
-                            session_loaded_successfully = True
-                            logged_in_email = cached_identifier if "@" in str(cached_identifier) else None
+                        print(f"   ✅ Sesi berhasil dimuat! Melewati login OTP untuk {cached_identifier}.")
+                        access_token = token_candidate
+                        session_loaded_successfully = True
+                        logged_in_email = cached_identifier if "@" in str(cached_identifier) else None
                     else:
                         print(f"   ⚠️ Sesi terlihat login tetapi token tidak ditemukan untuk {cached_identifier}. Memaksa login ulang...")
                         context.clear_cookies()
@@ -675,38 +689,35 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                             )
                             if email_input:
                                 email_input.click()
-                                time.sleep(0.3)
+                                time.sleep(0.2)
                                 email_input.focus()
-                                time.sleep(0.3)
+                                time.sleep(0.2)
                                 for char in current_email:
                                     email_input.type(char, delay=0)
-                                    time.sleep(random.uniform(0.02, 0.08))
-                                time.sleep(0.5)
+                                    time.sleep(random.uniform(0.02, 0.05))
+                                time.sleep(0.3)
 
                                 submit_btn = page.locator('button:has-text("Lanjut"), button:has-text("Submit"), button:has-text("Masuk"), button[type="submit"]')
                                 if submit_btn.count() > 0 and submit_btn.first.is_visible():
                                     submit_btn.first.click()
                                 else:
                                     email_input.press("Enter")
-                                time.sleep(2.5)
 
-                                # --- Pre-snapshot OTP sebelum tombol OTP diklik ---
-                                if otp_endpoint:
-                                    try:
-                                        otp_snapshot_awal = ambil_otp_dari_endpoint(otp_endpoint, action=action_type, label_email=label_email_cfg)
-                                        print(f"   📸 Snapshot OTP awal: '{otp_snapshot_awal or '(kosong)'}' (sebelum OTP dikirim)")
-                                    except Exception:
-                                        otp_snapshot_awal = ""
-
-                                # Jika ada halaman pilihan login (password/OTP)
+                                # Segera tunggu dan klik tombol "Masuk dengan OTP" begitu muncul
                                 try:
-                                    btn_otp = page.locator('button:has-text("Masuk dengan OTP"), a:has-text("Masuk dengan OTP")').first
-                                    if btn_otp.count() > 0 and btn_otp.is_visible():
+                                    btn_otp_selector = 'button:has-text("Masuk dengan OTP"), a:has-text("Masuk dengan OTP"), button:has-text("OTP")'
+                                    btn_otp = page.wait_for_selector(btn_otp_selector, timeout=8000, state="visible")
+                                    if btn_otp:
                                         btn_otp.click()
-                                        print("   ✅ Tombol 'Masuk dengan OTP' diklik. OTP sedang dikirim...")
-                                        time.sleep(2)
+                                        print("   ✅ Tombol 'Masuk dengan OTP' berhasil diklik! OTP sedang dikirim...")
                                 except Exception:
-                                    pass
+                                    try:
+                                        btn_otp_fallback = page.locator('button:has-text("Masuk dengan OTP"), a:has-text("Masuk dengan OTP")').first
+                                        if btn_otp_fallback.count() > 0 and btn_otp_fallback.is_visible():
+                                            btn_otp_fallback.click(force=True)
+                                            print("   ✅ Tombol 'Masuk dengan OTP' diklik (force). OTP sedang dikirim...")
+                                    except Exception:
+                                        pass
 
                         # --- STEP 5: Automated OTP Polling & Fill ---
                         if otp_endpoint:
@@ -753,7 +764,7 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                                 try:
                                     print("   🤖 Polling OTP dari Gmail...")
                                     
-                                    otp_code = tunggu_otp_terbaru(otp_endpoint, action=action_type, label_email=label_email_cfg, interval_detik=3, otp_awal_override=otp_snapshot_awal, timeout_detik=25)
+                                    otp_code = tunggu_otp_terbaru(otp_endpoint, action=action_type, label_email=label_email_cfg, interval_detik=2, otp_awal_override=otp_snapshot_awal, timeout_detik=35)
                                     
                                     if otp_code and not (otp_code.isdigit() and len(otp_code) in (4, 6)):
                                         print(f"   ⚠️ OTP dari endpoint bukan format angka valid: {otp_code[:50]}...")
@@ -1081,50 +1092,46 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                     page.on("request", handle_request_passkey)
                     page.on("response", handle_response)
                     
-                    # 1. Coba klik Menu tab di sidebar dengan selector href yang presisi
-                    print("   🤖 Mengklik tab Menu di sidebar...")
-                    tutup_semua_popup(page)
-                    menu_clicked = False
-                    sidebar_locators = [
-                        'a[href="/gofood"]',
-                        'a[href*="/gofood"]',
-                        "aside a:has-text('Menu')",
-                        "nav a:has-text('Menu')",
-                        "a:has-text('Menu')",
-                        "text=Menu"
-                    ]
-                    for sel in sidebar_locators:
-                        try:
-                            loc = page.locator(sel)
-                            for i in range(loc.count()):
-                                candidate = loc.nth(i)
-                                if candidate.is_visible():
-                                    candidate.click(force=True)
-                                    menu_clicked = True
-                                    break
-                            if menu_clicked:
-                                break
-                        except Exception:
-                            continue
-                            
-                    if menu_clicked:
-                        print("   ✅ Berhasil mengklik tab Menu di sidebar.")
-                        tutup_semua_popup(page)
-                        page.wait_for_timeout(1000)
-                        
-                        # Cek apakah ada tutorial/popup lagi
-                        tutup_semua_popup(page)
-                    else:
-                        print("   ⚠️ Tab Menu di sidebar tidak ditemukan, mencoba langsung ke URL /gofood...")
-                        safe_goto_with_retry(page, "https://portal.gofoodmerchant.co.id/gofood", wait_until="domcontentloaded")
-                    
-                    # Cek apakah sudah otomatis ter-redirect ke halaman menu items (untuk single-branch)
+                    # 1. Navigasi cerdas: Cek apakah sudah di halaman menu items
                     current_url = page.url
                     if "/menu-items" in current_url:
-                        print("   🤖 Halaman otomatis beralih ke Menu Items (Single Branch). Menunggu capture...")
-                    else:
+                        print("   🤖 Halaman sudah berada di Menu Items. Menunggu capture...")
+                    elif store_id_clean:
                         print(f"   🤖 Langsung navigasi ke halaman menu outlet {store_id_clean}...")
-                        safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/", wait_until="domcontentloaded")
+                        safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/menu-items", wait_until="domcontentloaded")
+                    else:
+                        print("   🤖 Mengklik tab Menu di sidebar...")
+                        tutup_semua_popup(page)
+                        menu_clicked = False
+                        sidebar_locators = [
+                            'a[href="/gofood"]',
+                            'a[href*="/gofood"]',
+                            "aside a:has-text('Menu')",
+                            "nav a:has-text('Menu')",
+                            "a:has-text('Menu')",
+                            "text=Menu"
+                        ]
+                        for sel in sidebar_locators:
+                            try:
+                                loc = page.locator(sel)
+                                for i in range(loc.count()):
+                                    candidate = loc.nth(i)
+                                    if candidate.is_visible():
+                                        candidate.click(force=True)
+                                        menu_clicked = True
+                                        break
+                                if menu_clicked:
+                                    break
+                            except Exception:
+                                continue
+                                
+                        if menu_clicked:
+                            print("   ✅ Berhasil mengklik tab Menu di sidebar.")
+                            tutup_semua_popup(page)
+                            page.wait_for_timeout(500)
+                        else:
+                            print("   ⚠️ Tab Menu di sidebar tidak ditemukan, mencoba langsung ke URL /gofood...")
+                            safe_goto_with_retry(page, "https://portal.gofoodmerchant.co.id/gofood", wait_until="domcontentloaded")
                             
                     # Ultra-reliable Menu Capture Flow (2x max retries)
                     max_menu_retries = 2
