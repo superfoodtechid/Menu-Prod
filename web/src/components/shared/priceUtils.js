@@ -23,16 +23,18 @@ export function applyAdj(price, mode, type, val, rounding = "none") {
 export function checkViolation(platform, oldPrice, newPrice) {
   const o = Number(oldPrice) || 0;
   const n = Number(newPrice) || 0;
-  if (n <= o || o <= 0) return { isViolation: false, message: "" };
+  if (n === o || o <= 0 || n <= 0) return { isViolation: false, message: "" };
   const diff = n - o;
   const pct = (diff / o) * 100;
+  const absPct = Math.abs(pct);
+  const direction = pct > 0 ? "kenaikan" : "penurunan";
 
   if (platform === "gofood") {
-    if (pct > 15) return { isViolation: true, message: "GoFood: Maksimal kenaikan 15%." };
+    if (absPct > 15) return { isViolation: true, message: `GoFood: Maksimal ${direction} 15%.` };
   } else if (platform === "grab") {
-    if (pct > 15) return { isViolation: true, message: "GrabFood: Maksimal kenaikan 15% dan maks. 15x per bulan." };
+    if (absPct > 15) return { isViolation: true, message: `GrabFood: Maksimal ${direction} 15% dan maks. 15x per bulan.` };
   } else if (platform === "shopee") {
-    if (pct > 25) return { isViolation: true, message: "ShopeeFood: Maksimal kenaikan 25% dan maks. 1x per hari." };
+    if (absPct > 25) return { isViolation: true, message: `ShopeeFood: Maksimal ${direction} 25% dan maks. 1x per hari.` };
   }
   return { isViolation: false, message: "" };
 }

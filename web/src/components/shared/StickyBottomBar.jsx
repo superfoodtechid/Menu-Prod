@@ -17,23 +17,23 @@ export default function StickyBottomBar({
 
   return (
     <div className="fixed bottom-4 left-4 right-4 z-40 max-w-5xl mx-auto animate-fade-in">
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-3.5 sm:px-6 rounded-2xl bg-zinc-900/95 dark:bg-zinc-950/95 text-white backdrop-blur-md shadow-2xl border border-zinc-700/60 dark:border-zinc-800">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-3.5 sm:px-6 rounded-2xl bg-white/95 dark:bg-zinc-950/95 text-zinc-900 dark:text-white backdrop-blur-md shadow-2xl border border-zinc-200/90 dark:border-zinc-800">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-red-500/20 border border-red-500/30 text-red-400 font-bold shrink-0">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-red-500/10 dark:bg-red-500/20 border border-red-500/20 dark:border-red-500/30 text-red-600 dark:text-red-400 font-bold shrink-0">
             {totalChanges}
           </div>
           <div>
-            <div className="font-bold text-[14px] leading-tight flex items-center gap-2">
+            <div className="font-bold text-[14px] leading-tight flex items-center gap-2 text-zinc-900 dark:text-white">
               <span>{totalChanges} item harga disesuaikan</span>
               {violationCount > 0 && (
-                <span className="px-2 py-0.5 rounded-md bg-red-600/80 text-white text-[11px] font-bold">
+                <span className="px-2 py-0.5 rounded-md bg-red-600 text-white text-[11px] font-bold">
                   ⚠️ {violationCount} batas aturan terlampaui
                 </span>
               )}
             </div>
-            <p className="text-[12px] text-zinc-400">
+            <p className="text-[12px] text-zinc-500 dark:text-zinc-400">
               {violationCount > 0
-                ? "Periksa kembali kenaikan harga yang melebihi batas aplikator sebelum mengirim."
+                ? "Periksa kembali perubahan harga yang melebihi batas aplikator sebelum mengirim."
                 : "Perubahan siap dikirim dan diverifikasi ke portal merchant."}
             </p>
           </div>
@@ -45,7 +45,7 @@ export default function StickyBottomBar({
               type="button"
               onClick={onReset}
               disabled={pushing}
-              className="px-3.5 py-2 text-[13px] font-semibold text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-xl transition cursor-pointer"
+              className="px-3.5 py-2 text-[13px] font-semibold text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 rounded-xl transition cursor-pointer"
             >
               Reset
             </button>
