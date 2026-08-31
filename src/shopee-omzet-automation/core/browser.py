@@ -1587,10 +1587,19 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                             continue
 
                         log.warning(f"  ⚠️ Setelah verifikasi OTP, URL masih di: {driver.current_url}")
-                        otp_error_msg = "Kode OTP tidak valid atau tidak direspon oleh Shopee. Silakan coba masukkan lagi."
+                    except RuntimeError as re:
+                        if "user membatalkan otp" in str(re).lower():
+                            log.error(f"❌ [AUTH] User membatalkan OTP untuk '{username or phone}'. Menghentikan login segera.")
+                            raise re
+                        raise re
                     except Exception as otp_err:
                         log.error(f"❌ Gagal memasukkan Kode OTP: {otp_err}")
                         otp_error_msg = f"Gagal memproses OTP: {otp_err}"
+        except RuntimeError as re:
+            if "user membatalkan otp" in str(re).lower():
+                log.error(f"❌ [AUTH] Aborting login check loop immediately due to user OTP cancellation.")
+                raise re
+            raise re
         except Exception as _check_err:
             log.debug(f"  OTP / login check loop exception: {_check_err}")
 

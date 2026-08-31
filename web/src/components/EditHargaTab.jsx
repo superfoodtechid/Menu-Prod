@@ -1391,8 +1391,8 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                       Promo Nominal (Dikunci)
                                     </span>
                                   ) : isViolation ? (
-                                    <span className="px-2.5 py-1 rounded bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-semibold border border-red-200 dark:border-red-900/60 inline-block">
-                                      {violationMsg}
+                                    <span title={violationMsg} className="px-2.5 py-1 rounded bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-semibold border border-red-200 dark:border-red-900/60 inline-block">
+                                      {pctFmt} (Melebihi Batas)
                                     </span>
                                   ) : isEdited ? (
                                     <span className="px-2.5 py-1 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold border border-emerald-200 dark:border-emerald-900/60 inline-block">

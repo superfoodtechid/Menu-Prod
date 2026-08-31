@@ -12,10 +12,13 @@ services:
     volumes:
       - ./.env:/app/.env:ro
       - ./data:/app/data
+      - ./main.py:/app/main.py
+      - ./login_gofood.py:/app/login_gofood.py
       - ./Gofood:/app/Gofood
       - ./shopee:/app/shopee
       - ./grab:/app/grab
       - ./menu_core:/app/menu_core
+      - ./src:/app/src
       - ./src/shopee-omzet-automation/data:/app/src/shopee-omzet-automation/data
     networks:
       - foodmaster-network

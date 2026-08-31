@@ -4633,6 +4633,7 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
         raise HTTPException(status_code=400, detail="Username is required")
 
     shopee_data_dirs = [
+        BASE_DIR / "data",
         BASE_DIR / "src" / "shopee-omzet-automation" / "data",
         BASE_DIR / "shopee" / "data"
     ]
@@ -4647,9 +4648,9 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
         }
         try:
             fpath.write_text(json.dumps(request_data, indent=2))
-            log.info(f"🛑 [OTP] Updated OTP status to CANCELLED for {username} in {fpath}")
+            logger.info(f"🛑 [OTP] Updated OTP status to CANCELLED for {username} in {fpath}")
         except Exception as e:
-            log.error(f"Error writing CANCELLED to OTP file {fpath}: {e}")
+            logger.error(f"Error writing CANCELLED to OTP file {fpath}: {e}")
 
     try:
         from menu_core.database import SessionLocal
@@ -4664,11 +4665,17 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
                 j.error_message = "user membatalkan otp"
                 j.current_step = "Gagal: user membatalkan otp"
                 j.completed_at = datetime.utcnow()
-                log.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id}")
+                logger.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id}")
+            elif username.lower() in str(j.input_payload or "").lower():
+                j.status = "FAILED"
+                j.error_message = "user membatalkan otp"
+                j.current_step = "Gagal: user membatalkan otp"
+                j.completed_at = datetime.utcnow()
+                logger.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id} (via payload match)")
         db.commit()
         db.close()
     except Exception as dbe:
-        log.error(f"Error updating DB for cancelled OTP: {dbe}")
+        logger.error(f"Error updating DB for cancelled OTP: {dbe}")
 
     return {"status": "SUCCESS", "message": f"OTP request cancelled for {username}"}
 
