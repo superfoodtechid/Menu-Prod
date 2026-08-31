@@ -18,7 +18,6 @@ export default function AdjustBar({
     const mode = isNegative ? "sub" : "add";
     onApply(mode, type, Math.abs(parsedNum), "none");
   };
-
   const isOrange = theme === "orange";
   const containerStyle = isOrange
     ? "bg-orange-50/60 dark:bg-orange-950/20 border-orange-200/60 dark:border-orange-900/40"
