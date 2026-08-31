@@ -26,14 +26,14 @@ export default function StickyBottomBar({
             <div className="font-bold text-[14px] leading-tight flex items-center gap-2 text-zinc-900 dark:text-white">
               <span>{totalChanges} item harga disesuaikan</span>
               {violationCount > 0 && (
-                <span className="px-2 py-0.5 rounded-md bg-red-600 text-white text-[11px] font-bold">
-                  ⚠️ {violationCount} batas aturan terlampaui
+                <span className="px-2 py-0.5 rounded-md bg-rose-600 text-white text-[11px] font-bold">
+                  ⚠️ {violationCount} melebihi batas aturan
                 </span>
               )}
             </div>
             <p className="text-[12px] text-zinc-500 dark:text-zinc-400">
               {violationCount > 0
-                ? "Periksa kembali perubahan harga yang melebihi batas aplikator sebelum mengirim."
+                ? "Dilarang Push: Mohon perbaiki harga yang melanggar batas aturan sebelum mengirim."
                 : "Perubahan siap dikirim dan diverifikasi ke portal merchant."}
             </p>
           </div>
@@ -53,13 +53,18 @@ export default function StickyBottomBar({
           <button
             type="button"
             onClick={onOpenPush}
-            disabled={pushing}
-            className={`px-5 py-2 text-[14px] font-bold text-white rounded-xl shadow-lg transition flex items-center gap-2 cursor-pointer disabled:opacity-50 ${pushBtnBg}`}
+            disabled={pushing || violationCount > 0}
+            title={violationCount > 0 ? "Dilarang push: Perbaiki harga yang melebihi batas aturan aplikator terlebih dahulu" : ""}
+            className={`px-5 py-2 text-[14px] font-bold rounded-xl transition flex items-center gap-2 ${
+              violationCount > 0
+                ? "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed shadow-none border border-zinc-300 dark:border-zinc-700"
+                : `text-white shadow-lg cursor-pointer disabled:opacity-50 ${pushBtnBg}`
+            }`}
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
             </svg>
-            <span>{pushing ? "Memproses..." : `Push ${totalChanges} Perubahan`}</span>
+            <span>{pushing ? "Memproses..." : violationCount > 0 ? "Push Dinonaktifkan" : `Push ${totalChanges} Perubahan`}</span>
           </button>
         </div>
       </div>

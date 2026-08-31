@@ -51,7 +51,7 @@ def get_session_file() -> Path:
         _thread_local.session_file = Path(__file__).resolve().parent.parent / "data" / "session.json"
     return _thread_local.session_file
 
-def get_otp_code(username: str, phone: str = "", timeout: int = 600, error_msg: str = "", driver=None) -> str:
+def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: str = "", driver=None) -> str:
     script_dir = Path(__file__).resolve().parent.parent
     data_dir = script_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -741,7 +741,7 @@ def _trigger_and_extract_tokens(driver) -> tuple:
     return extract_tokens_from_driver(driver)
 
 
-def get_otp_code(username: str, phone: str = "", timeout: int = 180, error_msg: str = "", driver=None) -> str:
+def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: str = "", driver=None) -> str:
     script_dir = Path(__file__).resolve().parent.parent
     data_dir = script_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -2354,8 +2354,22 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                 driver.set_script_timeout(10)
                 user_data = driver.execute_async_script(api_js)
                 if user_data:
-                    active_id = str(user_data.get("merchantId") or "")
-                    active_name = user_data.get("merchantName") or "Unknown Merchant"
+                    logged_in_user = user_data.get("userName") or user_data.get("tocUserName") or ""
+                    if username and logged_in_user and username.lower() not in logged_in_user.lower():
+                        log.warning(f"⚠️ [MERCHANT] Active user in browser is '{logged_in_user}', but target is '{username}'. Initiating re-login with target credentials...")
+                        try:
+                            driver.delete_all_cookies()
+                            driver.execute_script("try{localStorage.clear();sessionStorage.clear();}catch(e){}")
+                        except: pass
+                        driver.get(PARTNER_LOGIN_URL)
+                        time.sleep(3)
+                        _perform_login(driver, wait, username=username, password=password, phone=phone, interactive=interactive)
+                        time.sleep(3)
+                        user_data = driver.execute_async_script(api_js)
+
+                    if user_data:
+                        active_id = str(user_data.get("merchantId") or "")
+                        active_name = user_data.get("merchantName") or "Unknown Merchant"
             except: pass
 
             # ── Step 4.5: Fallback to UI Name Matching ──

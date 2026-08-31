@@ -38,6 +38,16 @@ const TABS = [
       </svg>
     ),
   },
+  {
+    id: "session",
+    label: "Sesi",
+    badge: "Shopee",
+    icon: (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+      </svg>
+    ),
+  },
 ];
 
 export default function NavHeader({ activeTab, onTabChange, theme, onToggleTheme }) {
@@ -89,7 +99,7 @@ export default function NavHeader({ activeTab, onTabChange, theme, onToggleTheme
         <nav className="-mx-4 flex gap-1 overflow-x-auto px-4 pb-3 sm:mx-0 sm:px-0" aria-label="Menu utama">
           {TABS.map((tab) => {
             const isActive = activeTab === tab.id;
-            const isShopee = tab.id === "shopee-edit-harga";
+            const isShopee = tab.id === "shopee-edit-harga" || tab.id === "session";
 
             let activeClasses = "";
             if (isActive) {

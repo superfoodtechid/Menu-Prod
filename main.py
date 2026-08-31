@@ -376,13 +376,8 @@ def sync_sheets(db: Session = Depends(get_db)):
                 if pd.notna(user_z_val) and str(user_z_val).strip() not in ("-", "", "nan", "None"):
                     username = str(user_z_val).strip()
                 else:
-                    username = "superfoodapp"
-                
-                pwd_ab_val = row.get(pwd_col_ab)
-                if pd.notna(pwd_ab_val) and str(pwd_ab_val).strip() not in ("-", "", "nan", "None"):
-                    password = str(pwd_ab_val).strip()
-                else:
-                    password = "Master@00@"
+                    username = None
+                    password = ""
         elif platform == "grab":
             user_col_sf = "Nama Pengguna.1"
             user_col_mt = "Nama Pengguna"
@@ -4129,72 +4124,124 @@ def _format_epoch_ms_wib(epoch_ms: Union[int, float, str, None]) -> str:
     except Exception:
         return str(epoch_ms)
 
+def _format_shopee_period(start_ms: Union[int, float, str, None], end_ms: Union[int, float, str, None]) -> str:
+    """Format start and end epoch ms timestamps to Shopee WIB period string (e.g. 31/08/2026 11:00 - 31/08/2026 17:59 WIB)."""
+    def _fmt(ms):
+        if not ms:
+            return ""
+        try:
+            val = int(ms)
+            if val < 10000000000:
+                val *= 1000
+            utc_dt = datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
+            wib_dt = utc_dt.astimezone(timezone(timedelta(hours=7)))
+            return wib_dt.strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            return str(ms)
+
+    s = _fmt(start_ms)
+    e = _fmt(end_ms)
+    if s and e:
+        return f"{s} - {e} WIB"
+    return (s or e) + (" WIB" if (s or e) and not str(s or e).endswith("WIB") else "")
+
+def _normalize_shopee_pct(raw_pct) -> tuple[float, str]:
+    if not raw_pct:
+        return 0.0, ""
+    try:
+        val = float(raw_pct)
+    except (ValueError, TypeError):
+        return 0.0, ""
+    if val > 100:
+        val = val / 100.0
+    elif 0 < val <= 1.0:
+        val = val * 100.0
+    val_rounded = round(val, 1)
+    if val_rounded.is_integer():
+        return val, f"{int(val_rounded)}%"
+    return val, f"{val_rounded:.1f}%"
+
 def _extract_shopee_dish_promo_info(dish: dict) -> dict:
-    """Extract promo details and lock status from Shopee dish API response dictionary."""
+    """Extract promo details (both Flash Sale and regular Item Discount) and lock status from Shopee dish API response."""
     if not isinstance(dish, dict):
         return {"is_flash_sale": False, "is_price_locked": False, "promo_details": None}
 
+    # 1. Check for Regular Item Discount
+    it = dish.get("item_discount") or dish.get("dish_discount")
+    reg_details = None
+    if it and isinstance(it, dict):
+        disc_p = float(it.get("discount_price", 0)) / 100000.0 if it.get("discount_price") else 0
+        raw_pct_val = it.get("discount_percentage") or dish.get("discount_percentage") or 0
+        pct_val, pct_str = _normalize_shopee_pct(raw_pct_val)
+        start_ts = it.get("campaign_start_time") or it.get("start_time")
+        end_ts = it.get("campaign_end_time") or it.get("end_time")
+        period_str = _format_shopee_period(start_ts, end_ts)
+        reg_details = {
+            "type": "ITEM_DISCOUNT",
+            "name": it.get("discount_name") or (f"Diskon Menu ({pct_str} off)" if pct_str else "Diskon Menu"),
+            "display_name": f"Diskon Menu ({pct_str} off)" if pct_str else "Diskon Menu",
+            "discount_price": disc_p,
+            "discount_percentage": pct_str,
+            "stock": it.get("stock", 0),
+            "sold_num": it.get("sold_num", 0),
+            "limit_per_user": it.get("limit_per_user", 0),
+            "start_time": _format_epoch_ms_wib(start_ts),
+            "end_time": _format_epoch_ms_wib(end_ts),
+            "period": period_str,
+            "campaign_id": str(it.get("campaign_id") or ""),
+        }
+
+    # 2. Check for Flash Sale Discount
     fs = dish.get("flash_sale_dish_discount")
     if fs and isinstance(fs, dict):
         disc = fs.get("discount") or {}
         # Shopee price in nano-units / 100,000
         disc_p = float(disc.get("discount_price", 0)) / 100000.0 if disc.get("discount_price") else 0
-        raw_pct = disc.get("discount_percentage", 0)
-        pct_val = (float(raw_pct) / 100.0) if raw_pct else 0
-        pct_str = f"{int(pct_val)}%" if pct_val.is_integer() else f"{pct_val:.1f}%"
+        raw_pct_val = disc.get("discount_percentage") or fs.get("discount_percentage") or 0
+        pct_val, pct_str = _normalize_shopee_pct(raw_pct_val)
 
-        start_time_str = _format_epoch_ms_wib(fs.get("start_time") or disc.get("create_time"))
-        end_time_str = _format_epoch_ms_wib(fs.get("end_time"))
+        start_ts = fs.get("start_time") or disc.get("start_time") or disc.get("create_time")
+        end_ts = fs.get("end_time") or disc.get("end_time")
+        period_str = _format_shopee_period(start_ts, end_ts)
 
-        promo_details = {
+        fs_details = {
             "type": "FLASH_SALE",
-            "name": disc.get("flash_sale_dish_name") or disc.get("dish_name") or dish.get("name", ""),
+            "name": "Flash Sale",
+            "display_name": "Flash Sale",
             "discount_price": disc_p,
             "discount_percentage": pct_str,
             "stock": disc.get("stock", 0),
             "sold_num": disc.get("sold_num", 0),
             "limit_per_user": disc.get("limit_per_user", 0),
-            "start_time": start_time_str,
-            "end_time": end_time_str,
-            "campaign_id": str(fs.get("campaign_id") or disc.get("timeslot_id") or "")
+            "start_time": _format_epoch_ms_wib(start_ts),
+            "end_time": _format_epoch_ms_wib(end_ts),
+            "period": period_str,
+            "campaign_id": str(fs.get("campaign_id") or disc.get("timeslot_id") or ""),
         }
+        if reg_details:
+            fs_details["regular_discount"] = reg_details
+
         return {
             "is_flash_sale": True,
             "is_price_locked": True,
             "promo_type": "FLASH_SALE",
             "promo_value": pct_str if pct_val > 0 else (f"Rp {disc_p:,.0f}" if disc_p > 0 else "Flash Sale"),
-            "promo_details": promo_details
+            "promo_details": fs_details
         }
 
-    it = dish.get("item_discount")
-    if it and isinstance(it, dict):
-        disc_p = float(it.get("discount_price", 0)) / 100000.0 if it.get("discount_price") else 0
-        raw_pct = it.get("discount_percentage", 0)
-        pct_val = (float(raw_pct) / 100.0) if raw_pct else 0
-        pct_str = f"{int(pct_val)}%" if pct_val.is_integer() else f"{pct_val:.1f}%"
-
-        start_time_str = _format_epoch_ms_wib(it.get("campaign_start_time"))
-        end_time_str = _format_epoch_ms_wib(it.get("campaign_end_time"))
-
-        promo_details = {
-            "type": "ITEM_DISCOUNT",
-            "discount_price": disc_p,
-            "discount_percentage": pct_str,
-            "stock": it.get("stock", 0),
-            "sold_num": it.get("sold_num", 0),
-            "limit_per_order": it.get("limit_per_order", 0),
-            "start_time": start_time_str,
-            "end_time": end_time_str,
-            "campaign_id": str(it.get("campaign_id") or "")
-        }
+    # 3. Regular promo only
+    if reg_details:
+        disc_p = reg_details["discount_price"]
+        pct_str = reg_details["discount_percentage"]
+        raw_pct_val = it.get("discount_percentage") or dish.get("discount_percentage") or 0
+        pct_val, _ = _normalize_shopee_pct(raw_pct_val)
         return {
             "is_flash_sale": False,
             "is_price_locked": False,
             "promo_type": "PERCENTAGE" if pct_val > 0 else "NOMINAL",
             "promo_value": pct_str if pct_val > 0 else (f"Rp {disc_p:,.0f}" if disc_p > 0 else "Diskon Menu"),
-            "promo_details": promo_details
+            "promo_details": reg_details
         }
-
     return {"is_flash_sale": False, "is_price_locked": False, "promo_details": None}
 
 def get_parsed_menu_items(excel_path: str) -> list:
@@ -4212,8 +4259,6 @@ def get_parsed_menu_items(excel_path: str) -> list:
         if 'Item' not in wb.sheetnames:
             return []
         sheet = wb['Item']
-        if sheet.max_row <= 1:
-            return []
             
         header_map = parse_c5_template_headers(wb)
         
@@ -4558,18 +4603,17 @@ def get_sessions_status(db: Session = Depends(get_db)):
     cache_path = BASE_DIR / "master_merchants_cache.csv"
     phone_map = get_cached_phone_map(cache_path)
 
-    # Use eager loading with joinedload to solve N+1 queries
-    outlets = db.query(Outlet).options(joinedload(Outlet.account)).all()
+    # Query only active Shopee outlets by joining Account table
+    outlets = db.query(Outlet).join(Account).filter(Account.platform == "shopee", Outlet.is_active == True).options(joinedload(Outlet.account)).all()
     
     result = []
     for o in outlets:
-        platform = o.platform
-        if platform not in ("shopee", "gofood"):
+        platform = (o.platform or "").lower()
+        if platform != "shopee":
             continue
             
-        # Get phone number from mapping or fallback
         phone = phone_map.get(o.store_id)
-        if not phone and o.account and "@" in o.account.username:
+        if not phone and o.account:
             phone = o.account.username
             
         status_info = {
@@ -4579,39 +4623,110 @@ def get_sessions_status(db: Session = Depends(get_db)):
             "nama_outlet": o.nama_outlet,
             "nama_resto_final": o.nama_resto_final,
             "brand": o.brand,
-            "platform": platform,
             "has_session": False,
             "session_file": None,
             "last_active": None,
-            "phone": phone or o.store_id or "-"
+            "phone": phone or (o.account.username if o.account else "") or o.store_id or "-"
         }
         
-        if platform == "shopee":
-            # Sanitize profile name
-            merchant_name = o.merchant_name or o.nama_resto_final or o.nama_outlet or ''
-            profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
-            profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
+        # Sanitize profile name
+        merchant_name = o.merchant_name or o.nama_resto_final or o.nama_outlet or ''
+        profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
+        profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
+        
+        session_file = BASE_DIR / "shopee" / "data" / f"session_{profile_name}.json"
+        ts = get_cached_session_last_active(session_file)
+        if ts is not None:
+            status_info["has_session"] = True
+            status_info["session_file"] = f"session_{profile_name}.json"
+            status_info["last_active"] = ts
             
-            session_file = BASE_DIR / "shopee" / "data" / f"session_{profile_name}.json"
-            ts = get_cached_session_last_active(session_file)
-            if ts is not None:
-                status_info["has_session"] = True
-                status_info["session_file"] = f"session_{profile_name}.json"
-                status_info["last_active"] = ts
-                
-        elif platform == "gofood" and o.account:
-            ident_str = str(o.account.username).strip().lower()
-            sanitized = re.sub(r'[^a-zA-Z0-9_.-]', '_', ident_str)
-            session_file = BASE_DIR / "Gofood" / f"session_gofood_{sanitized}.json"
-            ts = get_cached_session_last_active(session_file)
-            if ts is not None:
-                status_info["has_session"] = True
-                status_info["session_file"] = f"session_gofood_{sanitized}.json"
-                status_info["last_active"] = ts
-                
         result.append(status_info)
         
     return result
+
+
+# ─── SHOPEE ASSIGN SESSION ENDPOINTS ─────────────────────────────────────────
+
+_assign_jobs: dict = {}  # ponytail: in-memory is fine; restart clears it, jobs are short-lived
+
+class AssignSessionRequest(BaseModel):
+    outlet_id: str
+
+@app.post("/api/shopee/assign-session")
+def assign_shopee_session(req: AssignSessionRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Trigger background headless login for outlet's Shopee account and save session file."""
+    import re, uuid as _uuid
+    outlet = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.id == req.outlet_id).first()
+    if not outlet:
+        raise HTTPException(status_code=404, detail="Outlet tidak ditemukan")
+    if outlet.platform != "shopee":
+        raise HTTPException(status_code=400, detail="Hanya outlet Shopee yang didukung")
+    if not outlet.account or not outlet.account.username or not outlet.account.password:
+        raise HTTPException(status_code=400, detail="Akun outlet tidak memiliki username/password")
+
+    job_id = str(_uuid.uuid4())
+    username = outlet.account.username
+    password = outlet.account.password
+    merchant_name = outlet.merchant_name or outlet.nama_resto_final or outlet.nama_outlet or username
+    profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
+    profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
+
+    _assign_jobs[job_id] = {"status": "RUNNING", "username": username, "error": None}
+
+    def _run(job_id: str, username: str, password: str, profile_name: str):
+        from shopee.core.push_browser import get_push_session
+        lock = PLATFORM_LOCKS.get("shopee")
+        if lock:
+            logger.info(f"🔒 Assign Sesi ({username}) waiting for Shopee job lock...")
+            lock.acquire()
+            logger.info(f"🔓 Assign Sesi ({username}) acquired Shopee job lock. Starting login...")
+        try:
+            session = get_push_session(username=username, password=password, target_name=profile_name, headless=True)
+            if session:
+                payload = {"username": username, **session, "saved_at": datetime.now().isoformat()}
+                payload_json = json.dumps(payload, indent=2)
+                for target_path in [
+                    BASE_DIR / "shopee" / "data" / f"session_{profile_name}.json",
+                    BASE_DIR / "shopee" / "data" / f"session_{username}.json",
+                    BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"session_{username}.json",
+                    BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"session_{profile_name}.json",
+                ]:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_text(payload_json)
+                _assign_jobs[job_id]["status"] = "DONE"
+            else:
+                _assign_jobs[job_id].update({"status": "FAILED", "error": "Login gagal atau timeout"})
+        except Exception as e:
+            _assign_jobs[job_id].update({"status": "FAILED", "error": str(e)})
+        finally:
+            if lock and lock.locked():
+                try:
+                    lock.release()
+                    logger.info(f"🔓 Assign Sesi ({username}) released Shopee job lock.")
+                except RuntimeError:
+                    pass
+
+    background_tasks.add_task(_run, job_id, username, password, profile_name)
+    return {"job_id": job_id, "username": username}
+
+@app.get("/api/shopee/assign-job-status/{job_id}")
+def get_assign_job_status(job_id: str):
+    """Poll status of a session assign job. Also surfaces OTP waiting state."""
+    if job_id not in _assign_jobs:
+        raise HTTPException(status_code=404, detail="Job tidak ditemukan")
+    job = _assign_jobs[job_id]
+    otp_waiting = False
+    for d in [BASE_DIR / "src" / "shopee-omzet-automation" / "data", BASE_DIR / "shopee" / "data"]:
+        otp_file = d / f"otp_request_{job['username']}.json"
+        if otp_file.exists():
+            try:
+                if json.loads(otp_file.read_text()).get("status") == "WAITING_OTP":
+                    otp_waiting = True
+                    break
+            except Exception:
+                pass
+    return {**job, "otp_waiting": otp_waiting}
 
 
 # ─── SHOPEE OTP ENDPOINTS ───────────────────────────────────────────────────
