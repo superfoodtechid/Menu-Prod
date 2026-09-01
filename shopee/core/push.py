@@ -310,10 +310,6 @@ def push_price_update_batch(
                 existing_dish=existing_dish
             )
 
-            # If token expired or API failed due to auth, clear client once to force re-boot on next item if needed
-            if not ok and client.last_error and ("token" in str(client.last_error).lower() or "auth" in str(client.last_error).lower()):
-                client = None
-
             if ok:
                 results.append({
                     "item_id": dish_id,
@@ -323,12 +319,15 @@ def push_price_update_batch(
                     "error_message": None
                 })
             else:
+                err_detail = client.last_error if client and client.last_error else "Sesi login tidak valid atau kadaluarsa (silakan Assign Sesi pada tab Sesi)"
+                if client and client.last_error and ("token" in str(client.last_error).lower() or "auth" in str(client.last_error).lower()):
+                    client = None
                 results.append({
                     "item_id": dish_id,
                     "item_name": target_name,
                     "new_price": new_price,
                     "success": False,
-                    "error_message": f"Gagal mengupdate hidangan via API: {client.last_error if client else 'Session error'}"
+                    "error_message": f"Gagal mengupdate hidangan via API: {err_detail}"
                 })
         except Exception as ex:
             results.append({

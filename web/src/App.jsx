@@ -16,7 +16,7 @@ export default function Home() {
     if (isSessionPath || requestedTab === "session") {
       return "session";
     }
-    return ["pull", "push", "edit-harga", "shopee-edit-harga"].includes(requestedTab) ? requestedTab : "pull";
+    return ["pull", "push", "edit-harga", "shopee-edit-harga", "session"].includes(requestedTab) ? requestedTab : "pull";
   });
   const getApiBaseUrl = () => {
     if (import.meta.env.VITE_API_URL) {

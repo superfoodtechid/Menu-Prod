@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import PlatformBadge from "./PlatformBadge";
-import { fmt, parse, applyAdj, checkShopeeViolation } from "./shared/priceUtils";
+import { fmt, parse, applyAdj, checkShopeeViolation, fmtPromoPct } from "./shared/priceUtils";
 import StepLabel from "./shared/StepLabel";
 import AdjustBar from "./shared/AdjustBar";
 import PushConfirmModal from "./shared/PushConfirmModal";
@@ -744,13 +744,21 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
           item_id: i.id,
           category_id: i.category_id || "",
           item_name: i.name || "",
-          new_price: curPrice
+          new_price: curPrice,
+          old_price: i.price,
         });
       }
     });
 
     if (updates.length === 0) {
       alert("Tidak ada perubahan harga untuk di-push.");
+      setPushing(false);
+      return;
+    }
+
+    const hasViolations = updates.some(u => checkShopeeViolation(u.old_price, u.new_price).isViolation);
+    if (hasViolations) {
+      alert("Tidak dapat melakukan push harga karena terdapat perubahan harga yang melanggar aturan Shopee (maksimal ±25%).");
       setPushing(false);
       return;
     }
@@ -764,7 +772,12 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         },
         body: JSON.stringify({
           outlet_id: selectedBrandId,
-          updates: updates
+          updates: updates.map(u => ({
+            item_id: u.item_id,
+            category_id: u.category_id,
+            item_name: u.item_name,
+            new_price: u.new_price
+          }))
         })
       });
 
@@ -1418,13 +1431,20 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                   <button
                     type="button"
                     onClick={openPushConfirmationModal}
-                    disabled={pushing || changedCount === 0}
-                    className="px-4 py-2 text-[13px] font-bold text-white bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 disabled:opacity-50 rounded-xl shadow-md transition-all shrink-0 flex items-center gap-2 cursor-pointer"
+                    disabled={pushing || changedCount === 0 || violationCount > 0}
+                    title={violationCount > 0 ? "Dilarang Push: Terdapat harga yang melebihi batas aturan ShopeeFood" : ""}
+                    className={`px-4 py-2 text-[13px] font-bold rounded-xl transition-all shrink-0 flex items-center gap-2 ${
+                      violationCount > 0
+                        ? "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed border border-zinc-300 dark:border-zinc-700"
+                        : changedCount === 0 || pushing
+                        ? "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed"
+                        : "bg-orange-600 hover:bg-orange-700 text-white shadow-md shadow-orange-600/20 active:scale-[0.98] cursor-pointer"
+                    }`}
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                     </svg>
-                    {pushing ? "Memproses..." : `Push ${changedCount} Perubahan`}
+                    <span>{pushing ? "Memproses..." : violationCount > 0 ? "Push Dinonaktifkan" : `Push ${changedCount} Perubahan`}</span>
                   </button>
                 </>
               }
@@ -1583,7 +1603,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                               </span>
                             ) : item.is_in_promo ? (
                               <span className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold border border-amber-300 dark:border-amber-700 inline-block">
-                                Promo ({item.promo_value || "Aktif"})
+                                Promo ({fmtPromoPct(item.promo_value) || "Aktif"})
                               </span>
                             ) : (
                               <span className="text-zinc-400 text-xs">-</span>

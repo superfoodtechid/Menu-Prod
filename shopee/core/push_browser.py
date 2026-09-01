@@ -38,7 +38,7 @@ PARTNER_DASHBOARD   = "https://partner.shopee.co.id/food/dashboard"
 PARTNER_LOGIN_URL   = "https://partner.shopee.co.id/login"
 TOKEN_TRIGGER_PAGE  = "https://partner.shopee.co.id/settings/shopee-food/business-hours-settings"
 
-OTP_WAIT_TIMEOUT    = 600  # 10 menit
+OTP_WAIT_TIMEOUT    = 900  # 15 menit
 
 
 # ── Driver ─────────────────────────────────────────────────────────────────────
@@ -362,8 +362,7 @@ def get_push_session(
         is_logged_in = any(kw in current_url for kw in ["dashboard", "merchant-selector", "onboarding"])
 
         if is_logged_in:
-            log.info("✅ [PUSH_BROWSER] Sudah login (sesi tersimpan di profil Chrome).")
-        else:
+            # Verify that the logged in account is indeed the target username
             # Try restoring session from saved token file before initiating fresh login
             session_file = AUTOMATION_DIR / "data" / f"session_{username}.json"
             if not session_file.exists():

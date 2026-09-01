@@ -42,3 +42,16 @@ export function checkViolation(platform, oldPrice, newPrice) {
 export function checkShopeeViolation(oldPrice, newPrice) {
   return checkViolation("shopee", oldPrice, newPrice);
 }
+
+export function fmtPromoPct(val) {
+  if (!val && val !== 0) return "";
+  const str = String(val).trim();
+  const num = parseFloat(str.replace("%", ""));
+  if (isNaN(num)) return str;
+  let normalized = num;
+  if (normalized > 100) {
+    normalized = normalized / 100;
+  }
+  const rounded = Math.round(normalized * 10) / 10;
+  return `${rounded % 1 === 0 ? Math.round(rounded) : rounded}%`;
+}

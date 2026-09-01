@@ -12,6 +12,11 @@ export default function PushConfirmModal({
 }) {
   if (!isOpen) return null;
   const totalSummaryItems = pushSummaryList.reduce((acc, s) => acc + (s.updates?.length || 0), 0);
+  const totalViolations = pushSummaryList.reduce(
+    (acc, s) => acc + (s.updates?.filter(u => u.isViolation).length || 0),
+    0
+  );
+  const hasViolation = totalViolations > 0;
   const isShopee = platform === "shopee";
 
   return (
@@ -60,7 +65,9 @@ export default function PushConfirmModal({
                         ({u.diff > 0 ? "+" : ""}{u.pct ? u.pct.toFixed(1) : 0}%)
                       </span>
                       {u.isViolation && (
-                        <span title={u.violationMsg} className="rounded bg-red-600 text-white text-[12px] font-bold px-1.5 py-0.5">! Batas</span>
+                        <span title={u.violationMsg} className="rounded bg-rose-600 text-white text-[12px] font-bold px-2 py-0.5">
+                          ⚠️ Melebihi Batas
+                        </span>
                       )}
                     </div>
                   </div>
@@ -70,16 +77,29 @@ export default function PushConfirmModal({
           ))}
         </div>
 
+        {hasViolation && (
+          <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs font-semibold flex items-center gap-2">
+            <span className="text-base">⛔</span>
+            <span>
+              <strong>Dilarang Push:</strong> Terdapat {totalViolations} perubahan harga yang melebihi batas aturan aplikator (maksimal {isShopee ? "±25% untuk ShopeeFood" : "kenaikan/penurunan harga"}). Mohon tutup modal ini dan perbaiki harga sebelum melanjutkan.
+            </span>
+          </div>
+        )}
+
         <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-100 dark:border-zinc-800">
           <button type="button" onClick={onClose} disabled={submitting}
-            className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-semibold text-[14px] rounded-xl cursor-pointer"
+            className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 font-semibold text-[14px] rounded-xl cursor-pointer"
           >Batal</button>
-          <button type="button" onClick={onConfirm} disabled={submitting}
-            className={`px-5 py-2 text-white font-bold text-[14px] rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer ${
-              isShopee ? "bg-gradient-to-r from-orange-600 to-red-600" : "bg-red-700 hover:bg-red-800"
+          <button type="button" onClick={onConfirm} disabled={submitting || hasViolation}
+            className={`px-5 py-2 text-white font-bold text-[14px] rounded-xl shadow-md flex items-center gap-1.5 ${
+              hasViolation
+                ? "bg-zinc-300 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed shadow-none"
+                : isShopee
+                ? "bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 cursor-pointer"
+                : "bg-red-700 hover:bg-red-800 cursor-pointer"
             }`}
           >
-            <span>{submitting ? "Memproses..." : "Konfirmasi & Push"}</span>
+            <span>{submitting ? "Memproses..." : hasViolation ? "Dilarang Push (Melebihi Batas)" : "Konfirmasi & Push"}</span>
           </button>
         </div>
       </div>
