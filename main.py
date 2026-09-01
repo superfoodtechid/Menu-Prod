@@ -4675,14 +4675,23 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
     _assign_jobs[job_id] = {"status": "RUNNING", "username": username, "error": None}
 
     def _run(job_id: str, username: str, password: str, profile_name: str):
-        from shopee.core.push_browser import get_push_session
+        from core import browser
+        session_file = BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"session_{username}.json"
+        browser.set_session_file(session_file)
         lock = PLATFORM_LOCKS.get("shopee")
         if lock:
             logger.info(f"🔒 Assign Sesi ({username}) waiting for Shopee job lock...")
             lock.acquire()
             logger.info(f"🔓 Assign Sesi ({username}) acquired Shopee job lock. Starting login...")
         try:
-            session = get_push_session(username=username, password=password, target_name=profile_name, headless=True)
+            session = browser.get_session(
+                username=username,
+                password=password,
+                headless=True,
+                close_browser=True,
+                target_name=profile_name,
+                interactive=True
+            )
             if session:
                 payload = {"username": username, **session, "saved_at": datetime.now().isoformat()}
                 payload_json = json.dumps(payload, indent=2)
