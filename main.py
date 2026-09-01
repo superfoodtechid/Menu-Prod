@@ -4675,15 +4675,19 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
     _assign_jobs[job_id] = {"status": "RUNNING", "username": username, "error": None}
 
     def _run(job_id: str, username: str, password: str, profile_name: str):
+        auto_dir = BASE_DIR / "src" / "shopee-omzet-automation"
+        if str(auto_dir) not in sys.path:
+            sys.path.insert(0, str(auto_dir))
         from core import browser
-        session_file = BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"session_{username}.json"
-        browser.set_session_file(session_file)
+
         lock = PLATFORM_LOCKS.get("shopee")
         if lock:
             logger.info(f"🔒 Assign Sesi ({username}) waiting for Shopee job lock...")
             lock.acquire()
             logger.info(f"🔓 Assign Sesi ({username}) acquired Shopee job lock. Starting login...")
         try:
+            session_file = auto_dir / "data" / f"session_{username}.json"
+            browser.set_session_file(session_file)
             session = browser.get_session(
                 username=username,
                 password=password,
