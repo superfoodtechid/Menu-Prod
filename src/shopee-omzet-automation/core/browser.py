@@ -640,7 +640,7 @@ def validate_session(tob_token: str, entity_id: str) -> bool:
 
 # ── Token Extraction ───────────────────────────────────────────────────────────
 
-def extract_tokens_from_driver(driver) -> tuple:
+def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tuple:
     tob_token = None
     entity_id = None
     for c in driver.get_cookies():
@@ -666,8 +666,8 @@ def extract_tokens_from_driver(driver) -> tuple:
             """)
         except: pass
 
-    # Fallback ke saved session file jika cookie driver tidak memberikan token
-    if not tob_token:
+    # Fallback ke saved session file HANYA jika diizinkan
+    if not tob_token and allow_file_fallback:
         try:
             saved = load_session()
             if saved and saved.get("shopee_tob_token"):
@@ -723,22 +723,22 @@ def get_all_cookies_dict(driver) -> dict:
     return {c["name"]: c["value"] for c in driver.get_cookies()}
 
 def _trigger_and_extract_tokens(driver) -> tuple:
-    # 1. Cek token langsung dari sesi aktif browser atau file sesi
-    tob_token, entity_id = extract_tokens_from_driver(driver)
-    if tob_token:
-        log.info(f"✅ Token extracted successfully. (entity_id: {entity_id})")
-        return tob_token, entity_id
-
-    # 2. Jika belum ada, baru buka halaman trigger
-    log.info("🔄 Token not found, navigating to trigger page...")
+    log.info("🔄 [SESSION] Navigating to business hours settings to trigger fresh token...")
     try:
+        try:
+            driver.delete_cookie("shopee_tob_token")
+        except Exception:
+            pass
         driver.get(TOKEN_TRIGGER_PAGE)
-        for _ in range(10):
-            tob_token, entity_id = extract_tokens_from_driver(driver)
-            if tob_token: return tob_token, entity_id
+        for _ in range(15):
             time.sleep(1)
-    except: pass
-    return extract_tokens_from_driver(driver)
+            tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
+            if tob_token:
+                log.info(f"✅ Fresh token extracted successfully from business-hours. (entity_id: {entity_id})")
+                return tob_token, entity_id
+    except Exception as e:
+        log.warning(f"⚠️ Error during business-hours trigger: {e}")
+    return extract_tokens_from_driver(driver, allow_file_fallback=False)
 
 
 def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: str = "", driver=None) -> str:
