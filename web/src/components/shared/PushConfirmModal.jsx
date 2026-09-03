@@ -18,6 +18,7 @@ export default function PushConfirmModal({
   );
   const hasViolation = totalViolations > 0;
   const isShopee = platform === "shopee";
+  const isBlocked = isShopee && hasViolation;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in" onClick={onClose}>
@@ -65,7 +66,9 @@ export default function PushConfirmModal({
                         ({u.diff > 0 ? "+" : ""}{u.pct ? u.pct.toFixed(1) : 0}%)
                       </span>
                       {u.isViolation && (
-                        <span title={u.violationMsg} className="rounded bg-rose-600 text-white text-[12px] font-bold px-2 py-0.5">
+                        <span title={u.violationMsg} className={`rounded text-white text-[12px] font-bold px-2 py-0.5 ${
+                          isShopee ? "bg-rose-600" : "bg-amber-500"
+                        }`}>
                           ⚠️ Melebihi Batas
                         </span>
                       )}
@@ -78,28 +81,37 @@ export default function PushConfirmModal({
         </div>
 
         {hasViolation && (
-          <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs font-semibold flex items-center gap-2">
-            <span className="text-base">⛔</span>
-            <span>
-              <strong>Dilarang Push:</strong> Terdapat {totalViolations} perubahan harga yang melebihi batas aturan aplikator (maksimal {isShopee ? "±25% untuk ShopeeFood" : "kenaikan/penurunan harga"}). Mohon tutup modal ini dan perbaiki harga sebelum melanjutkan.
-            </span>
-          </div>
+          isBlocked ? (
+            <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs font-semibold flex items-center gap-2">
+              <span className="text-base">⛔</span>
+              <span>
+                <strong>Dilarang Push:</strong> Terdapat {totalViolations} perubahan harga yang melebihi batas aturan ShopeeFood (maksimal ±25%). Mohon tutup modal ini dan perbaiki harga sebelum melanjutkan.
+              </span>
+            </div>
+          ) : (
+            <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs font-semibold flex items-center gap-2">
+              <span className="text-base">⚠️</span>
+              <span>
+                <strong>Peringatan Batas Aturan:</strong> Terdapat {totalViolations} perubahan harga yang melebihi batas aturan aplikator. Anda tetap dapat melanjutkan proses push untuk platform ini.
+              </span>
+            </div>
+          )
         )}
 
         <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-100 dark:border-zinc-800">
           <button type="button" onClick={onClose} disabled={submitting}
             className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 font-semibold text-[14px] rounded-xl cursor-pointer"
           >Batal</button>
-          <button type="button" onClick={onConfirm} disabled={submitting || hasViolation}
+          <button type="button" onClick={onConfirm} disabled={submitting || isBlocked}
             className={`px-5 py-2 text-white font-bold text-[14px] rounded-xl shadow-md flex items-center gap-1.5 ${
-              hasViolation
+              isBlocked
                 ? "bg-zinc-300 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed shadow-none"
                 : isShopee
                 ? "bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 cursor-pointer"
                 : "bg-red-700 hover:bg-red-800 cursor-pointer"
             }`}
           >
-            <span>{submitting ? "Memproses..." : hasViolation ? "Dilarang Push (Melebihi Batas)" : "Konfirmasi & Push"}</span>
+            <span>{submitting ? "Memproses..." : isBlocked ? "Push Dinonaktifkan" : "Konfirmasi & Push"}</span>
           </button>
         </div>
       </div>

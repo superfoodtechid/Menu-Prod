@@ -6,7 +6,8 @@ export default function StickyBottomBar({
   onOpenPush,
   onReset,
   pushing = false,
-  theme = "red" // "red" | "orange"
+  theme = "red", // "red" | "orange"
+  allowViolationPush = false
 }) {
   if (totalChanges === 0) return null;
 
@@ -14,6 +15,8 @@ export default function StickyBottomBar({
   const pushBtnBg = isOrange
     ? "bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 shadow-orange-950/20"
     : "bg-red-700 hover:bg-red-800 shadow-red-950/20";
+
+  const isBlocked = !allowViolationPush && violationCount > 0;
 
   return (
     <div className="fixed bottom-4 left-4 right-4 z-40 max-w-5xl mx-auto animate-fade-in">
@@ -26,14 +29,18 @@ export default function StickyBottomBar({
             <div className="font-bold text-[14px] leading-tight flex items-center gap-2 text-zinc-900 dark:text-white">
               <span>{totalChanges} item harga disesuaikan</span>
               {violationCount > 0 && (
-                <span className="px-2 py-0.5 rounded-md bg-rose-600 text-white text-[11px] font-bold">
+                <span className={`px-2 py-0.5 rounded-md text-white text-[11px] font-bold ${
+                  isBlocked ? "bg-rose-600" : "bg-amber-500"
+                }`}>
                   ⚠️ {violationCount} melebihi batas aturan
                 </span>
               )}
             </div>
             <p className="text-[12px] text-zinc-500 dark:text-zinc-400">
               {violationCount > 0
-                ? "Dilarang Push: Mohon perbaiki harga yang melanggar batas aturan sebelum mengirim."
+                ? isBlocked
+                  ? "Dilarang Push: Mohon perbaiki harga yang melanggar batas aturan sebelum mengirim."
+                  : "Peringatan: Terdapat harga yang melebihi batas aturan aplikator, namun tetap dapat di-push."
                 : "Perubahan siap dikirim dan diverifikasi ke portal merchant."}
             </p>
           </div>
@@ -53,10 +60,16 @@ export default function StickyBottomBar({
           <button
             type="button"
             onClick={onOpenPush}
-            disabled={pushing || violationCount > 0}
-            title={violationCount > 0 ? "Dilarang push: Perbaiki harga yang melebihi batas aturan aplikator terlebih dahulu" : ""}
+            disabled={pushing || isBlocked}
+            title={
+              isBlocked
+                ? "Dilarang push: Perbaiki harga yang melebihi batas aturan aplikator terlebih dahulu"
+                : violationCount > 0
+                ? "Peringatan: Terdapat harga yang melebihi batas aturan aplikator"
+                : ""
+            }
             className={`px-5 py-2 text-[14px] font-bold rounded-xl transition flex items-center gap-2 ${
-              violationCount > 0
+              isBlocked
                 ? "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed shadow-none border border-zinc-300 dark:border-zinc-700"
                 : `text-white shadow-lg cursor-pointer disabled:opacity-50 ${pushBtnBg}`
             }`}
@@ -64,7 +77,7 @@ export default function StickyBottomBar({
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
             </svg>
-            <span>{pushing ? "Memproses..." : violationCount > 0 ? "Push Dinonaktifkan" : `Push ${totalChanges} Perubahan`}</span>
+            <span>{pushing ? "Memproses..." : isBlocked ? "Push Dinonaktifkan" : `Push ${totalChanges} Perubahan`}</span>
           </button>
         </div>
       </div>
