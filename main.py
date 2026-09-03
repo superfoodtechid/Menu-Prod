@@ -339,7 +339,7 @@ def sync_sheets(db: Session = Depends(get_db)):
     all_outlets = db.query(Outlet).all()
     outlets_by_store_id = {o.store_id: o for o in all_outlets if o.store_id}
     outlets_by_fallback = {
-        (o.account_id, o.merchant_name, o.nama_outlet, o.cabang): o for o in all_outlets
+        (o.account_id, o.merchant_name, o.nama_outlet, o.cabang): o for o in all_outlets if not o.store_id
     }
 
     for _, row in df_live.iterrows():
@@ -451,9 +451,8 @@ def sync_sheets(db: Session = Depends(get_db)):
         db_outlet = None
         if store_id:
             db_outlet = outlets_by_store_id.get(store_id)
-
-        if not db_outlet:
-            # Fallback query if store_id was not provided
+        else:
+            # Fallback query only if store_id was not provided
             db_outlet = outlets_by_fallback.get((db_account.id, merchant_name, nama_outlet, cabang))
 
         if not db_outlet:
@@ -472,7 +471,8 @@ def sync_sheets(db: Session = Depends(get_db)):
             db.flush()
             if store_id:
                 outlets_by_store_id[store_id] = db_outlet
-            outlets_by_fallback[(db_account.id, merchant_name, nama_outlet, cabang)] = db_outlet
+            else:
+                outlets_by_fallback[(db_account.id, merchant_name, nama_outlet, cabang)] = db_outlet
             added_outlets += 1
         else:
             db_outlet.account_id = db_account.id
