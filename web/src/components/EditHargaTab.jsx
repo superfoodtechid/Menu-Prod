@@ -1057,6 +1057,9 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                         d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    <span>{pushing ? "Mengirim job..." : `Push ${totalChanges} Perubahan`}</span>
+                  </button>
                 </>
               }
             />
@@ -1498,6 +1501,15 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                 </span>
               </div>
             )}
+            {/* Footer Actions */}
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-100 dark:border-zinc-800">
+              <button type="button" onClick={() => setShowPushConfirmModal(false)}
+                className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-200 font-semibold text-[14px] rounded-xl transition-colors"
+              >
+                Batal
+              </button>
+              <button type="button" onClick={executePushFromModal}
+                className="px-5 py-2 bg-red-700 hover:bg-red-800 text-white font-bold text-[14px] rounded-xl transition-colors shadow-md flex items-center gap-1.5"
               >
                 <span>Konfirmasi & Push Update</span>
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1527,6 +1539,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in"
           onClick={() => setShowSuccessModal(false)}
         >
+          <div className="bg-white dark:bg-zinc-950 rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-red-100 dark:border-zinc-800 text-center space-y-4 animate-scale-up"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 ring-8 ring-emerald-50/60 dark:ring-emerald-950/30">
