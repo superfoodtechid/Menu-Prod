@@ -26,7 +26,9 @@ export function checkViolation(platform, oldPrice, newPrice) {
   if (n === o || o <= 0 || n <= 0) return { isViolation: false, message: "" };
   const diff = n - o;
   const pct = (diff / o) * 100;
-  const absPct = Math.abs(pct);
+  // Pembulatan ke 2 desimal agar 15% pas tidak terkena artifak floating point (misal 15.000000000000002)
+  const roundedPct = Math.round(pct * 100) / 100;
+  const absPct = Math.abs(roundedPct);
   const direction = pct > 0 ? "kenaikan" : "penurunan";
 
   if (platform === "gofood") {

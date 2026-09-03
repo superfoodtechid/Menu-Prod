@@ -1050,27 +1050,19 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                   >
                     Reset Harga
                   </button>
-                  <button type="button" onClick={() => openPushConfirmationModal(checkedIds)} disabled={pushing || totalChanges === 0 || violationCount > 0}
-                    title={violationCount > 0 ? "Dilarang Push: Terdapat harga yang melebihi batas aturan aplikator" : ""}
-                    className={`gap-2 px-4 py-1.5 text-[13px] font-bold rounded-xl transition-all shrink-0 flex items-center ${
-                      violationCount > 0
-                        ? "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed shadow-none border border-zinc-300 dark:border-zinc-700"
-                        : "primary-action cursor-pointer disabled:opacity-50"
-                    }`}
+                  <button type="button" onClick={() => openPushConfirmationModal(checkedIds)} disabled={pushing || totalChanges === 0}
+                    title={violationCount > 0 ? `Peringatan: Terdapat ${violationCount} harga melebihi batas aturan aplikator, namun tetap dapat di-push` : ""}
+                    className="gap-2 px-4 py-1.5 text-[13px] font-bold rounded-xl transition-all shrink-0 flex items-center primary-action cursor-pointer disabled:opacity-50"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                         d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                    </svg>
-                    <span>{pushing ? "Mengirim job..." : violationCount > 0 ? "Push Dinonaktifkan" : `Push ${totalChanges} Perubahan`}</span>
-                  </button>
                 </>
               }
             />
           </div>
         </section>
       )}
-
       {/* ── Active Push Price Jobs & Real-Time Verification Section (Single Unified Loading Process) ── */}
       {activeJobs.length > 0 && (
         <section className="surface-card space-y-4 p-5 shadow-sm border border-zinc-200/80 rounded-2xl">
@@ -1488,7 +1480,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                             ({u.diff > 0 ? "+" : ""}{u.pct.toFixed(1)}%)
                           </span>
                           {u.isViolation && (
-                            <span title={u.violationMsg} className="rounded bg-red-600 text-white text-[12px] font-bold px-1.5 py-0.5">! Batas</span>
+                            <span title={u.violationMsg} className="rounded bg-amber-500 text-white text-[12px] font-bold px-1.5 py-0.5">! Batas</span>
                           )}
                         </div>
                       </div>
@@ -1497,16 +1489,15 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                 </div>
               ))}
             </div>
-
-            {/* Footer Actions */}
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-100 dark:border-zinc-800">
-              <button type="button" onClick={() => setShowPushConfirmModal(false)}
-                className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-200 font-semibold text-[14px] rounded-xl transition-colors"
-              >
-                Batal
-              </button>
-              <button type="button" onClick={executePushFromModal}
-                className="px-5 py-2 bg-red-700 hover:bg-red-800 text-white font-bold text-[14px] rounded-xl transition-colors shadow-md flex items-center gap-1.5"
+            {/* Warning Banner in Modal if violation exists */}
+            {totalViolationsInModal > 0 && (
+              <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs font-semibold flex items-center gap-2">
+                <span className="text-base">⚠️</span>
+                <span>
+                  <strong>Peringatan Batas Aturan:</strong> Terdapat {totalViolationsInModal} item harga yang melebihi batas rekomendasi aplikator ({platform === "grab" ? "GrabFood: 15%" : "GoFood: 15%"}). Anda tetap diperbolehkan melanjutkan push perubahan harga ini.
+                </span>
+              </div>
+            )}
               >
                 <span>Konfirmasi & Push Update</span>
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1527,6 +1518,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
           onReset={resetAll}
           pushing={pushing}
           theme="red"
+          allowViolationPush={true}
         />
       )}
 
@@ -1535,7 +1527,6 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in"
           onClick={() => setShowSuccessModal(false)}
         >
-          <div className="bg-white dark:bg-zinc-950 rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-red-100 dark:border-zinc-800 text-center space-y-4 animate-scale-up"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 ring-8 ring-emerald-50/60 dark:ring-emerald-950/30">
