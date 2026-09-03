@@ -643,13 +643,18 @@ def validate_session(tob_token: str, entity_id: str) -> bool:
 def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tuple:
     tob_token = None
     entity_id = None
-    for c in driver.get_cookies():
-        name = c["name"]
-        val = c["value"]
-        if name in ["shopee_tob_token", "spc_ec", "SPC_EC"]: 
-            tob_token = val
-        elif name.lower() in ["shopee_tob_entity_id", "shopee_foody_mid", "x-merchant-id", "spc_merchant_id", "merchant_id", "shopid", "shop_id"]:
-            if val and not entity_id: entity_id = val
+    cookies_map = {c["name"]: c["value"] for c in driver.get_cookies()}
+    
+    if "shopee_tob_token" in cookies_map:
+        tob_token = cookies_map["shopee_tob_token"]
+        
+    for k in ["shopee_tob_entity_id", "shopee_foody_mid", "x-merchant-id", "spc_merchant_id", "merchant_id", "shopid", "shop_id"]:
+        for c_name, c_val in cookies_map.items():
+            if c_name.lower() == k and c_val:
+                entity_id = c_val
+                break
+        if entity_id:
+            break
 
     if not tob_token:
         try:
@@ -659,9 +664,7 @@ def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tup
                     return v ? v[2] : null;
                 }
                 return getCookie('shopee_tob_token') ||
-                       getCookie('spc_ec') ||
                        localStorage.getItem('shopee_tob_token') ||
-                       localStorage.getItem('token') ||
                        sessionStorage.getItem('shopee_tob_token') || null;
             """)
         except: pass
@@ -727,6 +730,10 @@ def _trigger_and_extract_tokens(driver) -> tuple:
     try:
         try:
             driver.delete_cookie("shopee_tob_token")
+            driver.execute_script("""
+                try { localStorage.removeItem('shopee_tob_token'); } catch(e) {}
+                try { sessionStorage.removeItem('shopee_tob_token'); } catch(e) {}
+            """)
         except Exception:
             pass
         driver.get(TOKEN_TRIGGER_PAGE)
