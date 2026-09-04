@@ -1435,91 +1435,14 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
       )}
 
       {/* ── Pop-up Push Rich Confirmation Summary Modal ── */}
-      {showPushConfirmModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in"
-          onClick={() => setShowPushConfirmModal(false)}
-        >
-          <div className="bg-white dark:bg-zinc-950 rounded-2xl p-6 max-w-xl w-full shadow-2xl border border-red-100 dark:border-zinc-800 space-y-4 animate-scale-up max-h-[85vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header */}
-            <div className="flex items-start justify-between border-b border-zinc-100 dark:border-zinc-800 pb-3">
-              <div>
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Ringkasan Update Harga Sebelum Push</h3>
-                <p className="text-[13px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                  Tinjau daftar rincian <strong>{totalSummaryItems} item</strong> yang akan dikirim ke Merchant Portal.
-                </p>
-              </div>
-              <button type="button" onClick={() => setShowPushConfirmModal(false)}
-                className="text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 text-lg font-bold"
-              >×</button>
-            </div>
-
-            {/* Content List */}
-            <div className="flex-1 overflow-y-auto space-y-4 pr-1">
-              {pushSummaryList.map(summary => (
-                <div key={summary.branchId} className="rounded-xl border border-red-100 dark:border-zinc-800 bg-red-50/20 dark:bg-zinc-900/40 p-4 space-y-3">
-                  <div className="flex items-center justify-between border-b border-red-100 dark:border-zinc-800 pb-2">
-                    <span className="font-bold text-slate-800 dark:text-white text-[15px]">{summary.branchName}</span>
-                    <PlatformBadge platform={summary.platform} storeId={summary.storeId} />
-                  </div>
-
-                  <div className="space-y-2">
-                    {summary.updates.map(u => (
-                      <div key={u.id} className="flex flex-col sm:flex-row sm:items-center justify-between rounded-lg bg-zinc-50 dark:bg-zinc-900 p-2.5 border border-zinc-100 dark:border-zinc-800 gap-1 text-[13px]">
-                        <div className="min-w-0 flex-1">
-                          <p className="font-medium text-slate-800 dark:text-zinc-100 leading-snug text-wrap break-words">{u.name}</p>
-                          <span className="text-[12px] text-slate-400 dark:text-zinc-400 uppercase tracking-wider">{u.category}</span>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="line-through text-slate-400 dark:text-zinc-500">Rp {fmt(u.oldPrice)}</span>
-                          <span className="text-slate-400 dark:text-zinc-500">→</span>
-                          <span className="font-bold text-slate-900 dark:text-white">Rp {fmt(u.newPrice)}</span>
-                          <span className={`rounded px-1.5 py-0.5 text-[12px] font-bold ${
-                            u.diff > 0
-                              ? "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400"
-                              : "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400"
-                          }`}>
-                            ({u.diff > 0 ? "+" : ""}{u.pct.toFixed(1)}%)
-                          </span>
-                          {u.isViolation && (
-                            <span title={u.violationMsg} className="rounded bg-amber-500 text-white text-[12px] font-bold px-1.5 py-0.5">! Batas</span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-            {/* Warning Banner in Modal if violation exists */}
-            {totalViolationsInModal > 0 && (
-              <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs font-semibold flex items-center gap-2">
-                <span className="text-base">⚠️</span>
-                <span>
-                  <strong>Peringatan Batas Aturan:</strong> Terdapat {totalViolationsInModal} item harga yang melebihi batas rekomendasi aplikator ({platform === "grab" ? "GrabFood: 15%" : "GoFood: 15%"}). Anda tetap diperbolehkan melanjutkan push perubahan harga ini.
-                </span>
-              </div>
-            )}
-            {/* Footer Actions */}
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-100 dark:border-zinc-800">
-              <button type="button" onClick={() => setShowPushConfirmModal(false)}
-                className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-200 font-semibold text-[14px] rounded-xl transition-colors"
-              >
-                Batal
-              </button>
-              <button type="button" onClick={executePushFromModal}
-                className="px-5 py-2 bg-red-700 hover:bg-red-800 text-white font-bold text-[14px] rounded-xl transition-colors shadow-md flex items-center gap-1.5"
-              >
-                <span>Konfirmasi & Push Update</span>
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                </svg>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <PushConfirmModal
+        isOpen={showPushConfirmModal}
+        onClose={() => setShowPushConfirmModal(false)}
+        onConfirm={executePushFromModal}
+        pushSummaryList={pushSummaryList}
+        platform={platform}
+        submitting={pushing}
+      />
 
       {/* ── Sticky Bottom Floating Action Bar ── */}
       {syncPhase === "done" && (
