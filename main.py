@@ -433,10 +433,14 @@ def sync_sheets(db: Session = Depends(get_db)):
 
         # 2. Extract Outlet Info
         store_id_raw = row.get("Store ID")
-        store_id = str(store_id_raw).strip().split(".")[0] if pd.notna(store_id_raw) and str(store_id_raw).strip() != "-" else None
+        store_id = str(store_id_raw).strip().split(".")[0] if pd.notna(store_id_raw) and str(store_id_raw).strip() not in ("-", "", "nan", "None") else None
+        if not store_id:
+            continue
         
         m_name_raw = row.get("Merchant Name")
-        merchant_name = str(m_name_raw).strip() if pd.notna(m_name_raw) and str(m_name_raw).strip() != "-" else str(row.get("Nama Outlet", "")).strip()
+        merchant_name = str(m_name_raw).strip() if pd.notna(m_name_raw) and str(m_name_raw).strip() not in ("-", "", "nan", "None") else str(row.get("Nama Outlet", "")).strip()
+        if not merchant_name or merchant_name.lower() in ("-", "", "nan", "none"):
+            continue
 
         owner_raw = row.get("Owner")
         owner = str(owner_raw).strip() if pd.notna(owner_raw) and str(owner_raw).strip() not in ("-", "") else None
@@ -628,6 +632,10 @@ PLATFORM_LOCKS = {
     "gofood": threading.Lock()
 }
 
+# Global semaphore to limit simultaneous headless browser instances across all platforms
+# to prevent server memory exhaustion (OOM crashes)
+GLOBAL_BROWSER_SEMAPHORE = threading.BoundedSemaphore(value=2)
+
 def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
     # Setup job-specific session context
     from menu_core.database import SessionLocal
@@ -639,12 +647,20 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
 
     platform = (job.platform or "").lower()
     lock = PLATFORM_LOCKS.get(platform)
-    if lock:
-        logger.info(f"🔒 Job {job_id} ({platform}) waiting for lock...")
-        lock.acquire()
-        logger.info(f"🔓 Job {job_id} ({platform}) acquired lock. Starting execution.")
+    sem_acquired = False
+    lock_acquired = False
 
     try:
+        GLOBAL_BROWSER_SEMAPHORE.acquire()
+        sem_acquired = True
+        logger.info(f"🚦 Job {job_id} ({platform}) acquired global browser slot.")
+
+        if lock:
+            logger.info(f"🔒 Job {job_id} ({platform}) waiting for lock...")
+            lock.acquire()
+            lock_acquired = True
+            logger.info(f"🔓 Job {job_id} ({platform}) acquired lock. Starting execution.")
+
         # Re-fetch job under lock to ensure we have the latest database state
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
@@ -818,12 +834,18 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
         job.completed_at = datetime.utcnow()
         db.commit()
     finally:
-        if lock:
+        if lock_acquired and lock:
             try:
                 lock.release()
                 logger.info(f"🔓 Job {job_id} ({platform}) lock released.")
             except Exception as le:
                 logger.warning(f"⚠️ Failed to release lock: {le}")
+        if sem_acquired:
+            try:
+                GLOBAL_BROWSER_SEMAPHORE.release()
+                logger.info(f"🚦 Job {job_id} ({platform}) released global browser slot.")
+            except Exception as se:
+                logger.warning(f"⚠️ Failed to release global browser semaphore: {se}")
         db.close()
 
 
@@ -839,12 +861,20 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
     platform = (job.platform or "").lower()
     lock = PLATFORM_LOCKS.get(platform)
-    if lock:
-        logger.info(f"🔒 Job {job_id} ({platform}) waiting for lock...")
-        lock.acquire()
-        logger.info(f"🔓 Job {job_id} ({platform}) acquired lock. Starting execution.")
+    sem_acquired = False
+    lock_acquired = False
 
     try:
+        GLOBAL_BROWSER_SEMAPHORE.acquire()
+        sem_acquired = True
+        logger.info(f"🚦 Job {job_id} ({platform}) acquired global browser slot.")
+
+        if lock:
+            logger.info(f"🔒 Job {job_id} ({platform}) waiting for lock...")
+            lock.acquire()
+            lock_acquired = True
+            logger.info(f"🔓 Job {job_id} ({platform}) acquired lock. Starting execution.")
+
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
             return
@@ -2140,12 +2170,18 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
         db.commit()
 
     finally:
-        if lock:
+        if lock_acquired and lock:
             try:
                 lock.release()
                 logger.info(f"🔓 Job {job_id} ({platform}) lock released.")
             except Exception as le:
                 logger.warning(f"⚠️ Failed to release lock: {le}")
+        if sem_acquired:
+            try:
+                GLOBAL_BROWSER_SEMAPHORE.release()
+                logger.info(f"🚦 Job {job_id} ({platform}) released global browser slot.")
+            except Exception as se:
+                logger.warning(f"⚠️ Failed to release global browser semaphore: {se}")
         db.close()
 
 
@@ -2951,12 +2987,20 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
 
     platform = (job.platform or "gofood").lower()
     lock = PLATFORM_LOCKS.get(platform)
-    if lock:
-        logger.info(f"🔒 C5 job {job_id} ({platform}) waiting for lock...")
-        lock.acquire()
-        logger.info(f"🔓 C5 job {job_id} ({platform}) acquired lock.")
+    sem_acquired = False
+    lock_acquired = False
 
     try:
+        GLOBAL_BROWSER_SEMAPHORE.acquire()
+        sem_acquired = True
+        logger.info(f"🚦 C5 Job {job_id} ({platform}) acquired global browser slot.")
+
+        if lock:
+            logger.info(f"🔒 C5 job {job_id} ({platform}) waiting for lock...")
+            lock.acquire()
+            lock_acquired = True
+            logger.info(f"🔓 C5 job {job_id} ({platform}) acquired lock.")
+
         job.status = "RUNNING"
         job.started_at = datetime.utcnow()
         job.progress_pct = 10
@@ -3123,9 +3167,18 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         db.commit()
     finally:
         db.close()
-        if lock:
-            lock.release()
-            logger.info(f"🔓 C5 job {job_id} (gofood) released lock.")
+        if lock_acquired and lock:
+            try:
+                lock.release()
+                logger.info(f"🔓 C5 job {job_id} ({platform}) released lock.")
+            except Exception:
+                pass
+        if sem_acquired:
+            try:
+                GLOBAL_BROWSER_SEMAPHORE.release()
+                logger.info(f"🚦 C5 Job {job_id} ({platform}) released global browser slot.")
+            except Exception:
+                pass
 
 
 
