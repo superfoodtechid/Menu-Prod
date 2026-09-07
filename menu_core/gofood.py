@@ -88,68 +88,87 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     print(f"\n[GoFood Menu Extractor]")
     print(f"[-] Target Outlet: {nama_resto} ({store_id})")
     
-    # 1. Jalankan login_outlet untuk membuka browser, masuk dashboard, dan menangkap API menu
-    # Tambahkan path agar bisa mengimpor login_gofood
+    # Tambahkan path agar bisa mengimpor login_gofood & modul lokal
     menu_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if menu_dir not in sys.path:
         sys.path.insert(0, menu_dir)
-        
-    try:
-        from login_gofood import login_outlet
-        headless_env = os.getenv("HEADLESS") or os.getenv("HEADLESS_GOFOOD")
-        is_headless = headless_env.lower() in ("true", "1", "yes") if headless_env else False
-        headless_str = "secara headless" if is_headless else "secara non-headless (GUI)"
-        print(f"[*] Meluncurkan browser GoFood {headless_str} untuk login & pengalihan ke halaman menu...")
-        # Playwright Sync API tidak boleh dipanggil dari thread yang sedang menjalankan
-        # event loop asyncio (mis. saat dijalankan dalam konteks FastAPI/uvicorn).
-        # Deteksi loop dulu (terpisah dari eksekusi), lalu offload ke thread terpisah bila perlu.
-        def _run_login_outlet_in_clean_thread(meta):
-            import threading
-            res = [None]
-            err = [None]
-            def _worker():
-                try:
-                    import asyncio
-                    asyncio.set_event_loop(asyncio.new_event_loop())
-                    from login_gofood import login_outlet
-                    res[0] = login_outlet(meta)
-                except Exception as e:
-                    err[0] = e
-            t = threading.Thread(target=_worker)
-            t.start()
-            t.join()
-            if err[0]:
-                raise err[0]
-            return res[0]
 
+    # 1. Jalankan Fast-Path Direct REST API jika sesi aktif tersedia
+    login_result = None
+    cached_token = store_metadata.get('access_token') or store_metadata.get('token')
+    if not cached_token:
         try:
-            asyncio.get_running_loop()
-            in_event_loop = True
-        except RuntimeError:
-            in_event_loop = False
+            from menu_core.gofood_api import find_cached_token_for_outlet
+            cached_token = find_cached_token_for_outlet(store_metadata)
+        except Exception as e:
+            print(f"   ⚠️ Gagal mengecek sesi lokal GoFood: {e}")
 
-        max_extract_attempts = 2
-        login_result = None
-        for extract_attempt in range(1, max_extract_attempts + 1):
-            if in_event_loop:
-                login_result = _run_login_outlet_in_clean_thread(store_metadata)
-            else:
-                login_result = login_outlet(store_metadata)
-                
-            if login_result and login_result.get('captured_menu'):
-                break
-                
-            if extract_attempt < max_extract_attempts:
-                print(f"[🔄 RETRY {extract_attempt}/{max_extract_attempts}] Penarikan menu GoFood belum berhasil, mengulang proses login browser dalam 3 detik...")
-                import time
-                time.sleep(3)
+    if cached_token:
+        print(f"[*] Ditemukan token aktif dari sesi lokal! Memulai Fast-Path Direct REST API...")
+        try:
+            from menu_core.gofood_api import fetch_gofood_menu_and_modifiers
+            direct_ok, direct_result = fetch_gofood_menu_and_modifiers(cached_token, store_id)
+            if direct_ok and direct_result.get('captured_menu'):
+                print(f"   🚀 Fast-Path Berhasil! Data menu GoFood berhasil diambil langsung via REST API tanpa browser.")
+                login_result = direct_result
+        except Exception as api_err:
+            print(f"   ⚠️ Fast-Path Direct API error: {api_err}. Beralih ke browser fallback...")
 
-        if not login_result or not login_result.get('access_token'):
-            print(f"[!] Login atau penarikan menu dibatalkan/gagal setelah {max_extract_attempts} percobaan.")
-            return False, f"Proses login/intersepsi menu via browser gagal setelah {max_extract_attempts} percobaan."
-    except Exception as e:
-        print(f"[!] Terjadi kesalahan saat menjalankan browser login: {e}")
-        return False, f"Terjadi kesalahan saat meluncurkan browser login: {e}"
+    # 2. Fallback: Jalankan login_outlet via browser Chromium jika Fast-Path gagal / belum ada token
+    if not login_result or not login_result.get('captured_menu'):
+        try:
+            from login_gofood import login_outlet
+            headless_env = os.getenv("HEADLESS") or os.getenv("HEADLESS_GOFOOD")
+            is_headless = headless_env.lower() in ("true", "1", "yes") if headless_env else False
+            headless_str = "secara headless" if is_headless else "secara non-headless (GUI)"
+            print(f"[*] Meluncurkan browser GoFood {headless_str} untuk login & penarikan menu...")
+            
+            def _run_login_outlet_in_clean_thread(meta):
+                import threading
+                res = [None]
+                err = [None]
+                def _worker():
+                    try:
+                        import asyncio
+                        asyncio.set_event_loop(asyncio.new_event_loop())
+                        from login_gofood import login_outlet
+                        res[0] = login_outlet(meta)
+                    except Exception as e:
+                        err[0] = e
+                t = threading.Thread(target=_worker)
+                t.start()
+                t.join()
+                if err[0]:
+                    raise err[0]
+                return res[0]
+
+            try:
+                asyncio.get_running_loop()
+                in_event_loop = True
+            except RuntimeError:
+                in_event_loop = False
+
+            max_extract_attempts = 2
+            for extract_attempt in range(1, max_extract_attempts + 1):
+                if in_event_loop:
+                    login_result = _run_login_outlet_in_clean_thread(store_metadata)
+                else:
+                    login_result = login_outlet(store_metadata)
+                    
+                if login_result and login_result.get('captured_menu'):
+                    break
+                    
+                if extract_attempt < max_extract_attempts:
+                    print(f"[🔄 RETRY {extract_attempt}/{max_extract_attempts}] Penarikan menu GoFood belum berhasil, mengulang proses login browser dalam 3 detik...")
+                    import time
+                    time.sleep(3)
+
+            if not login_result or not login_result.get('access_token'):
+                print(f"[!] Login atau penarikan menu dibatalkan/gagal setelah {max_extract_attempts} percobaan.")
+                return False, f"Proses login/intersepsi menu via browser gagal setelah {max_extract_attempts} percobaan."
+        except Exception as e:
+            print(f"[!] Terjadi kesalahan saat menjalankan browser login: {e}")
+            return False, f"Terjadi kesalahan saat meluncurkan browser login: {e}"
         
     # 2. Simpan dan load data menu yang ditangkap
     api_dir = os.path.join(menu_dir, "Gofood", "API")
@@ -192,15 +211,22 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     access_token = login_result.get('access_token')
 
     # --- GET GOFOOD URL WITH UUID ---
-    restaurant_uuid = ""
-    for cat in menus:
-        if cat.get("restaurant_id"):
-            restaurant_uuid = cat.get("restaurant_id")
-            break
+    restaurant_uuid = login_result.get('restaurant_uuid') or ""
+    if not restaurant_uuid:
+        for cat in menus:
+            if cat.get("restaurant_id"):
+                restaurant_uuid = cat.get("restaurant_id")
+                break
+            for it in cat.get("menu_items", []):
+                if it.get("restaurant_id"):
+                    restaurant_uuid = it.get("restaurant_id")
+                    break
+            if restaurant_uuid:
+                break
             
     # Ambil nama kota dari GoBiz API
-    city_slug = "indonesia"
-    if access_token:
+    city_slug = login_result.get('city_slug') or "indonesia"
+    if city_slug == "indonesia" and access_token:
         try:
             import requests
             headers = {
@@ -242,6 +268,19 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     modifier_path = os.path.join(api_dir, f"modifier-response-{store_id}.json")
         
     variant_categories_map = {}
+    # Populate langsung dari captured_modifiers jika tersedia
+    if captured_modifiers:
+        for m_cat in captured_modifiers:
+            vid = m_cat.get("id")
+            if vid:
+                variant_categories_map[vid] = m_cat
+            cid = m_cat.get("common_id")
+            if cid:
+                variant_categories_map[cid] = m_cat
+            mcid = m_cat.get("master_variant_category_id")
+            if mcid:
+                variant_categories_map[mcid] = m_cat
+
     if os.path.exists(modifier_path):
         try:
             with open(modifier_path, 'r', encoding='utf-8') as f:
@@ -296,8 +335,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             elif item.get("image_cover") and isinstance(item["image_cover"], dict):
                 img_url = item["image_cover"].get("url", "")
                 
-            # Modifier groups count
-            var_cat_ids = item.get("variant_category_ids", [])
+            # Modifier groups count (dukung v1 variant_category_ids dan v2 variant_category_common_ids)
+            var_cat_ids = item.get("variant_category_ids") or item.get("variant_category_common_ids") or []
             mod_groups_count = len(var_cat_ids)
             total_modifiers_count = 0
             
