@@ -45,11 +45,21 @@ def cleanup_zombie_chromium():
     except Exception:
         pass
 
+OPTIMIZED_CHROMIUM_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--mute-audio",
+    "--disable-background-networking",
+    "--renderer-process-limit=2",
+]
+
 def launch_universal_playwright_browser(p, headless=True):
     """
     Universal Playwright Chromium Launcher (Sync):
     - On ARM64 (Mini PC / Raspberry Pi): Launches system Chromium via CDP.
-    - On x86_64 (Intel / AMD / Dev Laptops): Launches Playwright's bundled Chromium.
+    - On x86_64 (Intel / AMD / Dev Laptops): Launches Playwright's bundled Chromium with optimized flags.
     
     Returns:
         (browser, process_handle)
@@ -83,7 +93,7 @@ def launch_universal_playwright_browser(p, headless=True):
                 kill_process_tree(proc)
             raise RuntimeError(f"Failed to connect to ARM System Chromium via CDP: {e}")
     else:
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(headless=headless, args=OPTIMIZED_CHROMIUM_ARGS)
         return browser, None
 
 @contextmanager
@@ -138,7 +148,7 @@ async def async_launch_universal_playwright_browser(p, headless=True):
                 kill_process_tree(proc)
             raise RuntimeError(f"Failed to connect to ARM System Chromium via CDP: {e}")
     else:
-        browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(headless=headless, args=OPTIMIZED_CHROMIUM_ARGS)
         return browser, None
 
 @asynccontextmanager
@@ -161,3 +171,48 @@ async def async_universal_browser_session(p, headless=True):
                 pass
         if proc:
             kill_process_tree(proc)
+
+async def setup_resource_blocking(page):
+    """
+    Aborts requests for images, media, fonts, and third-party trackers.
+    Drastically cuts down memory footprint and boosts page loading speeds.
+    """
+    blocked_types = {"image", "media", "font"}
+    blocked_patterns = ["google-analytics", "googletagmanager", "facebook", "doubleclick", "clarity.ms", "sentry"]
+
+    async def _route_handler(route):
+        try:
+            req = route.request
+            if req.resource_type in blocked_types:
+                await route.abort()
+                return
+            url_lower = req.url.lower()
+            if any(p in url_lower for p in blocked_patterns):
+                await route.abort()
+                return
+            await route.continue_()
+        except Exception:
+            pass
+
+    await page.route("**/*", _route_handler)
+
+def setup_resource_blocking_sync(page):
+    """Sync variant of setup_resource_blocking."""
+    blocked_types = {"image", "media", "font"}
+    blocked_patterns = ["google-analytics", "googletagmanager", "facebook", "doubleclick", "clarity.ms", "sentry"]
+
+    def _route_handler(route):
+        try:
+            req = route.request
+            if req.resource_type in blocked_types:
+                route.abort()
+                return
+            url_lower = req.url.lower()
+            if any(p in url_lower for p in blocked_patterns):
+                route.abort()
+                return
+            route.continue_()
+        except Exception:
+            pass
+
+    page.route("**/*", _route_handler)

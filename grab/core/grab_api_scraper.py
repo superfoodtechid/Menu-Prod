@@ -1275,7 +1275,18 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                             break
                 except Exception:
                     pass
-                managed_browser = await p_inst.chromium.launch(headless=headless_env)
+                managed_browser = await p_inst.chromium.launch(
+                    headless=headless_env,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-extensions",
+                        "--mute-audio",
+                        "--disable-background-networking",
+                        "--renderer-process-limit=2"
+                    ]
+                )
                 browser = managed_browser
                 p = p_inst
 
@@ -1285,6 +1296,11 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                 user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
             page = await context.new_page()
+            try:
+                from src.core.browser_factory import setup_resource_blocking
+                await setup_resource_blocking(page)
+            except Exception:
+                pass
 
             # Step 1: Buka dashboard (cek sesi)
             logger.info(f"  [Nav] Checking session via dashboard for {user}...")

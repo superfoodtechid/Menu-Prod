@@ -53,6 +53,9 @@ def _init_push_driver(username: str, headless: bool = True) -> webdriver.Chrome:
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-component-update")
+    options.add_argument("--mute-audio")
+    options.add_argument("--disable-background-networking")
+    options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
 
     if headless:
