@@ -18,6 +18,111 @@ const group = (items) => {
   }, {});
 };
 
+// ─── Memoized Shopee Item Row Component for Instant Performance ──────────────
+const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
+  item,
+  curPrice,
+  isEdited,
+  diff,
+  pct,
+  pctFmt,
+  isViolation,
+  violationMsg,
+  isChecked,
+  itemEditMode,
+  onToggleSelect,
+  onChangePrice,
+  fmt
+}) {
+  return (
+    <tr className={`transition ${
+      isChecked
+        ? "bg-amber-50/80 dark:bg-amber-950/30"
+        : item.is_price_locked
+        ? "bg-rose-50/30 dark:bg-rose-950/20"
+        : item.is_in_promo
+        ? "bg-amber-50/40 dark:bg-amber-950/20"
+        : "hover:bg-zinc-50 dark:hover:bg-zinc-950/50"
+    }`}>
+      {itemEditMode === "multi" && (
+        <td className="p-3.5 text-center align-middle">
+          <input
+            type="checkbox"
+            disabled={item.is_price_locked}
+            title={item.is_price_locked ? "Item dalam Flash Sale tidak dapat diubah" : ""}
+            checked={isChecked}
+            onChange={() => onToggleSelect(item.id)}
+            className={`h-4 w-4 rounded border-zinc-300 ${
+              item.is_price_locked
+                ? "opacity-30 cursor-not-allowed text-zinc-400"
+                : "text-orange-600 focus:ring-orange-500 cursor-pointer"
+            }`}
+          />
+        </td>
+      )}
+      <td className="p-3.5 text-zinc-900 dark:text-white font-bold align-middle">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span>{item.name}</span>
+          <PromoBadgeTooltip item={item} platform="shopee" fmt={fmt} />
+        </div>
+      </td>
+      <td className="p-3.5 text-zinc-500 font-medium align-middle">{item.category}</td>
+      <td className="p-3.5 text-right text-zinc-600 dark:text-zinc-300 font-mono font-bold align-middle whitespace-nowrap">
+        {item.discounted_price && item.discounted_price < item.price ? (
+          <div className="flex items-center justify-end gap-1.5 flex-wrap">
+            <span className="line-through text-zinc-400 dark:text-zinc-500 font-normal">
+              Rp {fmt(item.price)}
+            </span>
+            <span className="text-zinc-400">→</span>
+            <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+              Rp {fmt(item.discounted_price)}
+            </span>
+          </div>
+        ) : (
+          <span>Rp {fmt(item.price)}</span>
+        )}
+      </td>
+      <td className="p-3.5 text-right align-middle">
+        <input
+          type="text"
+          disabled={item.is_price_locked}
+          title={item.is_price_locked ? "Harga dikunci karena menu sedang dalam Flash Sale aktif" : ""}
+          value={fmt(curPrice)}
+          onChange={(e) => onChangePrice(item.id, e.target.value)}
+          className={`w-32 text-right p-2 rounded-xl border font-mono font-bold text-sm ${
+            item.is_price_locked
+              ? "border-rose-300 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/30 text-rose-900 dark:text-rose-300 cursor-not-allowed opacity-80"
+              : isEdited
+              ? "border-orange-500 bg-orange-50 dark:bg-orange-950/40 text-orange-900 dark:text-orange-200 focus:ring-2 focus:ring-orange-500/20"
+              : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white focus:border-orange-500"
+          }`}
+        />
+      </td>
+      <td className="p-3.5 text-center align-middle">
+        {item.is_flash_sale ? (
+          <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 text-[11px] font-semibold border border-rose-300 dark:border-rose-800 inline-block">
+            Flash Sale (Dikunci)
+          </span>
+        ) : isViolation ? (
+          <span title={violationMsg} className="px-2.5 py-1 rounded bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-semibold border border-red-200 dark:border-red-900/60 inline-block">
+            {pctFmt} (Melebihi Batas)
+          </span>
+        ) : isEdited ? (
+          <span className="px-2.5 py-1 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold border border-emerald-200 dark:border-emerald-900/60 inline-block">
+            {pctFmt} (Valid)
+          </span>
+        ) : item.is_in_promo ? (
+          <span className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold border border-amber-300 dark:border-amber-700 inline-block">
+            Promo ({fmtPromoPct(item.promo_value) || "Aktif"})
+          </span>
+        ) : (
+          <span className="text-zinc-400 text-xs">-</span>
+        )}
+      </td>
+    </tr>
+  );
+});
+
 function formatUserFriendlyError(rawMsg) {
   if (!rawMsg) return "";
   const s = String(rawMsg);
@@ -985,13 +1090,24 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const deselectAllItems = () => {
     setSelectedItemIds([]);
   };
-  const toggleSelectItem = (id) => {
+  const toggleSelectItem = useCallback((id) => {
     const item = rawItems.find(i => String(i.id) === String(id));
     if (item && item.is_price_locked) return; // Prevent selection of locked items
     setSelectedItemIds(prev =>
       prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
     );
-  };
+  }, [rawItems]);
+
+  const handleItemPriceChange = useCallback((itemId, newPriceVal) => {
+    const val = parse(newPriceVal);
+    setEdits(p => ({
+      ...p,
+      [selectedBrandId]: {
+        ...(p[selectedBrandId] || {}),
+        [itemId]: val
+      }
+    }));
+  }, [selectedBrandId]);
 
   return (
     <div className="space-y-6 pb-28">
@@ -1515,101 +1631,22 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                       const isChecked = selectedItemIds.includes(item.id);
 
                       return (
-                        <tr key={item.id} className={`transition ${
-                          isChecked
-                            ? "bg-amber-50/80 dark:bg-amber-950/30"
-                            : item.is_price_locked
-                            ? "bg-rose-50/30 dark:bg-rose-950/20"
-                            : item.is_in_promo
-                            ? "bg-amber-50/40 dark:bg-amber-950/20"
-                            : "hover:bg-zinc-50 dark:hover:bg-zinc-950/50"
-                        }`}>
-                          {itemEditMode === "multi" && (
-                            <td className="p-3.5 text-center align-middle">
-                              <input
-                                type="checkbox"
-                                disabled={item.is_price_locked}
-                                title={item.is_price_locked ? "Item dalam Flash Sale tidak dapat diubah" : ""}
-                                checked={isChecked}
-                                onChange={() => toggleSelectItem(item.id)}
-                                className={`h-4 w-4 rounded border-zinc-300 ${
-                                  item.is_price_locked
-                                    ? "opacity-30 cursor-not-allowed text-zinc-400"
-                                    : "text-orange-600 focus:ring-orange-500 cursor-pointer"
-                                }`}
-                              />
-                            </td>
-                          )}
-                          <td className="p-3.5 text-zinc-900 dark:text-white font-bold align-middle">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span>{item.name}</span>
-                              <PromoBadgeTooltip item={item} platform="shopee" fmt={fmt} />
-                            </div>
-                          </td>
-                          <td className="p-3.5 text-zinc-500 font-medium align-middle">{item.category}</td>
-                          <td className="p-3.5 text-right text-zinc-600 dark:text-zinc-300 font-mono font-bold align-middle whitespace-nowrap">
-                            {item.discounted_price && item.discounted_price < item.price ? (
-                              <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                                <span className="line-through text-zinc-400 dark:text-zinc-500 font-normal">
-                                  Rp {fmt(item.price)}
-                                </span>
-                                <span className="text-zinc-400">→</span>
-                                <span className="text-emerald-600 dark:text-emerald-400 font-bold">
-                                  Rp {fmt(item.discounted_price)}
-                                </span>
-                              </div>
-                            ) : (
-                              <span>Rp {fmt(item.price)}</span>
-                            )}
-                          </td>
-                          <td className="p-3.5 text-right align-middle">
-                            <input
-                              type="text"
-                              disabled={item.is_price_locked}
-                              title={item.is_price_locked ? "Harga dikunci karena menu sedang dalam Flash Sale aktif" : ""}
-                              value={fmt(curPrice)}
-                              onChange={(e) => {
-                                if (item.is_price_locked) return;
-                                const val = parse(e.target.value);
-                                setEdits(p => ({
-                                  ...p,
-                                  [selectedBrandId]: {
-                                    ...(p[selectedBrandId] || {}),
-                                    [item.id]: val
-                                  }
-                                }));
-                              }}
-                              className={`w-32 text-right p-2 rounded-xl border font-mono font-bold text-sm ${
-                                item.is_price_locked
-                                  ? "border-rose-300 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/30 text-rose-900 dark:text-rose-300 cursor-not-allowed opacity-80"
-                                  : isEdited
-                                  ? "border-orange-500 bg-orange-50 dark:bg-orange-950/40 text-orange-900 dark:text-orange-200 focus:ring-2 focus:ring-orange-500/20"
-                                  : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white focus:border-orange-500"
-                              }`}
-                            />
-                          </td>
-                          <td className="p-3.5 text-center align-middle">
-                            {item.is_flash_sale ? (
-                              <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 text-[11px] font-semibold border border-rose-300 dark:border-rose-800 inline-block">
-                                Flash Sale (Dikunci)
-                              </span>
-                            ) : isViolation ? (
-                              <span title={violationMsg} className="px-2.5 py-1 rounded bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[11px] font-semibold border border-red-200 dark:border-red-900/60 inline-block">
-                                {pctFmt} (Melebihi Batas)
-                              </span>
-                            ) : isEdited ? (
-                              <span className="px-2.5 py-1 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold border border-emerald-200 dark:border-emerald-900/60 inline-block">
-                                {pctFmt} (Valid)
-                              </span>
-                            ) : item.is_in_promo ? (
-                              <span className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold border border-amber-300 dark:border-amber-700 inline-block">
-                                Promo ({fmtPromoPct(item.promo_value) || "Aktif"})
-                              </span>
-                            ) : (
-                              <span className="text-zinc-400 text-xs">-</span>
-                            )}
-                          </td>
-                        </tr>
+                        <ShopeeMenuRowItem
+                          key={item.id}
+                          item={item}
+                          curPrice={curPrice}
+                          isEdited={isEdited}
+                          diff={diff}
+                          pct={pct}
+                          pctFmt={pctFmt}
+                          isViolation={isViolation}
+                          violationMsg={violationMsg}
+                          isChecked={isChecked}
+                          itemEditMode={itemEditMode}
+                          onToggleSelect={toggleSelectItem}
+                          onChangePrice={handleItemPriceChange}
+                          fmt={fmt}
+                        />
                       );
                     })}
                   </React.Fragment>
