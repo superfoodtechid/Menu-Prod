@@ -1050,6 +1050,21 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
             if store_id:
                 store_id_clean = str(store_id).strip()
                 print(f"   🤖 Target Store ID: {store_id_clean}")
+
+                # ── Early Exit Direct API ──────────────────────────────
+                # Jika access_token sudah didapatkan, langsung ambil data via REST API
+                if access_token:
+                    try:
+                        from menu_core.gofood_api import fetch_gofood_menu_and_modifiers
+                        api_ok, api_res = fetch_gofood_menu_and_modifiers(access_token, store_id_clean)
+                        if api_ok and api_res.get('captured_menu'):
+                            captured_menu = api_res['captured_menu']
+                            captured_modifiers = api_res.get('captured_modifiers', [])
+                            captured_restaurant_id = api_res.get('restaurant_uuid', '')
+                            print(f"   ⚡ [Early-Exit Direct API] Berhasil menarik menu & modifier via REST API! Melewati intersepsi browser...")
+                    except Exception as early_err:
+                        print(f"   ⚠️ Early-Exit Direct API gagal: {early_err}. Melanjutkan jalur browser...")
+
                 try:
                     # Capture x-passkey dari request headers
                     def handle_request_passkey(req):
@@ -1106,13 +1121,14 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                             except Exception as e:
                                 pass
                     
-                    page.on("request", handle_request_passkey)
-                    page.on("response", handle_response)
-                    
-                    # 1. Navigasi cerdas: Cek apakah sudah di halaman menu items
-                    current_url = page.url
-                    if "/menu-items" in current_url:
-                        print("   🤖 Halaman sudah berada di Menu Items. Menunggu capture...")
+                    if captured_menu is None:
+                        page.on("request", handle_request_passkey)
+                        page.on("response", handle_response)
+                        
+                        # 1. Navigasi cerdas: Cek apakah sudah di halaman menu items
+                        current_url = page.url
+                        if "/menu-items" in current_url:
+                            print("   🤖 Halaman sudah berada di Menu Items. Menunggu capture...")
                     elif store_id_clean:
                         print(f"   🤖 Langsung navigasi ke halaman menu outlet {store_id_clean}...")
                         try:
@@ -1273,9 +1289,9 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                             except Exception as reload_err:
                                 print(f"   ⚠️ Re-navigasi warning: {reload_err}")
                         
-                    # Beri waktu tambahan 5 detik untuk menangkap pemanggilan API variant_categories
-                    if captured_menu is not None:
-                        print("   🤖 Menu ditangkap, menunggu 5 detik tambahan untuk mengintersepsi semua modifier...")
+                    # Beri waktu tambahan 5 detik untuk menangkap pemanggilan API variant_categories jika belum ada
+                    if captured_menu is not None and not captured_modifiers:
+                        print("   🤖 Menu ditangkap via browser, menunggu 5 detik tambahan untuk mengintersepsi semua modifier...")
                         page.wait_for_timeout(5000)
                         
                         # Dapatkan restaurant_id dari captured_menu untuk fetch langsung v1 variant categories

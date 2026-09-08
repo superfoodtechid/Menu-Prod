@@ -15,10 +15,13 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [otpCode, setOtpCode] = useState("");
   const [otpSubmitting, setOtpSubmitting] = useState(false);
   const [otpChannel, setOtpChannel] = useState("sms"); // "sms" | "whatsapp"
-  const [waCooldown, setWaCooldown] = useState(60); // 1 minute cooldown before showing WA option
-  const [otpTotalTime, setOtpTotalTime] = useState(900); // 15 minutes overall timeout
-  const [waRequesting, setWaRequesting] = useState(false);
+  const [smsCooldown, setSmsCooldown] = useState(60); // 60s cooldown for SMS resend
+  const [smsResending, setSmsResending] = useState(false);
+  const [waCooldown, setWaCooldown] = useState(60); // 60s cooldown for WhatsApp option / resend
   const [waRequested, setWaRequested] = useState(false);
+  const [waResending, setWaResending] = useState(false);
+  const [otpTotalTime, setOtpTotalTime] = useState(900); // 15 minutes overall timeout
+  const [resendMsg, setResendMsg] = useState("");
   const pollRef = useRef(null);
   const otpTimerRef = useRef(null);
 
@@ -59,10 +62,13 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     setAssignError(null);
     setOtpCode("");
     setOtpChannel("sms");
+    setSmsCooldown(60);
+    setSmsResending(false);
     setWaCooldown(60);
-    setOtpTotalTime(900);
-    setWaRequesting(false);
     setWaRequested(false);
+    setWaResending(false);
+    setOtpTotalTime(900);
+    setResendMsg("");
     clearInterval(otpTimerRef.current);
   };
 
@@ -85,10 +91,13 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     setAssignError(null);
     setOtpCode("");
     setOtpChannel("sms");
+    setSmsCooldown(60);
+    setSmsResending(false);
     setWaCooldown(60);
-    setOtpTotalTime(900);
-    setWaRequesting(false);
     setWaRequested(false);
+    setWaResending(false);
+    setOtpTotalTime(900);
+    setResendMsg("");
     clearInterval(otpTimerRef.current);
 
     try {
@@ -113,10 +122,13 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   // Start countdown timer when entering OTP mode
   useEffect(() => {
     if (assignStatus === "OTP") {
+      setSmsCooldown(60);
       setWaCooldown(60);
       setOtpTotalTime(900);
+      setResendMsg("");
       clearInterval(otpTimerRef.current);
       otpTimerRef.current = setInterval(() => {
+        setSmsCooldown(prev => (prev > 0 ? prev - 1 : 0));
         setWaCooldown(prev => (prev > 0 ? prev - 1 : 0));
         setOtpTotalTime(prev => {
           if (prev <= 1) {
@@ -149,6 +161,10 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
       const data = await res.json();
       if (data.otp_waiting) {
         setAssignStatus(prev => (prev !== "OTP" ? "OTP" : prev));
+        if (data.otp_channel) {
+          setOtpChannel(data.otp_channel);
+          if (data.otp_channel === "whatsapp") setWaRequested(true);
+        }
         return;
       }
       if (data.status === "DONE") {
@@ -165,22 +181,51 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     } catch { /* keep polling */ }
   };
 
-  const requestWhatsappOtp = async () => {
-    if (waRequesting || waCooldown > 0 || !assignTarget) return;
-    setWaRequesting(true);
+  const resendSmsOtp = async () => {
+    if (smsResending || smsCooldown > 0 || !assignTarget) return;
+    setSmsResending(true);
+    setResendMsg("Meminta kirim ulang kode SMS ke Shopee...");
     try {
-      const res = await fetch(`${API_BASE_URL}/api/shopee/select-otp-channel`, {
+      const res = await fetch(`${API_BASE_URL}/api/shopee/resend-otp`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ username: assignTarget.phone || assignTarget.store_id, channel: "sms" })
+      });
+      if (!res.ok) throw new Error("Gagal meminta kirim ulang SMS");
+      setOtpChannel("sms");
+      setWaRequested(false);
+      setSmsCooldown(60);
+      setResendMsg("✓ Permintaan kirim ulang SMS telah dikirim ke Shopee.");
+      setTimeout(() => setResendMsg(""), 4000);
+    } catch (e) {
+      setAssignError(e.message);
+      setResendMsg("");
+    } finally {
+      setSmsResending(false);
+    }
+  };
+
+  const resendWhatsappOtp = async () => {
+    if (waResending || waCooldown > 0 || !assignTarget) return;
+    setWaResending(true);
+    setResendMsg("Meminta kirim ulang kode WhatsApp ke Shopee...");
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/shopee/resend-otp`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ username: assignTarget.phone || assignTarget.store_id, channel: "whatsapp" })
       });
-      if (!res.ok) throw new Error("Gagal beralih ke saluran WhatsApp");
+      if (!res.ok) throw new Error("Gagal meminta kirim ulang WhatsApp");
       setOtpChannel("whatsapp");
       setWaRequested(true);
+      setWaCooldown(60);
+      setResendMsg("✓ Permintaan kirim OTP via WhatsApp telah dikirim ke Shopee.");
+      setTimeout(() => setResendMsg(""), 4000);
     } catch (e) {
       setAssignError(e.message);
+      setResendMsg("");
     } finally {
-      setWaRequesting(false);
+      setWaResending(false);
     }
   };
 
@@ -399,12 +444,12 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
                 </div>
 
                 <p className="text-xs text-amber-700 dark:text-amber-400 leading-relaxed">
-                  {waRequested ? (
+                  {otpChannel === "whatsapp" || waRequested ? (
                     <span className="text-emerald-700 dark:text-emerald-400 font-medium">
                       ✓ Shopee mengirimkan kode OTP via <strong>WhatsApp</strong>. Silakan periksa chat WA pada nomor terdaftar.
                     </span>
                   ) : (
-                    <>Shopee mengirimkan kode OTP ke nomor terdaftar. Masukkan kode di bawah ini.</>
+                    <>Shopee mengirimkan kode OTP via <strong>SMS</strong> ke nomor terdaftar. Masukkan kode di bawah ini.</>
                   )}
                 </p>
 
@@ -429,32 +474,51 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
                   </button>
                 </div>
 
-                {/* WhatsApp Channel Switcher (appears after 1 minute cooldown) */}
-                <div className="pt-1.5 border-t border-amber-200/60 dark:border-amber-800/40">
-                  {waCooldown > 0 ? (
-                    <div className="flex items-center justify-between text-[11px] text-zinc-500 dark:text-zinc-400">
-                      <span>Tidak menerima SMS? Opsi WhatsApp:</span>
-                      <span className="font-mono font-medium text-amber-700 dark:text-amber-400">Tersedia dalam {waCooldown}s</span>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-zinc-600 dark:text-zinc-400">Tidak menerima SMS?</span>
-                      <button
-                        type="button"
-                        onClick={requestWhatsappOtp}
-                        disabled={waRequesting || waRequested}
-                        className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer border ${
-                          waRequested
-                            ? "border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300"
-                            : "border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50"
-                        } disabled:opacity-75`}
-                      >
-                        <svg className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-5.805 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z"/>
-                        </svg>
-                        {waRequested ? "Terkirim ke WhatsApp ✓" : waRequesting ? "Memproses..." : "Kirim via WhatsApp"}
-                      </button>
-                    </div>
+                {/* Resend & Channel Switcher Controls */}
+                <div className="pt-2 border-t border-amber-200/70 dark:border-amber-800/40 space-y-2">
+                  <div className="flex items-center justify-between text-xs text-zinc-600 dark:text-zinc-400">
+                    <span className="font-medium">Tidak menerima Kode OTP?</span>
+                    <span className="text-[11px] text-zinc-500">
+                      Saluran aktif: <strong className="uppercase text-amber-700 dark:text-amber-400">{otpChannel}</strong>
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {/* Resend SMS Button */}
+                    <button
+                      type="button"
+                      onClick={resendSmsOtp}
+                      disabled={smsResending || smsCooldown > 0}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold border border-amber-300 dark:border-amber-700 bg-amber-50/80 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      <svg className={`h-3.5 w-3.5 text-amber-600 dark:text-amber-400 ${smsResending ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H17" />
+                      </svg>
+                      <span>
+                        {smsResending ? "Mengirim..." : smsCooldown > 0 ? `Kirim Ulang SMS (${smsCooldown}s)` : "Kirim Ulang SMS"}
+                      </span>
+                    </button>
+
+                    {/* Resend WhatsApp Button */}
+                    <button
+                      type="button"
+                      onClick={resendWhatsappOtp}
+                      disabled={waResending || waCooldown > 0}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      <svg className={`h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 ${waResending ? "animate-spin" : ""}`} viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-5.805 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z"/>
+                      </svg>
+                      <span>
+                        {waResending ? "Mengirim..." : waCooldown > 0 ? `Kirim WhatsApp (${waCooldown}s)` : (waRequested ? "Kirim Ulang WA" : "Kirim via WhatsApp")}
+                      </span>
+                    </button>
+                  </div>
+
+                  {resendMsg && (
+                    <p className="text-[11px] text-center font-medium text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 py-1 px-2 rounded-md border border-emerald-200/50">
+                      {resendMsg}
+                    </p>
                   )}
                 </div>
               </div>

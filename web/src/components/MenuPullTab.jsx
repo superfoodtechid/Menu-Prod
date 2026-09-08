@@ -761,6 +761,7 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                   )}
                   <a
                     href={`${API_BASE_URL}${combinedResult.download_url}`}
+                    download={combinedResult.excel_filename}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="rounded-lg bg-red-700 px-3.5 py-2 text-[13px] font-bold text-white shadow-sm transition hover:bg-red-800 flex items-center justify-center gap-1.5 w-full"
@@ -837,28 +838,18 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                     </div>
                   )}
 
-                  {job.status === "SUCCESS" && (
+                  {job.status === "SUCCESS" && job.result_metadata?.gspread_url && (
                     <div className="pt-2 border-t border-zinc-100 flex justify-end gap-2">
-                      {job.result_metadata?.gspread_url && (
-                        <a
-                          href={job.result_metadata.gspread_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="secondary-action gap-1.5 px-3 py-1.5 text-[13px]"
-                        >
-                          <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2m-7 14H6v-2h6v2zm8-4H6v-2h14v2zm0-4H6V7h14v2z" />
-                          </svg>
-                          Buka Google Sheets
-                        </a>
-                      )}
                       <a
-                        href={`${API_BASE_URL}/api/jobs/download/${job.id}`}
+                        href={job.result_metadata.gspread_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="rounded-lg bg-red-700 px-3 py-1.5 text-[13px] font-semibold text-white shadow-sm transition hover:bg-red-800"
+                        className="secondary-action gap-1.5 px-3 py-1.5 text-[13px]"
                       >
-                        Unduh Excel C5
+                        <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                          <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2m-7 14H6v-2h6v2zm8-4H6v-2h14v2zm0-4H6V7h14v2z" />
+                        </svg>
+                        Buka Google Sheets
                       </a>
                     </div>
                   )}
