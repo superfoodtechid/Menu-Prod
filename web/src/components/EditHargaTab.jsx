@@ -116,16 +116,6 @@ const MenuRowItem = memo(function MenuRowItem({
           <span className="px-2.5 py-1 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold border border-emerald-200 dark:border-emerald-900/60 inline-block">
             {pctFmt} (Valid)
           </span>
-        ) : ver ? (
-          ver.status === "VERIFIED" ? (
-            <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[11px] font-semibold">
-              Terverifikasi Portal
-            </span>
-          ) : (
-            <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[11px] font-semibold">
-              Menunggu Sinkron
-            </span>
-          )
         ) : item.is_in_promo ? (
           <span className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[11px] font-semibold border border-amber-300 dark:border-amber-700 inline-block">
             Promo ({item.promo_value || "Aktif"})
@@ -183,10 +173,23 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [selectedItemIds, setSelectedItemIds] = useState([]);
 
   const toggleSelectItem = useCallback((itemId) => {
-    setSelectedItemIds(prev =>
-      prev.includes(itemId) ? prev.filter(id => id !== itemId) : [...prev, itemId]
-    );
-  }, []);
+    setSelectedItemIds(prev => {
+      const isCurrentlySelected = prev.includes(itemId);
+      if (isCurrentlySelected) {
+        // Point 4: de-select pada suatu item menu menetralkan angka ke semula
+        if (selectedBrandId) {
+          setEdits(p => {
+            const bEdits = { ...(p[selectedBrandId] || {}) };
+            delete bEdits[itemId];
+            return { ...p, [selectedBrandId]: bEdits };
+          });
+        }
+        return prev.filter(id => id !== itemId);
+      } else {
+        return [...prev, itemId];
+      }
+    });
+  }, [selectedBrandId]);
 
   const [menuSearch, setMenuSearch] = useState("");
 
@@ -196,6 +199,15 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const deselectAllItems = () => {
+    if (selectedBrandId && selectedItemIds.length > 0) {
+      setEdits(p => {
+        const bEdits = { ...(p[selectedBrandId] || {}) };
+        selectedItemIds.forEach(id => {
+          delete bEdits[id];
+        });
+        return { ...p, [selectedBrandId]: bEdits };
+      });
+    }
     setSelectedItemIds([]);
   };
 
@@ -585,10 +597,16 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             clearInterval(pushPollingIntervalsRef.current[jobId]);
             delete pushPollingIntervalsRef.current[jobId];
 
-            // Refresh local menu data for target branch quietly without secondary loading card
             const targetBranch = branches.filter(b => b.id === branchId);
             if (targetBranch.length > 0) {
-              fetchMenusAndVerify(targetBranch, intendedPushPrices);
+              if (job.status === "SUCCESS" || job.status === "PARTIAL_SUCCESS") {
+                // Point 7: defaultkan selalu tarik ulang (tarik live) setelah update menu
+                setTimeout(() => {
+                  triggerAutoPull(targetBranch);
+                }, 1200);
+              } else {
+                fetchMenusAndVerify(targetBranch, intendedPushPrices);
+              }
             }
           }
         })
@@ -1313,7 +1331,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                   {item.error_message ? (
                                     <span className="text-red-700 font-medium">{item.error_message}</span>
                                   ) : (
-                                    <span className="text-emerald-700 font-medium">Terverifikasi di portal</span>
+                                    <span className="text-emerald-700 font-medium">Berhasil diupdate</span>
                                   )}
                                 </td>
                               </tr>

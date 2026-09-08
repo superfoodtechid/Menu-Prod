@@ -34,10 +34,21 @@ const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
   onChangePrice,
   fmt
 }) {
+  const isLocked = item.is_price_locked || item.is_pushed_24h;
+  const lockTitle = item.is_pushed_24h
+    ? (item.pushed_24h_reason || "Menu dikunci 24 jam setelah update harga")
+    : item.is_flash_sale
+    ? "Harga dikunci karena menu sedang dalam Flash Sale aktif"
+    : item.is_price_locked
+    ? "Harga dikunci oleh sistem"
+    : "";
+
   return (
     <tr className={`transition ${
       isChecked
         ? "bg-amber-50/80 dark:bg-amber-950/30"
+        : item.is_pushed_24h
+        ? "bg-amber-50/40 dark:bg-amber-950/20 opacity-80"
         : item.is_price_locked
         ? "bg-rose-50/30 dark:bg-rose-950/20"
         : item.is_in_promo
@@ -48,12 +59,12 @@ const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
         <td className="p-3.5 text-center align-middle">
           <input
             type="checkbox"
-            disabled={item.is_price_locked}
-            title={item.is_price_locked ? "Item dalam Flash Sale tidak dapat diubah" : ""}
+            disabled={isLocked}
+            title={lockTitle}
             checked={isChecked}
             onChange={() => onToggleSelect(item.id)}
             className={`h-4 w-4 rounded border-zinc-300 ${
-              item.is_price_locked
+              isLocked
                 ? "opacity-30 cursor-not-allowed text-zinc-400"
                 : "text-orange-600 focus:ring-orange-500 cursor-pointer"
             }`}
@@ -85,12 +96,14 @@ const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
       <td className="p-3.5 text-right align-middle">
         <input
           type="text"
-          disabled={item.is_price_locked}
-          title={item.is_price_locked ? "Harga dikunci karena menu sedang dalam Flash Sale aktif" : ""}
+          disabled={isLocked}
+          title={lockTitle}
           value={fmt(curPrice)}
           onChange={(e) => onChangePrice(item.id, e.target.value)}
           className={`w-32 text-right p-2 rounded-xl border font-mono font-bold text-sm ${
-            item.is_price_locked
+            item.is_pushed_24h
+              ? "border-amber-300 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-300 cursor-not-allowed opacity-80"
+              : item.is_price_locked
               ? "border-rose-300 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/30 text-rose-900 dark:text-rose-300 cursor-not-allowed opacity-80"
               : isEdited
               ? "border-orange-500 bg-orange-50 dark:bg-orange-950/40 text-orange-900 dark:text-orange-200 focus:ring-2 focus:ring-orange-500/20"
@@ -99,7 +112,15 @@ const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
         />
       </td>
       <td className="p-3.5 text-center align-middle">
-        {item.is_flash_sale ? (
+        {item.is_pushed_24h ? (
+          <span
+            title={item.pushed_24h_reason || "Menu dikunci selama 24 jam setelah update harga Shopee"}
+            className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 text-[11px] font-semibold border border-amber-300 dark:border-amber-800 inline-flex items-center gap-1 shadow-xs"
+          >
+            <span>🔒</span>
+            <span>Dikunci 24 Jam ({item.pushed_24h_remaining_hours ?? 0}j)</span>
+          </span>
+        ) : item.is_flash_sale ? (
           <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 text-[11px] font-semibold border border-rose-300 dark:border-rose-800 inline-block">
             Flash Sale (Dikunci)
           </span>
@@ -504,6 +525,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [syncPhase, setSyncPhase] = useState("idle");
   const [itemEditMode, setItemEditMode] = useState("single"); // "single" | "multi"
   const [selectedItemIds, setSelectedItemIds] = useState([]);
+  const [sessionsMap, setSessionsMap] = useState({});
 
   // Custom Searchable Dropdown States
   const [openOutletDropdown, setOpenOutletDropdown] = useState(false);
@@ -541,6 +563,28 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
       .catch(err => console.error("Error fetching cache status:", err));
   }, [API_BASE_URL, API_SECRET_KEY, selectedBrandId]);
 
+  // Fetch Shopee session status
+  const fetchSessions = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/sessions`, {
+        headers: { "X-API-Key": API_SECRET_KEY || "" }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const map = {};
+        if (Array.isArray(data)) {
+          data.forEach(s => {
+            if (s.id) map[s.id] = s;
+            if (s.store_id) map[s.store_id] = s;
+          });
+        }
+        setSessionsMap(map);
+      }
+    } catch (err) {
+      console.error("Error fetching Shopee sessions:", err);
+    }
+  }, [API_BASE_URL, API_SECRET_KEY]);
+
   // Sync Google Sheets on Mount & Fetch Shopee Outlets
   const triggerGSheetSync = useCallback(async () => {
     try {
@@ -555,6 +599,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
   useEffect(() => {
     setLoading(true);
+    fetchSessions();
     triggerGSheetSync().then(() => {
       return fetch(`${API_BASE_URL}/api/outlets?platform=shopee`, {
         headers: { "X-API-Key": API_SECRET_KEY || "" }
@@ -569,7 +614,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         setAllOutlets([]);
         setLoading(false);
       });
-  }, [API_BASE_URL, API_SECRET_KEY, triggerGSheetSync]);
+  }, [API_BASE_URL, API_SECRET_KEY, triggerGSheetSync, fetchSessions]);
 
   // Unique Parents list
   const uniqueParents = useMemo(() => {
@@ -706,7 +751,10 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                   discounted_price: i.discounted_price ? Number(i.discounted_price) : null,
                   promo_type: i.promo_type || "NONE",
                   promo_value: i.promo_value || "",
-                  is_price_locked: Boolean(i.is_price_locked),
+                  is_price_locked: Boolean(i.is_price_locked || i.is_pushed_24h),
+                  is_pushed_24h: Boolean(i.is_pushed_24h),
+                  pushed_24h_remaining_hours: i.pushed_24h_remaining_hours,
+                  pushed_24h_reason: i.pushed_24h_reason,
                   promo_details: i.promo_details || null
                 }));
                 setBranchMenus(prev => ({ ...prev, [job.branchId]: items }));
@@ -746,7 +794,10 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             discounted_price: i.discounted_price ? Number(i.discounted_price) : null,
             promo_type: i.promo_type || "NONE",
             promo_value: i.promo_value || "",
-            is_price_locked: Boolean(i.is_price_locked),
+            is_price_locked: Boolean(i.is_price_locked || i.is_pushed_24h),
+            is_pushed_24h: Boolean(i.is_pushed_24h),
+            pushed_24h_remaining_hours: i.pushed_24h_remaining_hours,
+            pushed_24h_reason: i.pushed_24h_reason,
             promo_details: i.promo_details || null
           }));
           newMenus[b.id] = items;
@@ -787,12 +838,22 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     setBranches(targetBranches);
     setSelectedBrandId("");
     setSyncPhase("idle");
+    setSelectedItemIds([]);
+    setMenuSearch("");
+    setBranchMenus({});
+    setEdits({});
+    setCacheInfo(null);
   };
 
   const handleSelectBrand = (branchId) => {
     setSelectedBrandId(branchId);
     setOpenBranchDropdown(false);
     setSyncPhase("idle");
+    setSelectedItemIds([]);
+    setMenuSearch("");
+    setBranchMenus({});
+    setEdits({});
+    setCacheInfo(null);
   };
 
   const startPollingPushJob = (jobId, branchId) => {
@@ -825,6 +886,15 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
           if (job.status === "SUCCESS" || job.status === "FAILED" || job.status === "PARTIAL_SUCCESS") {
             clearInterval(pushPollingIntervalsRef.current[jobId]);
             delete pushPollingIntervalsRef.current[jobId];
+
+            if (job.status === "SUCCESS" || job.status === "PARTIAL_SUCCESS") {
+              const targetBranch = branches.find(b => b.id === branchId);
+              if (targetBranch) {
+                setTimeout(() => {
+                  triggerAutoPull([targetBranch]);
+                }, 1200);
+              }
+            }
           }
         })
         .catch(err => console.error("Error polling push job:", err));
@@ -836,13 +906,19 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     const branch = branches.find(x => x.id === selectedBrandId);
     if (!branch) return;
 
+    const sess = sessionsMap[branch.id] || sessionsMap[branch.store_id];
+    if (!sess?.has_session) {
+      alert("Branch ini belum memiliki sesi aktif Shopee. Harap hubungkan sesi di tab Kelola Sesi terlebih dahulu.");
+      return;
+    }
+
     setPushing(true);
     const branchEdits = edits[selectedBrandId] || {};
     const branchItems = branchMenus[selectedBrandId] || [];
     const updates = [];
 
     branchItems.forEach(i => {
-      if (i.is_price_locked) return;
+      if (i.is_price_locked || i.is_pushed_24h) return;
       const curPrice = branchEdits[i.id];
       if (curPrice !== undefined && curPrice !== i.price) {
         updates.push({
@@ -925,12 +1001,20 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     if (!selectedBrandId) return;
     const branch = branches.find(x => x.id === selectedBrandId);
     if (!branch) return;
+
+    const sess = sessionsMap[branch.id] || sessionsMap[branch.store_id];
+    if (!sess?.has_session) {
+      alert("Branch ini belum memiliki sesi aktif Shopee. Harap hubungkan sesi di tab Kelola Sesi terlebih dahulu.");
+      return;
+    }
+
     const bLabel = branch.brand || branch.nama_outlet || branch.merchant_name;
     const branchItems = branchMenus[selectedBrandId] || [];
     const branchEdits = edits[selectedBrandId] || {};
     const itemUpdates = [];
 
     branchItems.forEach(item => {
+      if (item.is_price_locked || item.is_pushed_24h) return;
       const curPrice = branchEdits[item.id];
       if (curPrice !== undefined && curPrice !== item.price) {
         const diff = curPrice - item.price;
@@ -1063,13 +1147,14 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     }).length;
   }, [rawItems, edits, selectedBrandId]);
 
-  const promoLockedCount = useMemo(() => rawItems.filter(i => i.is_price_locked).length, [rawItems]);
+  const promoLockedCount = useMemo(() => rawItems.filter(i => i.is_price_locked || i.is_pushed_24h).length, [rawItems]);
 
   // Bulk adjust prices with optional rounding and item ID filtering
   const bulkAdj = (mode, type, val, rounding = "none", itemIds = null) => {
     setEdits(prev => {
       const bEdits = { ...(prev[selectedBrandId] || {}) };
       rawItems.forEach(i => {
+        if (i.is_price_locked || i.is_pushed_24h) return;
         if (!itemIds || itemIds.includes(i.id)) {
           bEdits[i.id] = applyAdj(bEdits[i.id] ?? i.price, mode, type, val, rounding);
         }
@@ -1083,22 +1168,48 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const selectAllVisibleItems = () => {
-    // Only select items that are not price locked (e.g. active flash sale)
-    const selectable = items.filter(i => !i.is_price_locked).map(i => i.id);
+    // Only select items that are not price locked or in 24h push cooldown
+    const selectable = items.filter(i => !i.is_price_locked && !i.is_pushed_24h).map(i => i.id);
     setSelectedItemIds(selectable);
   };
+
   const deselectAllItems = () => {
+    if (selectedBrandId && selectedItemIds.length > 0) {
+      setEdits(prev => {
+        const bEdits = { ...(prev[selectedBrandId] || {}) };
+        selectedItemIds.forEach(id => {
+          delete bEdits[id];
+        });
+        return { ...prev, [selectedBrandId]: bEdits };
+      });
+    }
     setSelectedItemIds([]);
   };
+
   const toggleSelectItem = useCallback((id) => {
     const item = rawItems.find(i => String(i.id) === String(id));
-    if (item && item.is_price_locked) return; // Prevent selection of locked items
-    setSelectedItemIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    );
-  }, [rawItems]);
+    if (item && (item.is_price_locked || item.is_pushed_24h)) return; // Prevent selection of locked items
+    setSelectedItemIds(prev => {
+      const isCurrentlySelected = prev.includes(id);
+      if (isCurrentlySelected) {
+        // Point 4: de-select pada suatu item menu menetralkan angka ke semula
+        if (selectedBrandId) {
+          setEdits(p => {
+            const bEdits = { ...(p[selectedBrandId] || {}) };
+            delete bEdits[id];
+            return { ...p, [selectedBrandId]: bEdits };
+          });
+        }
+        return prev.filter(x => x !== id);
+      } else {
+        return [...prev, id];
+      }
+    });
+  }, [rawItems, selectedBrandId]);
 
   const handleItemPriceChange = useCallback((itemId, newPriceVal) => {
+    const item = rawItems.find(i => String(i.id) === String(itemId));
+    if (item && (item.is_price_locked || item.is_pushed_24h)) return;
     const val = parse(newPriceVal);
     setEdits(p => ({
       ...p,
@@ -1107,7 +1218,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         [itemId]: val
       }
     }));
-  }, [selectedBrandId]);
+  }, [rawItems, selectedBrandId]);
 
   return (
     <div className="space-y-6 pb-28">
@@ -1226,17 +1337,39 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                     {branches.map(b => {
                       const isSelected = selectedBrandId === b.id;
                       const bName = b.brand || b.nama_outlet || b.merchant_name;
+                      const sess = sessionsMap[b.id] || sessionsMap[b.store_id];
+                      const hasSession = Boolean(sess?.has_session);
                       return (
                         <button
                           key={b.id}
                           type="button"
-                          onClick={() => handleSelectBrand(b.id)}
-                          className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between transition-colors cursor-pointer ${
-                            isSelected ? "bg-orange-50 text-orange-700 font-bold dark:bg-orange-950/60 dark:text-orange-300" : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          disabled={!hasSession}
+                          onClick={() => {
+                            if (!hasSession) return;
+                            handleSelectBrand(b.id);
+                          }}
+                          title={hasSession ? "Sesi Aktif" : "Sesi Tidak Aktif (Harap Ingest Sesi di tab Kelola Sesi)"}
+                          className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between transition-colors ${
+                            !hasSession
+                              ? "opacity-45 cursor-not-allowed bg-zinc-50 dark:bg-zinc-900/40 text-zinc-400 dark:text-zinc-500"
+                              : isSelected
+                              ? "bg-orange-50 text-orange-700 font-bold dark:bg-orange-950/60 dark:text-orange-300 cursor-pointer"
+                              : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800 cursor-pointer"
                           }`}
                         >
                           <div className="truncate">
-                            <div className="font-bold">{bName}</div>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold">{bName}</span>
+                              {hasSession ? (
+                                <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                                  ● Sesi Aktif
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-bold bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+                                  ✕ Sesi Tidak Aktif
+                                </span>
+                              )}
+                            </div>
                             <div className="text-[10px] text-zinc-400">Store ID: {b.store_id} | User: {b.account?.username || "-"}</div>
                           </div>
                           {isSelected && <span className="text-orange-600 dark:text-orange-400 font-bold">✓</span>}
@@ -1251,73 +1384,94 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         </div>
 
         {/* Selected Outlet Credentials Display */}
-        {selectedBrandObj && (
-          <div className="mt-4 p-4 rounded-2xl bg-orange-50/70 dark:bg-orange-950/30 border border-orange-200/80 dark:border-orange-900/40">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-              <div className="space-y-1.5 min-w-0 flex-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-orange-800 dark:text-orange-300">
-                  Kredensial Shopee Partner Portal
-                </span>
-                <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs font-mono">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-zinc-500 font-sans">Nama Pengguna (Kolom Q):</span>
-                    <strong className="text-zinc-900 dark:text-white font-bold">{selectedBrandObj.account?.username || "-"}</strong>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-zinc-500 font-sans">Kata Sandi (Kolom S):</span>
-                    {selectedBrandObj.account?.password && selectedBrandObj.account.password !== "-" ? (
-                      <div className="inline-flex items-center">
-                        <strong className="text-zinc-900 dark:text-white font-bold">
-                          {showPasswordMap[selectedBrandObj.id] ? selectedBrandObj.account.password : "••••••••"}
-                        </strong>
-                        <button
-                          type="button"
-                          onClick={() => setShowPasswordMap(p => ({ ...p, [selectedBrandObj.id]: !p[selectedBrandObj.id] }))}
-                          className="ml-2 text-[11px] font-sans font-bold text-orange-600 dark:text-orange-400 underline cursor-pointer"
-                        >
-                          {showPasswordMap[selectedBrandObj.id] ? "Sembunyikan" : "Tampilkan"}
-                        </button>
-                      </div>
+        {selectedBrandObj && (() => {
+          const sess = sessionsMap[selectedBrandObj.id] || sessionsMap[selectedBrandObj.store_id];
+          const hasSession = Boolean(sess?.has_session);
+          return (
+            <div className="mt-4 p-4 rounded-2xl bg-orange-50/70 dark:bg-orange-950/30 border border-orange-200/80 dark:border-orange-900/40">
+              {!hasSession && (
+                <div className="mb-3 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900/60 text-rose-800 dark:text-rose-200 text-xs flex items-center gap-2 font-medium">
+                  <span className="text-base">⚠️</span>
+                  <span>Branch ini belum memiliki sesi aktif Shopee Food. Harap hubungkan sesi di tab <strong>Kelola Sesi</strong> terlebih dahulu agar dapat menggunakan fitur edit harga dan penarikan live.</span>
+                </div>
+              )}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1.5 min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-orange-800 dark:text-orange-300">
+                      Kredensial Shopee Partner Portal
+                    </span>
+                    {hasSession ? (
+                      <span className="text-[10px] font-bold bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
+                        ● Sesi Aktif
+                      </span>
                     ) : (
-                      <span className="font-sans font-bold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/60 px-2 py-0.5 rounded-md border border-amber-200 dark:border-amber-800/60 text-[11px]">
-                        Tanpa Password (Langsung OTP)
+                      <span className="text-[10px] font-bold bg-rose-100 dark:bg-rose-950/80 text-rose-800 dark:text-rose-300 px-2 py-0.5 rounded-full border border-rose-200 dark:border-rose-800">
+                        ✕ Sesi Belum Aktif
                       </span>
                     )}
                   </div>
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs font-mono">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-zinc-500 font-sans">Nama Pengguna (Kolom Q):</span>
+                      <strong className="text-zinc-900 dark:text-white font-bold">{selectedBrandObj.account?.username || "-"}</strong>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-zinc-500 font-sans">Kata Sandi (Kolom S):</span>
+                      {selectedBrandObj.account?.password && selectedBrandObj.account.password !== "-" ? (
+                        <div className="inline-flex items-center">
+                          <strong className="text-zinc-900 dark:text-white font-bold">
+                            {showPasswordMap[selectedBrandObj.id] ? selectedBrandObj.account.password : "••••••••"}
+                          </strong>
+                          <button
+                            type="button"
+                            onClick={() => setShowPasswordMap(p => ({ ...p, [selectedBrandObj.id]: !p[selectedBrandObj.id] }))}
+                            className="ml-2 text-[11px] font-sans font-bold text-orange-600 dark:text-orange-400 underline cursor-pointer"
+                          >
+                            {showPasswordMap[selectedBrandObj.id] ? "Sembunyikan" : "Tampilkan"}
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="font-sans font-bold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/60 px-2 py-0.5 rounded-md border border-amber-200 dark:border-amber-800/60 text-[11px]">
+                          Tanpa Password (Langsung OTP)
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              </div>
 
-              <div className="flex items-center gap-2.5 shrink-0 pt-2 lg:pt-0">
-                {/* Button 1: Buka Data Terakhir */}
-                {cacheInfo?.has_cache && (
+                <div className="flex items-center gap-2.5 shrink-0 pt-2 lg:pt-0">
+                  {/* Button 1: Buka Data Terakhir */}
+                  {cacheInfo?.has_cache && (
+                    <button
+                      type="button"
+                      disabled={syncPhase === "syncing" || !hasSession}
+                      onClick={handleLoadCache}
+                      className="px-5 py-2.5 rounded-2xl font-bold text-xs bg-[#403D88] hover:bg-[#34316e] text-white shadow-sm transition flex items-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={!hasSession ? "Harap hubungkan sesi terlebih dahulu" : "Tampilkan data menu lokal terakhir tanpa membuka browser"}
+                    >
+                      <span>Buka Data Terakhir ({cacheInfo.human_age})</span>
+                    </button>
+                  )}
+
+                  {/* Button 2: Update Menu Live */}
                   <button
                     type="button"
-                    disabled={syncPhase === "syncing"}
-                    onClick={handleLoadCache}
-                    className="px-5 py-2.5 rounded-2xl font-bold text-xs bg-[#403D88] hover:bg-[#34316e] text-white shadow-sm transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
-                    title="Tampilkan data menu lokal terakhir tanpa membuka browser"
+                    disabled={syncPhase === "syncing" || !hasSession}
+                    onClick={handleLiveSync}
+                    className="px-5 py-2.5 rounded-2xl font-bold text-xs bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-sm transition flex items-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    title={!hasSession ? "Harap hubungkan sesi terlebih dahulu" : "Meluncurkan browser untuk tarik menu live terbaru dari Shopee Partner (allvbadmin)"}
                   >
-                    <span>Buka Data Terakhir ({cacheInfo.human_age})</span>
+                    <svg className={`w-4 h-4 text-zinc-700 ${syncPhase === "syncing" ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    <span>{syncPhase === "syncing" ? "Sedang Menarik Menu Real-Time..." : "Update Menu Live"}</span>
                   </button>
-                )}
-
-                {/* Button 2: Update Menu Live */}
-                <button
-                  type="button"
-                  disabled={syncPhase === "syncing"}
-                  onClick={handleLiveSync}
-                  className="px-5 py-2.5 rounded-2xl font-bold text-xs bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-sm transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
-                  title="Meluncurkan browser untuk tarik menu live terbaru dari Shopee Partner (allvbadmin)"
-                >
-                  <svg className={`w-4 h-4 text-zinc-700 ${syncPhase === "syncing" ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  <span>{syncPhase === "syncing" ? "Sedang Menarik Menu Real-Time..." : "Update Menu Live"}</span>
-                </button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* Active Jobs Progress Card */}
@@ -1447,7 +1601,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                                       <span>⚠️</span> {friendlyErr}
                                     </span>
                                   ) : (
-                                    <span className="text-emerald-700 dark:text-emerald-400 font-medium">Terverifikasi di Shopee Portal</span>
+                                    <span className="text-emerald-700 dark:text-emerald-400 font-medium">Berhasil diupdate</span>
                                   )}
                                 </td>
                               </tr>
@@ -1479,7 +1633,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                 Total <strong>{items.length} menu item</strong> dimuat. Saat ini ada <strong className="text-orange-600 dark:text-orange-400">{changedCount} item disesuaikan</strong>.
                 {promoLockedCount > 0 && (
                   <span className="ml-2 text-purple-700 dark:text-purple-400 font-bold">
-                    ({promoLockedCount} menu Flash Sale dikunci)
+                    ({promoLockedCount} menu dikunci: Flash Sale / Cooldown 24 Jam)
                   </span>
                 )}
               </p>
