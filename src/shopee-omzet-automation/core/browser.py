@@ -51,67 +51,6 @@ def get_session_file() -> Path:
         _thread_local.session_file = Path(__file__).resolve().parent.parent / "data" / "session.json"
     return _thread_local.session_file
 
-def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: str = "", driver=None) -> str:
-    script_dir = Path(__file__).resolve().parent.parent
-    data_dir = script_dir / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    otp_file = data_dir / f"otp_request_{username}.json"
-    
-    request_data = {
-        "status": "WAITING_OTP",
-        "username": username,
-        "phone": phone or "",
-        "error_msg": error_msg or "",
-        "requested_at": datetime.now().isoformat()
-    }
-    
-    try:
-        otp_file.write_text(json.dumps(request_data, indent=2))
-        log.info(f"🔑 [OTP] File request OTP dibuat untuk '{username}': {otp_file.name} (error='{error_msg}'). Menunggu input OTP via Web UI / API (timeout {timeout}s)...")
-        print(f"DISCORD_OTP_REQUEST: {json.dumps(request_data)}", flush=True)
-    except Exception as e:
-        log.error(f"Gagal menulis file request OTP: {e}")
-        return ""
-    
-    start_wait = time.time()
-    whatsapp_triggered = False
-    while time.time() - start_wait < timeout:
-        if otp_file.exists():
-            try:
-                data = json.loads(otp_file.read_text())
-
-                if data.get("status") == "CANCELLED":
-                    log.info(f"❌ [OTP] User membatalkan OTP untuk '{username}'")
-                    otp_file.unlink(missing_ok=True)
-                    raise RuntimeError("user membatalkan otp")
-
-                # Cek jika pengguna memilih saluran WhatsApp di Web UI
-                req_channel = (data.get("requested_channel") or "").lower()
-                if driver and req_channel == "whatsapp" and not whatsapp_triggered:
-                    log.info("📲 [OTP] Pengguna memilih WhatsApp di Web UI! Menjalankan 'metode verifikasi lainnya'...")
-                    try:
-                        success = _handle_verification_method_selection(driver, target_method="whatsapp")
-                        if success:
-                            whatsapp_triggered = True
-                            log.info("✅ [OTP] Pemicuan WhatsApp OTP sukses!")
-                    except Exception as ch_err:
-                        log.error(f"Gagal memproses pemicuan WhatsApp OTP: {ch_err}")
-
-                if data.get("status") == "RECEIVED" and data.get("code"):
-                    otp_code = str(data["code"]).strip()
-                    log.info(f"✅ [OTP] Kode OTP diterima ({data.get('channel', 'sms')}): {otp_code}")
-                    otp_file.unlink(missing_ok=True)
-                    return otp_code
-            except RuntimeError as re:
-                raise re
-            except Exception as e:
-                log.error(f"Error membaca file OTP: {e}")
-        time.sleep(2)
-        
-    log.warning(f"❌ [OTP] Timeout ({timeout}s) menunggu OTP untuk '{username}'")
-    otp_file.unlink(missing_ok=True)
-    return ""
-
 def set_session_file(val):
     _thread_local.session_file = Path(val)
 
@@ -756,6 +695,7 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: 
         "username": username,
         "phone": phone or "",
         "error_msg": error_msg or "",
+        "current_channel": "sms",
         "requested_at": datetime.now().isoformat()
     }
     
@@ -772,6 +712,7 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: 
     
     start_wait = time.time()
     whatsapp_triggered = False
+    last_handled_action_id = None
     while time.time() - start_wait < timeout:
         target_fpath = otp_file if otp_file.exists() else (otp_file_alt if otp_file_alt.exists() else None)
         if target_fpath:
@@ -784,15 +725,45 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: 
                     otp_file_alt.unlink(missing_ok=True)
                     raise RuntimeError("user membatalkan otp")
 
-                # Cek jika pengguna memilih saluran WhatsApp di Web UI
-                req_channel = (data.get("requested_channel") or "").lower()
-                if driver and req_channel == "whatsapp" and not whatsapp_triggered:
+                # Cek jika ada permintaan aksi Kirim Ulang / Ganti Saluran dari UI
+                action = data.get("action")
+                action_id = data.get("action_id")
+                req_channel = (data.get("action_channel") or data.get("requested_channel") or "").lower()
+
+                if driver and action_id and action_id != last_handled_action_id:
+                    last_handled_action_id = action_id
+                    log.info(f"🔁 [OTP] Permintaan aksi '{action}' untuk saluran '{req_channel.upper()}' diterima (ID: {action_id})!")
+                    try:
+                        resend_result = _handle_resend_or_switch_channel(driver, target_channel=req_channel)
+                        log.info(f"✅ [OTP] Hasil aksi {action} ({req_channel}): {resend_result}")
+                        data["action_status"] = "SUCCESS" if resend_result.get("success") else "FAILED"
+                        data["action_msg"] = resend_result.get("message", "")
+                        data["current_channel"] = resend_result.get("current_channel", req_channel)
+                        if req_channel == "whatsapp":
+                            whatsapp_triggered = True
+                        for p in [otp_file, otp_file_alt]:
+                            try: p.write_text(json.dumps(data, indent=2))
+                            except Exception: pass
+                    except Exception as act_err:
+                        log.error(f"Gagal memproses aksi {action}: {act_err}")
+                        data["action_status"] = "FAILED"
+                        data["action_msg"] = str(act_err)
+                        for p in [otp_file, otp_file_alt]:
+                            try: p.write_text(json.dumps(data, indent=2))
+                            except Exception: pass
+
+                # Fallback kompatibilitas untuk pemicuan WhatsApp tanpa action_id
+                elif driver and req_channel == "whatsapp" and not whatsapp_triggered and not action_id:
                     log.info("📲 [OTP] Pengguna memilih WhatsApp di Web UI! Menjalankan 'metode verifikasi lainnya'...")
                     try:
                         success = _handle_verification_method_selection(driver, target_method="whatsapp")
                         if success:
                             whatsapp_triggered = True
                             log.info("✅ [OTP] Pemicuan WhatsApp OTP sukses!")
+                            data["current_channel"] = "whatsapp"
+                            for p in [otp_file, otp_file_alt]:
+                                try: p.write_text(json.dumps(data, indent=2))
+                                except Exception: pass
                     except Exception as ch_err:
                         log.error(f"Gagal memproses pemicuan WhatsApp OTP: {ch_err}")
 
@@ -814,23 +785,592 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: 
     return ""
 
 
-def set_session_file(val):
-    _thread_local.session_file = Path(val)
+# ── Shopee Verification & Resend Scripts ───────────────────────────────────────
 
-class ThreadLocalSessionFileProxy:
-    def __getattr__(self, name):
-        return getattr(get_session_file(), name)
-        
-    def __str__(self):
-        return str(get_session_file())
-        
-    def __fspath__(self):
-        return str(get_session_file())
+JS_DETECT_SCREEN_CHANNEL = r"""
+    var clean = function(s) { return (s || "").toLowerCase().replace(/[\u00a0\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim(); };
+    var body = clean(document.body.innerText || document.body.textContent || "");
+    if (body.includes("pilih metode") || body.includes("pilih cara verifikasi") || body.includes("select verification method") || (body.includes("whatsapp") && body.includes("pilih"))) {
+        return "method_selection";
+    }
+    if (body.includes("melalui whatsapp") || body.includes("ke whatsapp") || body.includes("via whatsapp")) {
+        return "whatsapp";
+    }
+    if (body.includes("melalui sms") || body.includes("ke sms") || body.includes("via sms")) {
+        return "sms";
+    }
+    return "unknown";
+"""
 
-    def __eq__(self, other):
-        return get_session_file() == other
+JS_IS_METHOD_SCREEN = r"""
+    var clean = function(s) { return (s || "").toLowerCase().replace(/[\u00a0\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim(); };
+    var bodyText = clean(document.body.innerText || document.body.textContent || "");
+    return (bodyText.includes("whatsapp") && bodyText.includes("sms")) ||
+           bodyText.includes("pilih metode") ||
+           bodyText.includes("pilih cara") ||
+           bodyText.includes("pilih verifikasi") ||
+           bodyText.includes("select verification") ||
+           bodyText.includes("choose verification");
+"""
 
-SESSION_FILE = ThreadLocalSessionFileProxy()
+JS_CLICK_RESEND = r"""
+    var cleanText = function(str) {
+        if (!str) return "";
+        return str.replace(/[\u00a0\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    };
+
+    function getAllElements(root) {
+        var list = [];
+        try {
+            var walker = document.createTreeWalker(root || document.body, NodeFilter.SHOW_ELEMENT, null, false);
+            var node = walker.nextNode();
+            while (node) {
+                list.push(node);
+                if (node.shadowRoot) {
+                    list = list.concat(getAllElements(node.shadowRoot));
+                }
+                node = walker.nextNode();
+            }
+        } catch(e) {
+            list = Array.from((root || document).querySelectorAll('*'));
+        }
+        return list;
+    }
+
+    var allEls = getAllElements(document.body);
+    var resendRegex = /(?:kirim(?:kan)?\s*(?:ulang|lagi|kode)|resend\s*(?:code)?|resend)/i;
+    var ignoredTags = ['script', 'style', 'noscript', 'head', 'meta', 'link', 'svg', 'path'];
+
+    var candidates = [];
+    for (var i = 0; i < allEls.length; i++) {
+        var el = allEls[i];
+        var tag = (el.tagName || "").toLowerCase();
+        if (ignoredTags.indexOf(tag) !== -1) continue;
+
+        var txt = cleanText(el.innerText || el.textContent || el.value || "");
+        if (!txt) continue;
+
+        if (resendRegex.test(txt)) {
+            var hasMatchingChild = false;
+            for (var c = 0; c < el.children.length; c++) {
+                var childTxt = cleanText(el.children[c].innerText || el.children[c].textContent || "");
+                if (resendRegex.test(childTxt)) {
+                    hasMatchingChild = true;
+                    break;
+                }
+            }
+            if (!hasMatchingChild) {
+                candidates.push({el: el, txt: txt, len: txt.length, tag: tag});
+            }
+        }
+    }
+
+    if (candidates.length === 0) {
+        var debugList = [];
+        for (var d = 0; d < allEls.length; d++) {
+            var dTxt = cleanText(allEls[d].innerText || allEls[d].textContent || "");
+            if (dTxt && (dTxt.includes("kirim") || dTxt.includes("otp") || dTxt.includes("sms") || dTxt.includes("ulang") || dTxt.includes("verifikasi"))) {
+                if (dTxt.length < 120) {
+                    debugList.push({tag: allEls[d].tagName, text: dTxt});
+                }
+            }
+        }
+        return {status: 'not_found', debug: debugList.slice(0, 10)};
+    }
+
+    candidates.sort(function(a, b) { return a.len - b.len; });
+    var chosen = candidates[0];
+
+    var cdMatch = chosen.txt.match(/(\d+)\s*(?:s|detik)?/);
+    if (cdMatch && (chosen.txt.includes("(") || chosen.txt.includes("s") || chosen.txt.includes("detik"))) {
+        return {status: 'cooldown', seconds: parseInt(cdMatch[1], 10), text: chosen.txt};
+    }
+
+    function forceClick(target) {
+        if (!target) return;
+        try { target.scrollIntoView({block: 'center', inline: 'center'}); } catch(e) {}
+        try { target.focus(); } catch(e) {}
+        var rect = target.getBoundingClientRect();
+        var cx = rect.left + Math.max(5, Math.min(rect.width / 2, 25));
+        var cy = rect.top + rect.height / 2;
+        var evtInit = {bubbles: true, cancelable: true, view: window, buttons: 1, clientX: cx, clientY: cy};
+        ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evt) {
+            try { target.dispatchEvent(new MouseEvent(evt, evtInit)); } catch(e) {}
+        });
+        try { target.click(); } catch(e) {}
+    }
+
+    forceClick(chosen.el);
+    var parentInteractive = chosen.el.closest('a, button, [role="button"]');
+    if (parentInteractive && parentInteractive !== chosen.el) {
+        forceClick(parentInteractive);
+    }
+
+    return {status: 'clicked', text: chosen.txt, tag: chosen.tag};
+"""
+
+JS_CLICK_METODE_LAIN = r"""
+    var cleanText = function(str) {
+        if (!str) return "";
+        return str.replace(/[\u00a0\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    };
+
+    function getAllElements(root) {
+        var list = [];
+        try {
+            var walker = document.createTreeWalker(root || document.body, NodeFilter.SHOW_ELEMENT, null, false);
+            var node = walker.nextNode();
+            while (node) {
+                list.push(node);
+                if (node.shadowRoot) {
+                    list = list.concat(getAllElements(node.shadowRoot));
+                }
+                node = walker.nextNode();
+            }
+        } catch(e) {
+            list = Array.from((root || document).querySelectorAll('*'));
+        }
+        return list;
+    }
+
+    var allEls = getAllElements(document.body);
+    var methodRegex = /(?:metode|cara|verification)\s*(?:verifikasi\s*)?(?:lain|lainnya|other|method)|coba\s*metode/i;
+    var ignoredTags = ['script', 'style', 'noscript', 'head', 'meta', 'link', 'svg', 'path'];
+
+    var candidates = [];
+    for (var i = 0; i < allEls.length; i++) {
+        var el = allEls[i];
+        var tag = (el.tagName || "").toLowerCase();
+        if (ignoredTags.indexOf(tag) !== -1) continue;
+
+        var txt = cleanText(el.innerText || el.textContent || el.value || "");
+        if (!txt) continue;
+
+        if (methodRegex.test(txt)) {
+            var hasMatchingChild = false;
+            for (var c = 0; c < el.children.length; c++) {
+                var childTxt = cleanText(el.children[c].innerText || el.children[c].textContent || "");
+                if (methodRegex.test(childTxt)) {
+                    hasMatchingChild = true;
+                    break;
+                }
+            }
+            if (!hasMatchingChild) {
+                candidates.push({el: el, txt: txt, len: txt.length, tag: tag});
+            }
+        }
+    }
+
+    if (candidates.length === 0) {
+        var debugList = [];
+        for (var d = 0; d < allEls.length; d++) {
+            var dTxt = cleanText(allEls[d].innerText || allEls[d].textContent || "");
+            if (dTxt && (dTxt.includes("metode") || dTxt.includes("verifikasi") || dTxt.includes("cara"))) {
+                if (dTxt.length < 120) {
+                    debugList.push({tag: allEls[d].tagName, text: dTxt});
+                }
+            }
+        }
+        return {status: 'not_found', debug: debugList.slice(0, 10)};
+    }
+
+    candidates.sort(function(a, b) { return a.len - b.len; });
+    var chosen = candidates[0];
+
+    function forceClick(target) {
+        if (!target) return;
+        try { target.scrollIntoView({block: 'center', inline: 'center'}); } catch(e) {}
+        try { target.focus(); } catch(e) {}
+        var rect = target.getBoundingClientRect();
+        var cx = rect.left + rect.width / 2;
+        var cy = rect.top + rect.height / 2;
+        var evtInit = {bubbles: true, cancelable: true, view: window, buttons: 1, clientX: cx, clientY: cy};
+        ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evt) {
+            try { target.dispatchEvent(new MouseEvent(evt, evtInit)); } catch(e) {}
+        });
+        try { target.click(); } catch(e) {}
+    }
+
+    forceClick(chosen.el);
+    var parentInteractive = chosen.el.closest('a, button, [role="button"]');
+    if (parentInteractive && parentInteractive !== chosen.el) {
+        forceClick(parentInteractive);
+    }
+
+    return {status: 'clicked', text: chosen.txt, tag: chosen.tag};
+"""
+
+JS_CLICK_WHATSAPP = r"""
+    var cleanText = function(str) {
+        if (!str) return "";
+        return str.replace(/[\u00a0\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    };
+
+    function getAllElements(root) {
+        var list = [];
+        try {
+            var walker = document.createTreeWalker(root || document.body, NodeFilter.SHOW_ELEMENT, null, false);
+            var node = walker.nextNode();
+            while (node) {
+                list.push(node);
+                if (node.shadowRoot) {
+                    list = list.concat(getAllElements(node.shadowRoot));
+                }
+                node = walker.nextNode();
+            }
+        } catch(e) {
+            list = Array.from((root || document).querySelectorAll('*'));
+        }
+        return list;
+    }
+
+    var allEls = getAllElements(document.body);
+    var ignoredTags = ['script', 'style', 'noscript', 'head', 'meta', 'link', 'svg', 'path'];
+
+    var candidates = [];
+    for (var i = 0; i < allEls.length; i++) {
+        var el = allEls[i];
+        var tag = (el.tagName || "").toLowerCase();
+        if (ignoredTags.indexOf(tag) !== -1) continue;
+
+        var txt = cleanText(el.innerText || el.textContent || el.value || "");
+        if (txt.includes("whatsapp")) {
+            var hasMatchingChild = false;
+            for (var c = 0; c < el.children.length; c++) {
+                var childTxt = cleanText(el.children[c].innerText || el.children[c].textContent || "");
+                if (childTxt.includes("whatsapp")) {
+                    hasMatchingChild = true;
+                    break;
+                }
+            }
+            if (!hasMatchingChild) {
+                candidates.push({el: el, txt: txt, len: txt.length, tag: tag});
+            }
+        }
+    }
+
+    if (candidates.length === 0) return null;
+
+    candidates.sort(function(a, b) { return a.len - b.len; });
+    var chosen = candidates[0];
+
+    function forceClick(target) {
+        if (!target) return;
+        try { target.scrollIntoView({block: 'center'}); } catch(e) {}
+        try { target.focus(); } catch(e) {}
+        var evtInit = {bubbles: true, cancelable: true, view: window, buttons: 1};
+        ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evt) {
+            try { target.dispatchEvent(new MouseEvent(evt, evtInit)); } catch(e) {}
+        });
+        try { target.click(); } catch(e) {}
+    }
+
+    forceClick(chosen.el);
+    var parentInteractive = chosen.el.closest('button, a, div[role="button"], li');
+    if (parentInteractive && parentInteractive !== chosen.el) {
+        forceClick(parentInteractive);
+    }
+
+    return {status: 'clicked', text: chosen.txt};
+"""
+
+JS_CLICK_CONFIRM_AFTER_WA = r"""
+    var cleanText = function(str) {
+        if (!str) return "";
+        return str.replace(/[\u00a0\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    };
+
+    var keywords = ["kirim", "lanjutkan", "konfirmasi", "send", "continue",
+                    "confirm", "selanjutnya", "next", "submit", "verifikasi"];
+
+    function forceClick(el) {
+        if (!el) return;
+        try { el.scrollIntoView({block: 'center'}); } catch(e) {}
+        var rect = el.getBoundingClientRect();
+        var cx = rect.left + rect.width / 2;
+        var cy = rect.top + rect.height / 2;
+        var evtInit = {bubbles: true, cancelable: true, view: window, buttons: 1, clientX: cx, clientY: cy};
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
+            try { el.dispatchEvent(new MouseEvent(evtName, evtInit)); } catch(e) {}
+        });
+        try { el.click(); } catch(e) {}
+    }
+
+    var candidates = [];
+    var els = Array.from(document.querySelectorAll('button, div[role="button"], a, input[type="submit"]'));
+    for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var txt = cleanText(el.innerText || el.textContent || el.value || "");
+        for (var k = 0; k < keywords.length; k++) {
+            if (txt === keywords[k] || (txt.includes(keywords[k]) && txt.length < 30)) {
+                candidates.push({el: el, len: txt.length, txt: txt});
+                break;
+            }
+        }
+    }
+
+    if (candidates.length === 0) return null;
+
+    candidates.sort(function(a, b) { return a.len - b.len; });
+    var chosen = candidates[0].el;
+    forceClick(chosen);
+    return candidates[0].txt || "clicked";
+"""
+
+JS_CLICK_SMS = r"""
+    var cleanText = function(str) {
+        if (!str) return "";
+        return str.replace(/[\u00a0\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    };
+
+    function getAllElements(root) {
+        var list = [];
+        try {
+            var walker = document.createTreeWalker(root || document.body, NodeFilter.SHOW_ELEMENT, null, false);
+            var node = walker.nextNode();
+            while (node) {
+                list.push(node);
+                if (node.shadowRoot) {
+                    list = list.concat(getAllElements(node.shadowRoot));
+                }
+                node = walker.nextNode();
+            }
+        } catch(e) {
+            list = Array.from((root || document).querySelectorAll('*'));
+        }
+        return list;
+    }
+
+    var allEls = getAllElements(document.body);
+    var smsRegex = /(?:kirim\s*melalui\s*sms|melalui\s*sms|pesan\s*singkat|\bsms\b)/i;
+    var ignoredTags = ['script', 'style', 'noscript', 'head', 'meta', 'link', 'svg', 'path'];
+
+    var candidates = [];
+    for (var i = 0; i < allEls.length; i++) {
+        var el = allEls[i];
+        var tag = (el.tagName || "").toLowerCase();
+        if (ignoredTags.indexOf(tag) !== -1) continue;
+
+        var txt = cleanText(el.innerText || el.textContent || el.value || "");
+        if (smsRegex.test(txt) && !txt.includes("whatsapp")) {
+            var hasMatchingChild = false;
+            for (var c = 0; c < el.children.length; c++) {
+                var childTxt = cleanText(el.children[c].innerText || el.children[c].textContent || "");
+                if (smsRegex.test(childTxt) && !childTxt.includes("whatsapp")) {
+                    hasMatchingChild = true;
+                    break;
+                }
+            }
+            if (!hasMatchingChild) {
+                candidates.push({el: el, txt: txt, len: txt.length, tag: tag});
+            }
+        }
+    }
+
+    if (candidates.length === 0) return null;
+
+    candidates.sort(function(a, b) { return a.len - b.len; });
+    var chosen = candidates[0];
+
+    function forceClick(target) {
+        if (!target) return;
+        try { target.scrollIntoView({block: 'center'}); } catch(e) {}
+        try { target.focus(); } catch(e) {}
+        var evtInit = {bubbles: true, cancelable: true, view: window, buttons: 1};
+        ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evt) {
+            try { target.dispatchEvent(new MouseEvent(evt, evtInit)); } catch(e) {}
+        });
+        try { target.click(); } catch(e) {}
+    }
+
+    forceClick(chosen.el);
+    var parentInteractive = chosen.el.closest('button, a, div[role="button"], li');
+    if (parentInteractive && parentInteractive !== chosen.el) {
+        forceClick(parentInteractive);
+    }
+
+    return {status: 'clicked', text: chosen.txt};
+"""
+
+
+def _try_click_resend(driver) -> dict:
+    try:
+        res = driver.execute_script(JS_CLICK_RESEND)
+        if isinstance(res, dict):
+            if res.get("status") == "clicked":
+                return {"success": True, "status": "clicked", "text": res.get("text", "")}
+            elif res.get("status") == "cooldown":
+                return {"success": False, "status": "cooldown", "seconds": res.get("seconds", 60), "text": res.get("text", "")}
+            elif res.get("status") == "not_found" and res.get("debug"):
+                log.info(f"  🔍 [DEBUG DOM elements for resend]: {res.get('debug')}")
+    except Exception as e:
+        log.warning(f"  Error executing JS_CLICK_RESEND: {e}")
+
+    # Fallback Selenium XPath
+    try:
+        xpaths = [
+            "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'kirim ulang')]",
+            "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'kirim ulang')]",
+            "//a[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'kirim')]",
+            "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'kirim')]",
+            "//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'kirim')]",
+        ]
+        for xp in xpaths:
+            found = driver.find_elements(By.XPATH, xp)
+            for el in sorted(found, key=lambda e: len(e.text or "")):
+                t = (el.text or "").strip()
+                if "kirim" in t.lower() and len(t) < 50:
+                    log.info(f"  🎯 Selenium XPath found resend candidate: <{el.tag_name}> '{t}'")
+                    try:
+                        el.click()
+                        return {"success": True, "status": "clicked", "text": t}
+                    except Exception:
+                        ActionChains(driver).move_to_element(el).click().perform()
+                        return {"success": True, "status": "clicked", "text": t}
+    except Exception as xe:
+        log.warning(f"  Selenium XPath fallback failed: {xe}")
+
+    return {"success": False, "status": "not_found"}
+
+
+def _try_click_metode_lain(driver) -> dict:
+    try:
+        res = driver.execute_script(JS_CLICK_METODE_LAIN)
+        if isinstance(res, dict):
+            if res.get("status") == "clicked":
+                return {"success": True, "status": "clicked", "text": res.get("text", "")}
+            elif res.get("status") == "not_found" and res.get("debug"):
+                log.info(f"  🔍 [DEBUG DOM elements for metode_lain]: {res.get('debug')}")
+    except Exception as e:
+        log.warning(f"  Error executing JS_CLICK_METODE_LAIN: {e}")
+
+    # Fallback Selenium XPath
+    try:
+        xpaths = [
+            "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'metode verifikasi')]",
+            "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'metode verifikasi')]",
+            "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'cara lain')]",
+        ]
+        for xp in xpaths:
+            found = driver.find_elements(By.XPATH, xp)
+            for el in sorted(found, key=lambda e: len(e.text or "")):
+                t = (el.text or "").strip()
+                if ("metode" in t.lower() or "verifikasi" in t.lower() or "cara" in t.lower()) and len(t) < 80:
+                    log.info(f"  🎯 Selenium XPath found metode lain candidate: <{el.tag_name}> '{t}'")
+                    try:
+                        el.click()
+                        return {"success": True, "status": "clicked", "text": t}
+                    except Exception:
+                        ActionChains(driver).move_to_element(el).click().perform()
+                        return {"success": True, "status": "clicked", "text": t}
+    except Exception as xe:
+        log.warning(f"  Selenium XPath fallback for metode_lain failed: {xe}")
+
+    return {"success": False, "status": "not_found"}
+
+
+def _click_sms_method(driver) -> bool:
+    try:
+        res = driver.execute_script(JS_CLICK_SMS)
+        if res and isinstance(res, dict) and res.get("status") == "clicked":
+            time.sleep(1)
+            driver.execute_script(JS_CLICK_CONFIRM_AFTER_WA)
+            return True
+    except Exception as e:
+        log.warning(f"  Error in JS_CLICK_SMS: {e}")
+
+    # Fallback Selenium XPath
+    try:
+        for xp in ["//*[contains(translate(text(), 'SMS', 'sms'), 'sms')]", "//*[contains(text(), 'SMS')]"]:
+            found = driver.find_elements(By.XPATH, xp)
+            for el in sorted(found, key=lambda e: len(e.text or "")):
+                t = (el.text or "").strip().lower()
+                if "sms" in t and "whatsapp" not in t and len(t) < 40:
+                    try:
+                        el.click()
+                    except Exception:
+                        ActionChains(driver).move_to_element(el).click().perform()
+                    time.sleep(1)
+                    driver.execute_script(JS_CLICK_CONFIRM_AFTER_WA)
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _handle_resend_or_switch_channel(driver, target_channel: str = "sms") -> dict:
+    """
+    Menangani aksi kirim ulang atau peralihan saluran OTP (SMS <-> WhatsApp) di Shopee.
+    - Jika target_channel sama dengan tampilan sekarang: Klik 'Kirim ulang'.
+    - Jika target_channel berbeda: Klik 'metode verifikasi lainnya' lalu pilih channel target.
+    """
+    target = target_channel.lower().strip()
+    log.info(f"🔁 [OTP] Memproses aksi resend/switch ke saluran '{target.upper()}'...")
+
+    current_ch = "unknown"
+    try:
+        current_ch = driver.execute_script(JS_DETECT_SCREEN_CHANNEL) or "unknown"
+    except Exception as e:
+        log.warning(f"  Error detecting current screen channel: {e}")
+
+    log.info(f"  📺 Saluran terdeteksi di layar Shopee saat ini: '{current_ch}' | Target: '{target}'")
+
+    # 1. Jika sudah di layar pilihan metode
+    if current_ch == "method_selection":
+        if target == "whatsapp":
+            res_wa = driver.execute_script(JS_CLICK_WHATSAPP)
+            time.sleep(1.5)
+            driver.execute_script(JS_CLICK_CONFIRM_AFTER_WA)
+            time.sleep(2)
+            return {"success": True, "message": "Berhasil memilih WhatsApp dari daftar metode", "current_channel": "whatsapp"}
+        else:
+            res_sms = _click_sms_method(driver)
+            time.sleep(2)
+            return {"success": True, "message": "Berhasil memilih SMS dari daftar metode", "current_channel": "sms"}
+
+    # 2. Jika saluran saat ini SAMA dengan target -> Coba klik 'Kirim ulang' langsung
+    if current_ch == target and current_ch in ("sms", "whatsapp"):
+        log.info(f"  👉 Mencoba klik 'Kirim ulang' langsung di layar {target.upper()}...")
+        res_click = _try_click_resend(driver)
+        if res_click.get("success"):
+            txt = res_click.get("text", "")
+            log.info(f"  ✅ Tombol 'Kirim ulang' berhasil diklik: '{txt}'")
+            time.sleep(2)
+            return {"success": True, "message": f"Kode OTP {target.upper()} berhasil dikirim ulang", "current_channel": target}
+        elif res_click.get("status") == "cooldown":
+            secs = res_click.get("seconds", 60)
+            log.warning(f"  ⏳ Tombol 'Kirim ulang' masih dalam hitungan mundur ({secs} detik di Shopee)...")
+            return {"success": False, "message": f"Shopee masih dalam waktu tunggu ({secs} detik). Silakan tunggu sebentar.", "current_channel": target}
+        else:
+            log.warning("  ⚠️ Tombol 'Kirim ulang' belum bisa diklik langsung. Coba opsi 'metode verifikasi lainnya'...")
+
+    # 3. Jika saluran berbeda ATAU tombol kirim ulang langsung tidak merespon:
+    # Coba klik 'metode verifikasi lainnya'
+    log.info(f"  🔍 Mengklik 'metode verifikasi lainnya' untuk beralih/memicu ke {target.upper()}...")
+    res_lain = _try_click_metode_lain(driver)
+    if res_lain.get("success"):
+        txt = res_lain.get("text", "")
+        log.info(f"  👇 Berhasil klik 'metode verifikasi lainnya': '{txt}'")
+        time.sleep(2)
+        if target == "whatsapp":
+            res_wa = driver.execute_script(JS_CLICK_WHATSAPP)
+            time.sleep(1.5)
+            driver.execute_script(JS_CLICK_CONFIRM_AFTER_WA)
+            time.sleep(2)
+            return {"success": True, "message": "Berhasil mengirim OTP via WhatsApp", "current_channel": "whatsapp"}
+        else:
+            _click_sms_method(driver)
+            time.sleep(2)
+            return {"success": True, "message": "Berhasil mengirim OTP via SMS", "current_channel": "sms"}
+
+    # 4. Fallback jika 'metode verifikasi lainnya' tidak ada tapi kita butuh resend:
+    res_retry = _try_click_resend(driver)
+    if res_retry.get("success"):
+        log.info(f"  ✅ Fallback 'Kirim ulang' berhasil diklik: '{res_retry.get('text')}'")
+        time.sleep(2)
+        return {"success": True, "message": f"Kode OTP {target.upper()} berhasil dikirim ulang", "current_channel": target}
+
+    return {"success": False, "message": "Tidak dapat mengklik tombol Kirim Ulang (kemungkinan masih dalam waktu tunggu Shopee)", "current_channel": current_ch}
 
 
 def _handle_verification_method_selection(driver, target_method: str = None) -> bool:
@@ -838,191 +1378,17 @@ def _handle_verification_method_selection(driver, target_method: str = None) -> 
     Handling fleksibel verifikasi Shopee (SMS atau WhatsApp):
     - target_method 'whatsapp': Mengklik 'metode verifikasi lainnya' lalu memilih WhatsApp.
     - target_method 'sms': Menggunakan saluran SMS.
-
-    PENTING: Fungsi ini dipanggil SETELAH sinyal dari UI diterima (sudah 60 detik dari
-    pengiriman SMS OTP pertama), sehingga tombol 'metode verifikasi lainnya' di Shopee
-    seharusnya sudah aktif. Loop singkat mencari + klik link tersebut, lalu klik WhatsApp.
     """
     if not target_method:
         target_method = os.getenv("SHOPEE_OTP_METHOD", "auto").lower()
 
     log.info(f"🔑 [OTP] Menjalankan verifikasi saluran target='{target_method.upper()}'...")
 
-    JS_CLICK_METODE_LAIN = """
-        var keywords = ["cara lain untuk verifikasi", "metode verifikasi lainnya", "metode verifikasi lain",
-                        "coba metode verifikasi", "verifikasi lainnya",
-                        "use another verification", "try another method",
-                        "other verification", "cara lain"];
-
-        function forceClick(el) {
-            if (!el) return;
-            try { el.scrollIntoView({block: 'center'}); } catch(e) {}
-            try { el.focus(); } catch(e) {}
-            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
-                try {
-                    var evt = new MouseEvent(evtName, {
-                        bubbles: true,
-                        cancelable: true,
-                        view: window,
-                        buttons: 1
-                    });
-                    el.dispatchEvent(evt);
-                } catch(e) {}
-            });
-            try { el.click(); } catch(e) {}
-        }
-
-        var candidates = [];
-        var els = Array.from(document.querySelectorAll('a, button, [role="button"], span, div, p'));
-        for (var i = 0; i < els.length; i++) {
-            var el = els[i];
-            var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
-            for (var k = 0; k < keywords.length; k++) {
-                if (txt.includes(keywords[k]) && txt.length < 80) {
-                    candidates.push({el: el, len: txt.length, txt: txt});
-                    break;
-                }
-            }
-        }
-
-        if (candidates.length === 0) return null;
-
-        // Urutkan kandidat berdasarkan panjang teks ASCENDING agar elemen link terkecil (innermost node) terpilih dulu
-        candidates.sort(function(a, b) {
-            var tagA = a.el.tagName.toLowerCase();
-            var tagB = b.el.tagName.toLowerCase();
-            var isInteractiveA = (tagA === 'a' || tagA === 'button' || a.el.getAttribute('role') === 'button');
-            var isInteractiveB = (tagB === 'a' || tagB === 'button' || b.el.getAttribute('role') === 'button');
-
-            if (isInteractiveA && !isInteractiveB) return -1;
-            if (!isInteractiveA && isInteractiveB) return 1;
-            return a.len - b.len;
-        });
-
-        var chosen = candidates[0].el;
-        var textMatch = candidates[0].txt;
-
-        forceClick(chosen);
-        var parentInteractive = chosen.closest('a, button, [role="button"]');
-        if (parentInteractive && parentInteractive !== chosen) {
-            forceClick(parentInteractive);
-        }
-
-        return textMatch || "clicked";
-    """
-
-    JS_IS_METHOD_SCREEN = """
-        var bodyText = (document.body.innerText || document.body.textContent || "").toLowerCase();
-        return bodyText.includes("whatsapp") ||
-               bodyText.includes("pilih metode") ||
-               bodyText.includes("pilih cara") ||
-               bodyText.includes("pilih verifikasi") ||
-               bodyText.includes("select verification") ||
-               bodyText.includes("choose verification");
-    """
-
-    JS_CLICK_WHATSAPP = """
-        function forceClick(el) {
-            if (!el) return;
-            try { el.scrollIntoView({block: 'center'}); } catch(e) {}
-            try { el.focus(); } catch(e) {}
-            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
-                try {
-                    var evt = new MouseEvent(evtName, {
-                        bubbles: true,
-                        cancelable: true,
-                        view: window,
-                        buttons: 1
-                    });
-                    el.dispatchEvent(evt);
-                } catch(e) {}
-            });
-            try { el.click(); } catch(e) {}
-        }
-
-        var candidates = [];
-        var els = Array.from(document.querySelectorAll('button, div[role="button"], a, label, li, span, div, p'));
-        for (var i = 0; i < els.length; i++) {
-            var el = els[i];
-            var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
-            if (txt.includes("whatsapp") && txt.length < 60) {
-                candidates.push({el: el, len: txt.length, txt: txt});
-            }
-        }
-
-        if (candidates.length === 0) return null;
-
-        candidates.sort(function(a, b) {
-            var tagA = a.el.tagName.toLowerCase();
-            var tagB = b.el.tagName.toLowerCase();
-            var isInteractiveA = (tagA === 'button' || tagA === 'a' || a.el.getAttribute('role') === 'button');
-            var isInteractiveB = (tagB === 'button' || tagB === 'a' || b.el.getAttribute('role') === 'button');
-
-            if (isInteractiveA && !isInteractiveB) return -1;
-            if (!isInteractiveA && isInteractiveB) return 1;
-            return a.len - b.len;
-        });
-
-        var chosen = candidates[0].el;
-        var textMatch = candidates[0].txt;
-
-        forceClick(chosen);
-        var parentInteractive = chosen.closest('button, a, div[role="button"], li');
-        if (parentInteractive && parentInteractive !== chosen) {
-            forceClick(parentInteractive);
-        }
-
-        return textMatch || "clicked";
-    """
-
-    JS_CLICK_CONFIRM_AFTER_WA = """
-        var keywords = ["kirim", "lanjutkan", "konfirmasi", "send", "continue",
-                        "confirm", "selanjutnya", "next", "submit", "verifikasi"];
-        function forceClick(el) {
-            if (!el) return;
-            try { el.scrollIntoView({block: 'center'}); } catch(e) {}
-            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
-                try {
-                    var evt = new MouseEvent(evtName, {
-                        bubbles: true,
-                        cancelable: true,
-                        view: window,
-                        buttons: 1
-                    });
-                    el.dispatchEvent(evt);
-                } catch(e) {}
-            });
-            try { el.click(); } catch(e) {}
-        }
-
-        var candidates = [];
-        var els = Array.from(document.querySelectorAll('button, div[role="button"], a, input[type="submit"]'));
-        for (var i = 0; i < els.length; i++) {
-            var el = els[i];
-            var txt = (el.innerText || el.textContent || el.value || "").toLowerCase().trim();
-            for (var k = 0; k < keywords.length; k++) {
-                if (txt.includes(keywords[k]) && txt.length < 40) {
-                    candidates.push({el: el, len: txt.length, txt: txt});
-                    break;
-                }
-            }
-        }
-
-        if (candidates.length === 0) return null;
-
-        candidates.sort(function(a, b) { return a.len - b.len; });
-        var chosen = candidates[0].el;
-        forceClick(chosen);
-        return candidates[0].txt || "clicked";
-    """
-
     try:
         is_method_screen = driver.execute_script(JS_IS_METHOD_SCREEN)
         # ── Jika target WhatsApp dan belum di layar pilihan metode ──────────────
         if target_method == "whatsapp" and not is_method_screen:
             log.info("🔍 [OTP] Mencari tautan 'metode verifikasi lainnya'...")
-            # Sinyal dari UI sudah datang setelah 60 detik, jadi link seharusnya sudah muncul.
-            # Tetap coba selama 30 detik dengan interval 2 detik (15 percobaan).
             start_link = time.time()
             link_clicked = False
             while time.time() - start_link < 30:
@@ -1075,30 +1441,9 @@ def _handle_verification_method_selection(driver, target_method: str = None) -> 
         # ── Klik opsi SMS ────────────────────────────────────────────────────────
         elif target_method == "sms":
             log.info("📱 [OTP] Mengklik opsi verifikasi 'SMS'...")
-            clicked_sms = driver.execute_script("""
-                var els = Array.from(document.querySelectorAll('button, div, span, p, a, label'));
-                for (var i = 0; i < els.length; i++) {
-                    var el = els[i];
-                    var txt = (el.innerText || el.textContent || "").toLowerCase().trim();
-                    if (txt.includes("sms") && txt.length < 30) {
-                        var targets = [el, el.parentElement,
-                                       el.closest('button, div, a, [role="button"]')
-                                       ].filter(Boolean);
-                        for (var t = 0; t < targets.length; t++) {
-                            var tgt = targets[t];
-                            try { tgt.click(); } catch(e) {}
-                            try {
-                                tgt.dispatchEvent(new MouseEvent('click',
-                                    {bubbles:true, cancelable:true, view:window}));
-                            } catch(e) {}
-                        }
-                        return el.innerText || el.textContent || "clicked";
-                    }
-                }
-                return null;
-            """)
+            clicked_sms = _click_sms_method(driver)
             if clicked_sms:
-                log.info(f"✅ [OTP] Berhasil mengklik pilihan verifikasi SMS: '{str(clicked_sms).strip()[:40]}'")
+                log.info("✅ [OTP] Berhasil mengklik pilihan verifikasi SMS")
                 time.sleep(2)
                 return True
 

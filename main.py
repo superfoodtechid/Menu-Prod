@@ -4221,21 +4221,30 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
 
 @app.get("/api/shopee/assign-job-status/{job_id}")
 def get_assign_job_status(job_id: str):
-    """Poll status of a session assign job. Also surfaces OTP waiting state."""
+    """Poll status of a session assign job. Also surfaces OTP waiting state and active channel."""
     if job_id not in _assign_jobs:
         raise HTTPException(status_code=404, detail="Job tidak ditemukan")
     job = _assign_jobs[job_id]
     otp_waiting = False
+    otp_data = {}
     for d in [BASE_DIR / "src" / "shopee-omzet-automation" / "data", BASE_DIR / "shopee" / "data"]:
         otp_file = d / f"otp_request_{job['username']}.json"
         if otp_file.exists():
             try:
-                if json.loads(otp_file.read_text()).get("status") == "WAITING_OTP":
+                parsed = json.loads(otp_file.read_text())
+                if parsed.get("status") == "WAITING_OTP":
                     otp_waiting = True
+                    otp_data = parsed
                     break
             except Exception:
                 pass
-    return {**job, "otp_waiting": otp_waiting}
+    return {
+        **job,
+        "otp_waiting": otp_waiting,
+        "otp_channel": otp_data.get("current_channel") or otp_data.get("requested_channel") or "sms",
+        "action_status": otp_data.get("action_status", ""),
+        "action_msg": otp_data.get("action_msg", "")
+    }
 
 
 # ─── SHOPEE OTP ENDPOINTS ───────────────────────────────────────────────────
@@ -4248,6 +4257,10 @@ class ShopeeOTPRequest(BaseModel):
 class ShopeeOTPChannelRequest(BaseModel):
     username: str
     channel: str  # "sms" | "whatsapp"
+
+class ShopeeOTPResendRequest(BaseModel):
+    username: str
+    channel: str = "sms"  # "sms" | "whatsapp"
 
 @app.post("/api/shopee/cancel-otp")
 def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
@@ -4306,11 +4319,13 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
 @app.post("/api/shopee/select-otp-channel")
 def select_shopee_otp_channel(req: ShopeeOTPChannelRequest):
     """Saves user's selected OTP channel (e.g. WhatsApp) to trigger channel switching in browser automation."""
+    import uuid as _uuid
     username = req.username.strip()
     channel = req.channel.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
+    action_id = str(_uuid.uuid4())[:8]
     shopee_data_dirs = [
         BASE_DIR / "src" / "shopee-omzet-automation" / "data",
         BASE_DIR / "shopee" / "data"
@@ -4318,24 +4333,75 @@ def select_shopee_otp_channel(req: ShopeeOTPChannelRequest):
     for d in shopee_data_dirs:
         d.mkdir(parents=True, exist_ok=True)
         fpath = d / f"otp_request_{username}.json"
+        data = {}
         if fpath.exists():
             try:
                 data = json.loads(fpath.read_text())
-                data["requested_channel"] = channel
-                data["channel_requested_at"] = datetime.now().isoformat()
-                fpath.write_text(json.dumps(data, indent=2))
-            except Exception as e:
-                log.error(f"Error updating OTP channel in {fpath}: {e}")
-        else:
-            request_data = {
-                "status": "WAITING_OTP",
-                "username": username,
-                "requested_channel": channel,
-                "requested_at": datetime.now().isoformat()
-            }
-            fpath.write_text(json.dumps(request_data, indent=2))
+            except Exception:
+                pass
+        data.update({
+            "status": "WAITING_OTP",
+            "username": username,
+            "requested_channel": channel,
+            "action": "resend",
+            "action_channel": channel,
+            "action_id": action_id,
+            "channel_requested_at": datetime.now().isoformat()
+        })
+        try:
+            fpath.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            logger.error(f"Error updating OTP channel in {fpath}: {e}")
 
     return {"status": "SUCCESS", "channel": channel, "message": f"Channel {channel.upper()} selected for {username}"}
+
+@app.post("/api/shopee/resend-otp")
+def resend_shopee_otp(req: ShopeeOTPResendRequest):
+    """Signals browser automation to resend OTP via selected channel (sms or whatsapp)."""
+    import uuid as _uuid
+    username = req.username.strip()
+    channel = req.channel.strip().lower()
+    if channel not in ["sms", "whatsapp"]:
+        channel = "sms"
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+
+    action_id = str(_uuid.uuid4())[:8]
+    shopee_data_dirs = [
+        BASE_DIR / "data",
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data"
+    ]
+    for d in shopee_data_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        fpath = d / f"otp_request_{username}.json"
+        data = {}
+        if fpath.exists():
+            try:
+                data = json.loads(fpath.read_text())
+            except Exception:
+                pass
+        data.update({
+            "status": "WAITING_OTP",
+            "username": username,
+            "action": "resend",
+            "action_channel": channel,
+            "requested_channel": channel,
+            "action_id": action_id,
+            "action_requested_at": datetime.now().isoformat(),
+            "action_status": "PENDING"
+        })
+        try:
+            fpath.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            logger.error(f"Error updating OTP resend in {fpath}: {e}")
+
+    return {
+        "status": "SUCCESS",
+        "action_id": action_id,
+        "channel": channel,
+        "message": f"Permintaan kirim ulang OTP via {channel.upper()} berhasil dikirim."
+    }
 
 @app.get("/api/shopee/otp-status")
 def get_shopee_otp_status(username: Optional[str] = None):
@@ -4367,7 +4433,10 @@ def get_shopee_otp_status(username: Optional[str] = None):
                                 "username": u,
                                 "phone": data.get("phone", ""),
                                 "requested_at": data.get("requested_at"),
-                                "error_msg": data.get("error_msg", "")
+                                "error_msg": data.get("error_msg", ""),
+                                "current_channel": data.get("current_channel") or data.get("requested_channel") or "sms",
+                                "action_status": data.get("action_status", ""),
+                                "action_msg": data.get("action_msg", "")
                             }
                 except Exception: pass
     return {"waiting": False}

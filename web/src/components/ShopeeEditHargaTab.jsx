@@ -175,6 +175,11 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
   const [otpChannel, setOtpChannel] = useState("sms"); // "sms" | "whatsapp"
   const [timer60, setTimer60] = useState(60);
   const [whatsappSignalSent, setWhatsappSignalSent] = useState(false);
+  const [smsCooldown, setSmsCooldown] = useState(60);
+  const [smsResending, setSmsResending] = useState(false);
+  const [waCooldown, setWaCooldown] = useState(60);
+  const [waResending, setWaResending] = useState(false);
+  const [localStatusMsg, setLocalStatusMsg] = useState("");
 
   useEffect(() => {
     if (isOpen) {
@@ -183,6 +188,11 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       setOtpChannel("sms");
       setTimer60(60);
       setWhatsappSignalSent(false);
+      setSmsCooldown(60);
+      setSmsResending(false);
+      setWaCooldown(60);
+      setWaResending(false);
+      setLocalStatusMsg("");
     }
   }, [isOpen]);
 
@@ -207,8 +217,6 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
   };
 
   // 60-Second Countdown Timer effect when on step 2
-  // Sinyal WhatsApp BARU dikirim ke backend ketika timer habis (bukan saat masuk step 2)
-  // sehingga backend memulai klik "metode verifikasi lainnya" tepat saat Shopee siap
   useEffect(() => {
     let interval = null;
     if (step === 2 && timer60 > 0) {
@@ -219,6 +227,8 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       // Timer habis → kirim sinyal ke backend SEKARANG, lalu lanjut ke step input OTP
       sendWhatsappSignalToBackend().then(() => {
         setStep(3);
+        setSmsCooldown(60);
+        setWaCooldown(60);
       });
     }
     return () => {
@@ -226,17 +236,83 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
     };
   }, [step, timer60]);
 
+  // Step 3 cooldown countdown timer for resend buttons
+  useEffect(() => {
+    let interval = null;
+    if (isOpen && step === 3) {
+      interval = setInterval(() => {
+        setSmsCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+        setWaCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isOpen, step]);
+
+  const handleResendSMS = async () => {
+    if (smsResending || smsCooldown > 0) return;
+    setSmsResending(true);
+    setLocalStatusMsg("Meminta kirim ulang SMS ke Shopee...");
+    try {
+      const baseUrl = apiBaseUrl || "";
+      const res = await fetch(`${baseUrl}/api/shopee/resend-otp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": apiKey || ""
+        },
+        body: JSON.stringify({ username, channel: "sms" })
+      });
+      if (!res.ok) throw new Error("Gagal meminta kirim ulang SMS");
+      setOtpChannel("sms");
+      setSmsCooldown(60);
+      setLocalStatusMsg("✓ Permintaan kirim ulang SMS telah dikirim ke Shopee.");
+      setTimeout(() => setLocalStatusMsg(""), 4000);
+    } catch (err) {
+      setLocalStatusMsg(`❌ ${err.message}`);
+    } finally {
+      setSmsResending(false);
+    }
+  };
+
+  const handleResendWhatsApp = async () => {
+    if (waResending || waCooldown > 0) return;
+    setWaResending(true);
+    setLocalStatusMsg("Meminta kirim ulang WhatsApp ke Shopee...");
+    try {
+      const baseUrl = apiBaseUrl || "";
+      const res = await fetch(`${baseUrl}/api/shopee/resend-otp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": apiKey || ""
+        },
+        body: JSON.stringify({ username, channel: "whatsapp" })
+      });
+      if (!res.ok) throw new Error("Gagal meminta kirim ulang WhatsApp");
+      setOtpChannel("whatsapp");
+      setWaCooldown(60);
+      setLocalStatusMsg("✓ Permintaan kirim ulang via WhatsApp telah dikirim ke Shopee.");
+      setTimeout(() => setLocalStatusMsg(""), 4000);
+    } catch (err) {
+      setLocalStatusMsg(`❌ ${err.message}`);
+    } finally {
+      setWaResending(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   const handleProceedToNextStep = async () => {
     if (otpChannel === "whatsapp") {
-      // Reset timer & flag, masuk ke step 2 (countdown)
-      // TIDAK kirim sinyal ke backend dulu — sinyal dikirim setelah timer 60s habis
       setTimer60(60);
       setWhatsappSignalSent(false);
       setStep(2);
     } else {
       setStep(3); // Directly go to OTP code input for SMS
+      setSmsCooldown(60);
+      setWaCooldown(60);
     }
   };
 
@@ -470,9 +546,49 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
               />
             </div>
 
-            {statusMsg && (
+            {/* Dual Resend Option */}
+            <div className="pt-2 border-t border-zinc-200/70 dark:border-zinc-800 space-y-2">
+              <div className="flex items-center justify-between text-xs text-zinc-600 dark:text-zinc-400">
+                <span className="font-medium">Tidak menerima Kode OTP?</span>
+                <span className="text-[11px] text-zinc-500">
+                  Saluran aktif: <strong className="uppercase text-orange-600 dark:text-orange-400">{otpChannel}</strong>
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={handleResendSMS}
+                  disabled={smsResending || smsCooldown > 0}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold border border-orange-200 dark:border-orange-900/60 bg-orange-50/70 dark:bg-orange-950/30 text-orange-800 dark:text-orange-300 hover:bg-orange-100 dark:hover:bg-orange-900/50 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <svg className={`h-3.5 w-3.5 text-orange-600 dark:text-orange-400 ${smsResending ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H17" />
+                  </svg>
+                  <span>
+                    {smsResending ? "Mengirim..." : smsCooldown > 0 ? `Kirim Ulang SMS (${smsCooldown}s)` : "Kirim Ulang SMS"}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResendWhatsApp}
+                  disabled={waResending || waCooldown > 0}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <svg className={`h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 ${waResending ? "animate-spin" : ""}`} viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-5.805 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z"/>
+                  </svg>
+                  <span>
+                    {waResending ? "Mengirim..." : waCooldown > 0 ? `Kirim WhatsApp (${waCooldown}s)` : (otpChannel === "whatsapp" ? "Kirim Ulang WA" : "Kirim via WhatsApp")}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {(localStatusMsg || statusMsg) && (
               <p className="text-xs text-center font-semibold text-orange-600 dark:text-orange-400 bg-orange-50 dark:bg-orange-950/40 py-1.5 px-3 rounded-lg border border-orange-200/50 dark:border-orange-900/40">
-                {statusMsg}
+                {localStatusMsg || statusMsg}
               </p>
             )}
 
