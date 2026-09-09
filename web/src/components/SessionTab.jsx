@@ -15,9 +15,9 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [otpCode, setOtpCode] = useState("");
   const [otpSubmitting, setOtpSubmitting] = useState(false);
   const [otpChannel, setOtpChannel] = useState("sms"); // "sms" | "whatsapp"
-  const [smsCooldown, setSmsCooldown] = useState(60); // 60s cooldown for SMS resend
+  const [cooldown, setCooldown] = useState(60); // 60s cooldown for active channel
+  const [cooldownChannel, setCooldownChannel] = useState("sms"); // "sms" | "whatsapp"
   const [smsResending, setSmsResending] = useState(false);
-  const [waCooldown, setWaCooldown] = useState(60); // 60s cooldown for WhatsApp option / resend
   const [waRequested, setWaRequested] = useState(false);
   const [waResending, setWaResending] = useState(false);
   const [otpTotalTime, setOtpTotalTime] = useState(900); // 15 minutes overall timeout
@@ -62,9 +62,9 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     setAssignError(null);
     setOtpCode("");
     setOtpChannel("sms");
-    setSmsCooldown(60);
+    setCooldown(60);
+    setCooldownChannel("sms");
     setSmsResending(false);
-    setWaCooldown(60);
     setWaRequested(false);
     setWaResending(false);
     setOtpTotalTime(900);
@@ -91,9 +91,9 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     setAssignError(null);
     setOtpCode("");
     setOtpChannel("sms");
-    setSmsCooldown(60);
+    setCooldown(60);
+    setCooldownChannel("sms");
     setSmsResending(false);
-    setWaCooldown(60);
     setWaRequested(false);
     setWaResending(false);
     setOtpTotalTime(900);
@@ -122,14 +122,13 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   // Start countdown timer when entering OTP mode
   useEffect(() => {
     if (assignStatus === "OTP") {
-      setSmsCooldown(60);
-      setWaCooldown(60);
+      setCooldown(60);
+      setCooldownChannel(otpChannel || "sms");
       setOtpTotalTime(900);
       setResendMsg("");
       clearInterval(otpTimerRef.current);
       otpTimerRef.current = setInterval(() => {
-        setSmsCooldown(prev => (prev > 0 ? prev - 1 : 0));
-        setWaCooldown(prev => (prev > 0 ? prev - 1 : 0));
+        setCooldown(prev => (prev > 0 ? prev - 1 : 0));
         setOtpTotalTime(prev => {
           if (prev <= 1) {
             clearInterval(otpTimerRef.current);
@@ -182,7 +181,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const resendSmsOtp = async () => {
-    if (smsResending || smsCooldown > 0 || !assignTarget) return;
+    if (smsResending || waResending || cooldown > 0 || !assignTarget) return;
     setSmsResending(true);
     setResendMsg("Meminta kirim ulang kode SMS ke Shopee...");
     try {
@@ -194,7 +193,8 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
       if (!res.ok) throw new Error("Gagal meminta kirim ulang SMS");
       setOtpChannel("sms");
       setWaRequested(false);
-      setSmsCooldown(60);
+      setCooldownChannel("sms");
+      setCooldown(60);
       setResendMsg("✓ Permintaan kirim ulang SMS telah dikirim ke Shopee.");
       setTimeout(() => setResendMsg(""), 4000);
     } catch (e) {
@@ -206,7 +206,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const resendWhatsappOtp = async () => {
-    if (waResending || waCooldown > 0 || !assignTarget) return;
+    if (smsResending || waResending || cooldown > 0 || !assignTarget) return;
     setWaResending(true);
     setResendMsg("Meminta kirim ulang kode WhatsApp ke Shopee...");
     try {
@@ -218,7 +218,8 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
       if (!res.ok) throw new Error("Gagal meminta kirim ulang WhatsApp");
       setOtpChannel("whatsapp");
       setWaRequested(true);
-      setWaCooldown(60);
+      setCooldownChannel("whatsapp");
+      setCooldown(60);
       setResendMsg("✓ Permintaan kirim OTP via WhatsApp telah dikirim ke Shopee.");
       setTimeout(() => setResendMsg(""), 4000);
     } catch (e) {
@@ -383,10 +384,14 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
                   </td>
                   <td className="px-4 py-3 text-xs text-zinc-500 dark:text-zinc-400">{fmt(s.last_active)}</td>
                   <td className="px-4 py-3">
-                    <button onClick={() => openAssign(s)}
-                      className="rounded-lg border border-zinc-200 dark:border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:border-orange-300 hover:bg-orange-50 hover:text-orange-700 dark:hover:border-orange-700 dark:hover:bg-orange-950/30 dark:hover:text-orange-400 transition-colors cursor-pointer">
-                      {s.has_session ? "Perbarui Sesi" : "Assign Sesi"}
-                    </button>
+                    {!s.has_session ? (
+                      <button onClick={() => openAssign(s)}
+                        className="rounded-lg border border-zinc-200 dark:border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:border-orange-300 hover:bg-orange-50 hover:text-orange-700 dark:hover:border-orange-700 dark:hover:bg-orange-950/30 dark:hover:text-orange-400 transition-colors cursor-pointer">
+                        Assign Sesi
+                      </button>
+                    ) : (
+                      <span className="text-xs text-zinc-400 dark:text-zinc-600 select-none">-</span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -488,14 +493,18 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
                     <button
                       type="button"
                       onClick={resendSmsOtp}
-                      disabled={smsResending || smsCooldown > 0}
+                      disabled={smsResending || waResending || cooldown > 0}
                       className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold border border-amber-300 dark:border-amber-700 bg-amber-50/80 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
                     >
                       <svg className={`h-3.5 w-3.5 text-amber-600 dark:text-amber-400 ${smsResending ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H17" />
                       </svg>
                       <span>
-                        {smsResending ? "Mengirim..." : smsCooldown > 0 ? `Kirim Ulang SMS (${smsCooldown}s)` : "Kirim Ulang SMS"}
+                        {smsResending
+                          ? "Mengirim..."
+                          : cooldown > 0 && cooldownChannel === "sms"
+                          ? `Kirim Ulang SMS (${cooldown}s)`
+                          : "Kirim Ulang SMS"}
                       </span>
                     </button>
 
@@ -503,14 +512,18 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
                     <button
                       type="button"
                       onClick={resendWhatsappOtp}
-                      disabled={waResending || waCooldown > 0}
+                      disabled={smsResending || waResending || cooldown > 0}
                       className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
                     >
                       <svg className={`h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 ${waResending ? "animate-spin" : ""}`} viewBox="0 0 24 24" fill="currentColor">
                         <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-5.805 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z"/>
                       </svg>
                       <span>
-                        {waResending ? "Mengirim..." : waCooldown > 0 ? `Kirim WhatsApp (${waCooldown}s)` : (waRequested ? "Kirim Ulang WA" : "Kirim via WhatsApp")}
+                        {waResending
+                          ? "Mengirim..."
+                          : cooldown > 0 && cooldownChannel === "whatsapp"
+                          ? (waRequested ? `Kirim Ulang WA (${cooldown}s)` : `Kirim WhatsApp (${cooldown}s)`)
+                          : (waRequested ? "Kirim Ulang WA" : "Kirim via WhatsApp")}
                       </span>
                     </button>
                   </div>

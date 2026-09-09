@@ -18,6 +18,23 @@ const group = (items) => {
   }, {});
 };
 
+function formatAvailableTime(availableAt, remainingHours) {
+  let targetDate = null;
+  if (availableAt) {
+    targetDate = new Date(availableAt);
+  } else if (remainingHours != null && remainingHours > 0) {
+    targetDate = new Date(Date.now() + remainingHours * 3600 * 1000);
+  }
+
+  if (!targetDate || isNaN(targetDate.getTime())) {
+    return "";
+  }
+
+  const hours = String(targetDate.getHours()).padStart(2, "0");
+  const minutes = String(targetDate.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
 // ─── Memoized Shopee Item Row Component for Instant Performance ──────────────
 const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
   item,
@@ -34,9 +51,10 @@ const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
   onChangePrice,
   fmt
 }) {
+  const availableTimeStr = formatAvailableTime(item.pushed_24h_available_at, item.pushed_24h_remaining_hours);
   const isLocked = item.is_price_locked || item.is_pushed_24h;
   const lockTitle = item.is_pushed_24h
-    ? (item.pushed_24h_reason || "Menu dikunci 24 jam setelah update harga")
+    ? (availableTimeStr ? `Item dapat diedit pada ${availableTimeStr}` : (item.pushed_24h_reason || "Item dapat diedit setelah 24 jam"))
     : item.is_flash_sale
     ? "Harga dikunci karena menu sedang dalam Flash Sale aktif"
     : item.is_price_locked
@@ -114,11 +132,11 @@ const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
       <td className="p-3.5 text-center align-middle">
         {item.is_pushed_24h ? (
           <span
-            title={item.pushed_24h_reason || "Menu dikunci selama 24 jam setelah update harga Shopee"}
-            className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 text-[11px] font-semibold border border-amber-300 dark:border-amber-800 inline-flex items-center gap-1 shadow-xs"
+            title={availableTimeStr ? `Item dapat diedit pada ${availableTimeStr}` : (item.pushed_24h_reason || "Item dapat diedit setelah 24 jam")}
+            className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 text-[11px] font-semibold border border-amber-300 dark:border-amber-800 inline-flex items-center gap-1 shadow-xs whitespace-nowrap"
           >
             <span>🔒</span>
-            <span>Dikunci 24 Jam ({item.pushed_24h_remaining_hours ?? 0}j)</span>
+            <span>{availableTimeStr ? `Item dapat diedit pada ${availableTimeStr}` : "Dapat diedit dalam 24 jam"}</span>
           </span>
         ) : item.is_flash_sale ? (
           <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 text-[11px] font-semibold border border-rose-300 dark:border-rose-800 inline-block">
@@ -175,9 +193,9 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
   const [otpChannel, setOtpChannel] = useState("sms"); // "sms" | "whatsapp"
   const [timer60, setTimer60] = useState(60);
   const [whatsappSignalSent, setWhatsappSignalSent] = useState(false);
-  const [smsCooldown, setSmsCooldown] = useState(60);
+  const [cooldown, setCooldown] = useState(60);
+  const [cooldownChannel, setCooldownChannel] = useState("sms"); // "sms" | "whatsapp"
   const [smsResending, setSmsResending] = useState(false);
-  const [waCooldown, setWaCooldown] = useState(60);
   const [waResending, setWaResending] = useState(false);
   const [localStatusMsg, setLocalStatusMsg] = useState("");
 
@@ -188,9 +206,9 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       setOtpChannel("sms");
       setTimer60(60);
       setWhatsappSignalSent(false);
-      setSmsCooldown(60);
+      setCooldown(60);
+      setCooldownChannel("sms");
       setSmsResending(false);
-      setWaCooldown(60);
       setWaResending(false);
       setLocalStatusMsg("");
     }
@@ -227,8 +245,8 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       // Timer habis → kirim sinyal ke backend SEKARANG, lalu lanjut ke step input OTP
       sendWhatsappSignalToBackend().then(() => {
         setStep(3);
-        setSmsCooldown(60);
-        setWaCooldown(60);
+        setCooldown(60);
+        setCooldownChannel("whatsapp");
       });
     }
     return () => {
@@ -241,8 +259,7 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
     let interval = null;
     if (isOpen && step === 3) {
       interval = setInterval(() => {
-        setSmsCooldown((prev) => (prev > 0 ? prev - 1 : 0));
-        setWaCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+        setCooldown((prev) => (prev > 0 ? prev - 1 : 0));
       }, 1000);
     }
     return () => {
@@ -251,7 +268,7 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
   }, [isOpen, step]);
 
   const handleResendSMS = async () => {
-    if (smsResending || smsCooldown > 0) return;
+    if (smsResending || waResending || cooldown > 0) return;
     setSmsResending(true);
     setLocalStatusMsg("Meminta kirim ulang SMS ke Shopee...");
     try {
@@ -266,7 +283,8 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       });
       if (!res.ok) throw new Error("Gagal meminta kirim ulang SMS");
       setOtpChannel("sms");
-      setSmsCooldown(60);
+      setCooldownChannel("sms");
+      setCooldown(60);
       setLocalStatusMsg("✓ Permintaan kirim ulang SMS telah dikirim ke Shopee.");
       setTimeout(() => setLocalStatusMsg(""), 4000);
     } catch (err) {
@@ -277,7 +295,7 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
   };
 
   const handleResendWhatsApp = async () => {
-    if (waResending || waCooldown > 0) return;
+    if (smsResending || waResending || cooldown > 0) return;
     setWaResending(true);
     setLocalStatusMsg("Meminta kirim ulang WhatsApp ke Shopee...");
     try {
@@ -292,7 +310,8 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       });
       if (!res.ok) throw new Error("Gagal meminta kirim ulang WhatsApp");
       setOtpChannel("whatsapp");
-      setWaCooldown(60);
+      setCooldownChannel("whatsapp");
+      setCooldown(60);
       setLocalStatusMsg("✓ Permintaan kirim ulang via WhatsApp telah dikirim ke Shopee.");
       setTimeout(() => setLocalStatusMsg(""), 4000);
     } catch (err) {
@@ -311,8 +330,8 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
       setStep(2);
     } else {
       setStep(3); // Directly go to OTP code input for SMS
-      setSmsCooldown(60);
-      setWaCooldown(60);
+      setCooldown(60);
+      setCooldownChannel("sms");
     }
   };
 
@@ -499,6 +518,8 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
                   // Jika user lewati timer secara manual, tetap kirim sinyal ke backend
                   await sendWhatsappSignalToBackend();
                   setStep(3);
+                  setCooldown(60);
+                  setCooldownChannel("whatsapp");
                 }}
                 className="py-2 px-4 text-xs font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-900/60 rounded-xl hover:bg-emerald-100 transition cursor-pointer"
               >
@@ -559,28 +580,36 @@ function ShopeeOTPModal({ isOpen, username, phone, onSubmitOTP, onCancel, submit
                 <button
                   type="button"
                   onClick={handleResendSMS}
-                  disabled={smsResending || smsCooldown > 0}
+                  disabled={smsResending || waResending || cooldown > 0}
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold border border-orange-200 dark:border-orange-900/60 bg-orange-50/70 dark:bg-orange-950/30 text-orange-800 dark:text-orange-300 hover:bg-orange-100 dark:hover:bg-orange-900/50 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
                 >
                   <svg className={`h-3.5 w-3.5 text-orange-600 dark:text-orange-400 ${smsResending ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H17" />
                   </svg>
                   <span>
-                    {smsResending ? "Mengirim..." : smsCooldown > 0 ? `Kirim Ulang SMS (${smsCooldown}s)` : "Kirim Ulang SMS"}
+                    {smsResending
+                      ? "Mengirim..."
+                      : cooldown > 0 && cooldownChannel === "sms"
+                      ? `Kirim Ulang SMS (${cooldown}s)`
+                      : "Kirim Ulang SMS"}
                   </span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleResendWhatsApp}
-                  disabled={waResending || waCooldown > 0}
+                  disabled={smsResending || waResending || cooldown > 0}
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
                 >
                   <svg className={`h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 ${waResending ? "animate-spin" : ""}`} viewBox="0 0 24 24" fill="currentColor">
                     <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-5.805 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z"/>
                   </svg>
                   <span>
-                    {waResending ? "Mengirim..." : waCooldown > 0 ? `Kirim WhatsApp (${waCooldown}s)` : (otpChannel === "whatsapp" ? "Kirim Ulang WA" : "Kirim via WhatsApp")}
+                    {waResending
+                      ? "Mengirim..."
+                      : cooldown > 0 && cooldownChannel === "whatsapp"
+                      ? (otpChannel === "whatsapp" ? `Kirim Ulang WA (${cooldown}s)` : `Kirim WhatsApp (${cooldown}s)`)
+                      : (otpChannel === "whatsapp" ? "Kirim Ulang WA" : "Kirim via WhatsApp")}
                   </span>
                 </button>
               </div>
@@ -690,8 +719,11 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         const map = {};
         if (Array.isArray(data)) {
           data.forEach(s => {
-            if (s.id) map[s.id] = s;
-            if (s.store_id) map[s.store_id] = s;
+            if (s.id) map[String(s.id)] = s;
+            if (s.store_id) map[String(s.store_id)] = s;
+            if (s.merchant_name) map[s.merchant_name.toLowerCase()] = s;
+            if (s.nama_outlet) map[s.nama_outlet.toLowerCase()] = s;
+            if (s.nama_resto_final) map[s.nama_resto_final.toLowerCase()] = s;
           });
         }
         setSessionsMap(map);
@@ -700,6 +732,23 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
       console.error("Error fetching Shopee sessions:", err);
     }
   }, [API_BASE_URL, API_SECRET_KEY]);
+
+  const getOutletSession = useCallback((outlet) => {
+    if (!outlet) return null;
+    return (
+      sessionsMap[String(outlet.id)] ||
+      (outlet.store_id ? sessionsMap[String(outlet.store_id)] : null) ||
+      (outlet.nama_outlet ? sessionsMap[outlet.nama_outlet.toLowerCase()] : null) ||
+      (outlet.nama_resto_final ? sessionsMap[outlet.nama_resto_final.toLowerCase()] : null) ||
+      (outlet.merchant_name ? sessionsMap[outlet.merchant_name.toLowerCase()] : null) ||
+      null
+    );
+  }, [sessionsMap]);
+
+  const hasActiveSession = useCallback((outlet) => {
+    const sess = getOutletSession(outlet);
+    return Boolean(sess?.has_session);
+  }, [getOutletSession]);
 
   // Sync Google Sheets on Mount & Fetch Shopee Outlets
   const triggerGSheetSync = useCallback(async () => {
@@ -715,13 +764,15 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
   useEffect(() => {
     setLoading(true);
-    fetchSessions();
-    triggerGSheetSync().then(() => {
-      return fetch(`${API_BASE_URL}/api/outlets?platform=shopee`, {
-        headers: { "X-API-Key": API_SECRET_KEY || "" }
-      }).then(r => r.ok ? r.json() : []);
-    })
-      .then(data => {
+    Promise.all([
+      fetchSessions(),
+      triggerGSheetSync().then(() => {
+        return fetch(`${API_BASE_URL}/api/outlets?platform=shopee`, {
+          headers: { "X-API-Key": API_SECRET_KEY || "" }
+        }).then(r => r.ok ? r.json() : []);
+      })
+    ])
+      .then(([_, data]) => {
         setAllOutlets(Array.isArray(data) ? data : []);
         setLoading(false);
       })
@@ -732,16 +783,18 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
       });
   }, [API_BASE_URL, API_SECRET_KEY, triggerGSheetSync, fetchSessions]);
 
-  // Unique Parents list
+  // Unique Parents list: hanya outlet yang memiliki sesi aktif (sembunyikan yang tanpa sesi)
   const uniqueParents = useMemo(() => {
     if (!Array.isArray(allOutlets)) return [];
     const setNames = new Set();
     allOutlets.forEach(o => {
-      const name = o.nama_outlet || o.nama_resto_final || o.merchant_name;
-      if (name) setNames.add(name);
+      if (hasActiveSession(o)) {
+        const name = o.nama_outlet || o.nama_resto_final || o.merchant_name;
+        if (name) setNames.add(name);
+      }
     });
     return Array.from(setNames).sort();
-  }, [allOutlets]);
+  }, [allOutlets, hasActiveSession]);
 
   // Filtered Parents by Search Query
   const filteredParents = useMemo(() => {
@@ -870,6 +923,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                   is_price_locked: Boolean(i.is_price_locked || i.is_pushed_24h),
                   is_pushed_24h: Boolean(i.is_pushed_24h),
                   pushed_24h_remaining_hours: i.pushed_24h_remaining_hours,
+                  pushed_24h_available_at: i.pushed_24h_available_at || null,
                   pushed_24h_reason: i.pushed_24h_reason,
                   promo_details: i.promo_details || null
                 }));
@@ -913,6 +967,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             is_price_locked: Boolean(i.is_price_locked || i.is_pushed_24h),
             is_pushed_24h: Boolean(i.is_pushed_24h),
             pushed_24h_remaining_hours: i.pushed_24h_remaining_hours,
+            pushed_24h_available_at: i.pushed_24h_available_at || null,
             pushed_24h_reason: i.pushed_24h_reason,
             promo_details: i.promo_details || null
           }));
@@ -950,7 +1005,10 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const handleSelectOutlet = (name) => {
     setSelectedParent(name);
     setOpenOutletDropdown(false);
-    const targetBranches = allOutlets.filter(o => (o.nama_outlet || o.nama_resto_final || o.merchant_name) === name);
+    const targetBranches = allOutlets.filter(o => {
+      const matchName = (o.nama_outlet || o.nama_resto_final || o.merchant_name) === name;
+      return matchName && hasActiveSession(o);
+    });
     setBranches(targetBranches);
     setSelectedBrandId("");
     setSyncPhase("idle");
@@ -1022,7 +1080,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     const branch = branches.find(x => x.id === selectedBrandId);
     if (!branch) return;
 
-    const sess = sessionsMap[branch.id] || sessionsMap[branch.store_id];
+    const sess = getOutletSession(branch);
     if (!sess?.has_session) {
       alert("Branch ini belum memiliki sesi aktif Shopee. Harap hubungkan sesi di tab Kelola Sesi terlebih dahulu.");
       return;
@@ -1118,7 +1176,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     const branch = branches.find(x => x.id === selectedBrandId);
     if (!branch) return;
 
-    const sess = sessionsMap[branch.id] || sessionsMap[branch.store_id];
+    const sess = getOutletSession(branch);
     if (!sess?.has_session) {
       alert("Branch ini belum memiliki sesi aktif Shopee. Harap hubungkan sesi di tab Kelola Sesi terlebih dahulu.");
       return;
@@ -1396,7 +1454,9 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
                   <div className="max-h-56 overflow-y-auto space-y-0.5 pr-1">
                     {filteredParents.length === 0 ? (
-                      <p className="text-center text-xs text-zinc-400 dark:text-zinc-500 py-3">Tidak ada outlet cocok</p>
+                      <p className="text-center text-xs text-zinc-400 dark:text-zinc-500 py-3">
+                        {search ? "Tidak ada outlet cocok" : "Tidak ada outlet dengan sesi aktif"}
+                      </p>
                     ) : (
                       filteredParents.map(name => {
                         const isSelected = selectedParent === name;
@@ -1450,48 +1510,37 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                 <div className="fixed inset-0 z-20" onClick={() => setOpenBranchDropdown(false)} />
                 <div className="absolute left-0 right-0 top-full mt-1 z-30 bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-orange-200 dark:border-orange-900/50 p-2.5 space-y-2 animate-scale-up min-w-[280px]">
                   <div className="max-h-56 overflow-y-auto space-y-0.5 pr-1">
-                    {branches.map(b => {
-                      const isSelected = selectedBrandId === b.id;
-                      const bName = b.brand || b.nama_outlet || b.merchant_name;
-                      const sess = sessionsMap[b.id] || sessionsMap[b.store_id];
-                      const hasSession = Boolean(sess?.has_session);
-                      return (
-                        <button
-                          key={b.id}
-                          type="button"
-                          disabled={!hasSession}
-                          onClick={() => {
-                            if (!hasSession) return;
-                            handleSelectBrand(b.id);
-                          }}
-                          title={hasSession ? "Sesi Aktif" : "Sesi Tidak Aktif (Harap Ingest Sesi di tab Kelola Sesi)"}
-                          className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between transition-colors ${
-                            !hasSession
-                              ? "opacity-45 cursor-not-allowed bg-zinc-50 dark:bg-zinc-900/40 text-zinc-400 dark:text-zinc-500"
-                              : isSelected
-                              ? "bg-orange-50 text-orange-700 font-bold dark:bg-orange-950/60 dark:text-orange-300 cursor-pointer"
-                              : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800 cursor-pointer"
-                          }`}
-                        >
-                          <div className="truncate">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="font-bold">{bName}</span>
-                              {hasSession ? (
+                    {branches.length === 0 ? (
+                      <p className="text-center text-xs text-zinc-400 dark:text-zinc-500 py-3">Tidak ada branch dengan sesi aktif</p>
+                    ) : (
+                      branches.map(b => {
+                        const isSelected = selectedBrandId === b.id;
+                        const bName = b.brand || b.nama_outlet || b.merchant_name;
+                        return (
+                          <button
+                            key={b.id}
+                            type="button"
+                            onClick={() => handleSelectBrand(b.id)}
+                            className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between transition-colors cursor-pointer ${
+                              isSelected
+                                ? "bg-orange-50 text-orange-700 font-bold dark:bg-orange-950/60 dark:text-orange-300"
+                                : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                            }`}
+                          >
+                            <div className="truncate">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-bold">{bName}</span>
                                 <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
                                   ● Sesi Aktif
                                 </span>
-                              ) : (
-                                <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-bold bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
-                                  ✕ Sesi Tidak Aktif
-                                </span>
-                              )}
+                              </div>
+                              <div className="text-[10px] text-zinc-400">Store ID: {b.store_id} | User: {b.account?.username || "-"}</div>
                             </div>
-                            <div className="text-[10px] text-zinc-400">Store ID: {b.store_id} | User: {b.account?.username || "-"}</div>
-                          </div>
-                          {isSelected && <span className="text-orange-600 dark:text-orange-400 font-bold">✓</span>}
-                        </button>
-                      );
-                    })}
+                            {isSelected && <span className="text-orange-600 dark:text-orange-400 font-bold">✓</span>}
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               </>
@@ -1501,7 +1550,7 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
         {/* Selected Outlet Credentials Display */}
         {selectedBrandObj && (() => {
-          const sess = sessionsMap[selectedBrandObj.id] || sessionsMap[selectedBrandObj.store_id];
+          const sess = getOutletSession(selectedBrandObj);
           const hasSession = Boolean(sess?.has_session);
           return (
             <div className="mt-4 p-4 rounded-2xl bg-orange-50/70 dark:bg-orange-950/30 border border-orange-200/80 dark:border-orange-900/40">

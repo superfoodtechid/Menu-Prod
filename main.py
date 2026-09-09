@@ -663,7 +663,8 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
 
         # Re-fetch job under lock to ensure we have the latest database state
         job = db.query(Job).filter(Job.id == job_id).first()
-        if not job:
+        if not job or job.status == "CANCELLED":
+            logger.info(f"🛑 Job {job_id} was CANCELLED or deleted before execution.")
             return
 
         job.status = "RUNNING"
@@ -726,6 +727,11 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                     outlet.store_id = resolved_store_id
                     logger.info(f"💾 Dynamically updated store_id to {resolved_store_id} for outlet {outlet.merchant_name}")
             
+            db.refresh(job)
+            if job.status == "CANCELLED":
+                logger.info(f"🛑 Job {job_id} was CANCELLED before Shopee success commit.")
+                return
+
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu selesai!"
@@ -767,6 +773,11 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             if not success:
                 raise Exception(f"GoFood extraction failed: {result}")
                 
+            db.refresh(job)
+            if job.status == "CANCELLED":
+                logger.info(f"🛑 Job {job_id} was CANCELLED before GoFood success commit.")
+                return
+
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu GoFood selesai!"
@@ -806,6 +817,11 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             if not success:
                 raise Exception(f"Grab extraction failed: {result}")
                 
+            db.refresh(job)
+            if job.status == "CANCELLED":
+                logger.info(f"🛑 Job {job_id} was CANCELLED before Grab success commit.")
+                return
+
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu GrabFood selesai!"
@@ -823,16 +839,23 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
 
     except Exception as e:
         logger.error(f"❌ Job {job_id} failed: {e}")
-        job.status = "FAILED"
-        if "user membatalkan otp" in str(e).lower():
-            job.error_message = "user membatalkan otp"
-            job.current_step = "Gagal: user membatalkan otp"
+        try:
+            db.refresh(job)
+        except Exception:
+            pass
+        if job and job.status == "CANCELLED":
+            logger.info(f"🛑 Job {job_id} was CANCELLED by user, keeping CANCELLED status.")
         else:
-            job.error_message = str(e)
-            err_msg = f"Terjadi kesalahan: {str(e)}"
-            job.current_step = err_msg if len(err_msg) <= 255 else err_msg[:252] + "..."
-        job.completed_at = datetime.utcnow()
-        db.commit()
+            job.status = "FAILED"
+            if "user membatalkan otp" in str(e).lower():
+                job.error_message = "user membatalkan otp"
+                job.current_step = "Gagal: user membatalkan otp"
+            else:
+                job.error_message = str(e)
+                err_msg = f"Terjadi kesalahan: {str(e)}"
+                job.current_step = err_msg if len(err_msg) <= 255 else err_msg[:252] + "..."
+            job.completed_at = datetime.utcnow()
+            db.commit()
     finally:
         if lock_acquired and lock:
             try:
@@ -1673,6 +1696,33 @@ def get_job_status(job_id: uuid.UUID, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job_endpoint(job_id: uuid.UUID, db: Session = Depends(get_db)):
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status in ("SUCCESS", "FAILED", "CANCELLED"):
+        return {"status": "IGNORED", "message": f"Job already {job.status}"}
+    
+    job.status = "CANCELLED"
+    job.current_step = "Dibatalkan oleh pengguna"
+    job.completed_at = datetime.utcnow()
+    db.commit()
+    
+    # If this job has an active OTP request waiting for Shopee, cancel it too
+    if job.platform == "shopee":
+        try:
+            username = (job.payload or {}).get("store_id") or (job.outlet.account.username if job.outlet and job.outlet.account else None)
+            if username:
+                for d in [BASE_DIR / "src" / "shopee-omzet-automation" / "data", BASE_DIR / "shopee" / "data"]:
+                    fpath = d / f"otp_request_{username}.json"
+                    if fpath.exists():
+                        fpath.write_text(json.dumps({"status": "CANCELLED", "cancelled_at": datetime.now().isoformat()}))
+        except Exception as e:
+            logger.error(f"Error cancelling Shopee OTP file for job {job_id}: {e}")
+
+    return {"status": "SUCCESS", "message": f"Job {job_id} cancelled"}
 
 @app.get("/api/jobs", response_model=List[JobResponse])
 def list_jobs(db: Session = Depends(get_db)):
@@ -3894,13 +3944,22 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
             for rp in recent_pushes:
                 i_id = str(rp.item_id)
                 if i_id not in shopee_24h_locked and rp.created_at:
-                    elapsed_sec = (now_utc - rp.created_at).total_seconds()
+                    c_at = rp.created_at
+                    if c_at.tzinfo is not None:
+                        c_at_utc = c_at.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        c_at_utc = c_at
+                    elapsed_sec = (now_utc - c_at_utc).total_seconds()
                     rem_sec = max(0, 86400 - elapsed_sec)
                     rem_hours = round(rem_sec / 3600, 1)
+                    available_at_utc = c_at_utc + timedelta(seconds=86400)
+                    available_at_wib = available_at_utc + timedelta(hours=7)
+                    time_fmt = available_at_wib.strftime("%H:%M")
                     shopee_24h_locked[i_id] = {
-                        "pushed_at": rp.created_at.isoformat(),
+                        "pushed_at": c_at_utc.isoformat() + "Z",
+                        "available_at": available_at_utc.isoformat() + "Z",
                         "remaining_hours": rem_hours,
-                        "lock_reason": f"Telah di-push {int(elapsed_sec // 3600)}j lalu. Cooldown 24 jam Shopee (sisa {rem_hours} jam)."
+                        "lock_reason": f"Item dapat diedit pada {time_fmt}"
                     }
         except Exception as ex:
             logger.warning(f"Error querying Shopee 24h push cooldown: {ex}")
@@ -4029,6 +4088,7 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
             "is_price_locked": is_price_locked,
             "is_pushed_24h": is_pushed_24h,
             "pushed_24h_remaining_hours": cooldown_info["remaining_hours"] if cooldown_info else 0,
+            "pushed_24h_available_at": cooldown_info["available_at"] if cooldown_info else None,
             "pushed_24h_reason": cooldown_info["lock_reason"] if cooldown_info else "",
             "promo_details": promo_details
         })
