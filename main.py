@@ -4286,6 +4286,308 @@ def get_sessions_status(db: Session = Depends(get_db)):
     return result
 
 
+# ─── DELETE SESSION ENDPOINTS (API ONLY FOR TESTING) ─────────────────────────
+
+class DeleteSessionRequest(BaseModel):
+    target: Optional[str] = None
+    outlet_id: Optional[str] = None
+    username: Optional[str] = None
+    store_id: Optional[str] = None
+    platform: Optional[str] = None
+    confirm_all: Optional[bool] = False
+
+
+def perform_delete_session(
+    target: Optional[str] = None,
+    outlet_id: Optional[str] = None,
+    username: Optional[str] = None,
+    store_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    confirm_all: bool = False,
+    db: Optional[Session] = None
+) -> dict:
+    """Helper untuk menghapus berkas sesi pada sistem penyimpanan lokal."""
+    import re
+    from pathlib import Path
+
+    is_all = (str(target or "").strip().lower() == "all" or confirm_all)
+    if is_all:
+        if not confirm_all:
+            raise HTTPException(
+                status_code=400,
+                detail="Penghapusan seluruh sesi memerlukan parameter confirm_all=true."
+            )
+        deleted_files = []
+        dirs_to_clean = []
+        plat = (platform or "all").lower()
+        if plat in ["shopee", "all"]:
+            dirs_to_clean.extend([
+                BASE_DIR / "shopee" / "data",
+                BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+                BASE_DIR / "data",
+            ])
+        if plat in ["gofood", "all"]:
+            dirs_to_clean.extend([
+                BASE_DIR / "Gofood",
+                BASE_DIR,
+            ])
+        if plat in ["grab", "all"]:
+            dirs_to_clean.extend([
+                BASE_DIR / "grab" / "data" / "sessions",
+            ])
+
+        for d in dirs_to_clean:
+            if not d.exists():
+                continue
+            for f in d.iterdir():
+                if not f.is_file():
+                    continue
+                if f.name.startswith("session_") or f.name.startswith("session.") or f.name == "session.json" or f.name.startswith("otp_request_"):
+                    try:
+                        f.unlink()
+                        deleted_files.append(str(f))
+                    except Exception as err:
+                        logger.warning(f"Gagal menghapus {f}: {err}")
+
+        SESSION_METADATA_CACHE.clear()
+        return {
+            "status": "SUCCESS",
+            "message": f"Berhasil menghapus seluruh sesi ({len(deleted_files)} berkas).",
+            "deleted_files": deleted_files,
+            "target": "all"
+        }
+
+    outlet = None
+    candidate_id = (outlet_id or target or "").strip()
+    candidate_sid = (store_id or target or "").strip()
+
+    if db:
+        try:
+            if candidate_id:
+                outlet = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.id == candidate_id).first()
+            if not outlet and candidate_sid:
+                outlet = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.store_id == candidate_sid).first()
+        except Exception as e:
+            logger.warning(f"Error querying outlet during session deletion: {e}")
+
+    search_keys = set()
+    exact_filenames = set()
+
+    def add_key(val: Optional[str]):
+        if not val:
+            return
+        val_str = str(val).strip()
+        if not val_str:
+            return
+        if val_str.endswith(".json"):
+            exact_filenames.add(val_str)
+            val_str = val_str[:-5]
+
+        if val_str.startswith("session_gofood_"):
+            exact_filenames.add(f"{val_str}.json")
+            inner = val_str[15:]
+            if inner:
+                search_keys.add(inner)
+            search_keys.add(val_str)
+        elif val_str.startswith("session_"):
+            exact_filenames.add(f"{val_str}.json")
+            inner = val_str[8:]
+            if inner:
+                search_keys.add(inner)
+            search_keys.add(val_str)
+        else:
+            search_keys.add(val_str)
+            exact_filenames.add(f"session_{val_str}.json")
+            exact_filenames.add(f"session_gofood_{val_str}.json")
+            exact_filenames.add(f"{val_str}.json")
+
+        clean = re.sub(r'[^a-zA-Z0-9_]', '_', val_str).strip('_').lower()
+        clean = re.sub(r'_+', '_', clean)
+        if clean:
+            search_keys.add(clean)
+            exact_filenames.add(f"session_{clean}.json")
+            exact_filenames.add(f"session_gofood_{clean}.json")
+            exact_filenames.add(f"{clean}.json")
+
+    if target:
+        add_key(target)
+    if username:
+        add_key(username)
+    if store_id:
+        add_key(store_id)
+    if outlet_id:
+        add_key(outlet_id)
+
+    if outlet:
+        merchant_name = outlet.merchant_name or outlet.nama_resto_final or outlet.nama_outlet or ""
+        profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
+        profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
+        if profile_name:
+            add_key(profile_name)
+        if outlet.store_id:
+            add_key(outlet.store_id)
+        if outlet.account and outlet.account.username:
+            add_key(outlet.account.username)
+
+    cache_path = BASE_DIR / "master_merchants_cache.csv"
+    phone_map = get_cached_phone_map(cache_path)
+    for sid in [store_id, candidate_sid, getattr(outlet, "store_id", None)]:
+        if sid and str(sid) in phone_map:
+            add_key(phone_map[str(sid)])
+
+    candidate_dirs = [
+        BASE_DIR / "shopee" / "data",
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "data",
+        BASE_DIR / "Gofood",
+        BASE_DIR,
+        BASE_DIR / "grab" / "data" / "sessions",
+    ]
+
+    deleted_files = []
+    seen_paths = set()
+
+    for d in candidate_dirs:
+        if not d.exists() or not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if not f.is_file():
+                continue
+            path_str = str(f.resolve())
+            if path_str in seen_paths:
+                continue
+
+            fname = f.name
+            matched = False
+
+            if fname in exact_filenames:
+                matched = True
+
+            if not matched:
+                for k in search_keys:
+                    if len(k) < 3:
+                        continue
+                    if fname == f"session_{k}.json" or fname == f"session_gofood_{k}.json" or fname == f"otp_request_{k}.json":
+                        matched = True
+                        break
+                    if "grab" in str(d) and fname == f"{k}.json":
+                        matched = True
+                        break
+                    if k == "allvbadmin" and fname == "session.json":
+                        matched = True
+                        break
+
+            if matched:
+                try:
+                    f.unlink()
+                    deleted_files.append(path_str)
+                    seen_paths.add(path_str)
+                    logger.info(f"🗑️ [API] Berkas sesi dihapus: {path_str}")
+                except Exception as err:
+                    logger.error(f"Gagal menghapus berkas sesi {path_str}: {err}")
+
+    SESSION_METADATA_CACHE.clear()
+
+    for jid, job in list(_assign_jobs.items()):
+        j_user = job.get("username", "")
+        if j_user and (j_user in search_keys or any(k in j_user for k in search_keys if len(k) >= 4)):
+            _assign_jobs[jid]["status"] = "CANCELLED"
+            _assign_jobs[jid]["error"] = "Sesi dihapus via API"
+
+    if not deleted_files:
+        return {
+            "status": "NOT_FOUND",
+            "message": "Tidak ditemukan berkas sesi yang cocok.",
+            "target": target or outlet_id or username or store_id,
+            "matched_keys": sorted(list(search_keys)),
+            "deleted_files": []
+        }
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Berhasil menghapus {len(deleted_files)} berkas sesi.",
+        "target": target or outlet_id or username or store_id,
+        "matched_keys": sorted(list(search_keys)),
+        "deleted_files": deleted_files
+    }
+
+
+@app.delete("/api/sessions/{target}")
+def delete_session_by_target(
+    target: str,
+    platform: Optional[str] = None,
+    confirm_all: Optional[bool] = False,
+    db: Session = Depends(get_db)
+):
+    """
+    Menghapus sesi login outlet/akun tertentu via API (untuk testing/reset sesi).
+    Target dapat berupa: outlet_id (UUID), store_id, username/phone, profile_name, atau nama file json.
+    """
+    res = perform_delete_session(target=target, platform=platform, confirm_all=confirm_all, db=db)
+    if res["status"] == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail=res["message"])
+    return res
+
+
+@app.delete("/api/sessions")
+def delete_session_query(
+    target: Optional[str] = None,
+    outlet_id: Optional[str] = None,
+    username: Optional[str] = None,
+    store_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    confirm_all: Optional[bool] = False,
+    db: Session = Depends(get_db)
+):
+    """
+    Menghapus sesi login via query parameter.
+    """
+    if not any([target, outlet_id, username, store_id, confirm_all]):
+        raise HTTPException(status_code=400, detail="Minimal satu parameter (target, outlet_id, username, store_id, atau confirm_all) wajib disertakan.")
+    res = perform_delete_session(target=target, outlet_id=outlet_id, username=username, store_id=store_id, platform=platform, confirm_all=confirm_all, db=db)
+    if res["status"] == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail=res["message"])
+    return res
+
+
+@app.post("/api/sessions/delete")
+def delete_session_post(
+    req: DeleteSessionRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Menghapus sesi login via request body POST (alternatif jika client HTTP tidak mendukung method/body DELETE).
+    """
+    if not any([req.target, req.outlet_id, req.username, req.store_id, req.confirm_all]):
+        raise HTTPException(status_code=400, detail="Minimal satu parameter (target, outlet_id, username, store_id, atau confirm_all) wajib disertakan.")
+    res = perform_delete_session(
+        target=req.target,
+        outlet_id=req.outlet_id,
+        username=req.username,
+        store_id=req.store_id,
+        platform=req.platform,
+        confirm_all=req.confirm_all,
+        db=db
+    )
+    if res["status"] == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail=res["message"])
+    return res
+
+
+@app.delete("/api/shopee/session/{target}")
+def delete_shopee_session_alias(
+    target: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Alias khusus Shopee untuk menghapus sesi per outlet/akun.
+    """
+    res = perform_delete_session(target=target, platform="shopee", db=db)
+    if res["status"] == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail=res["message"])
+    return res
+
+
 # ─── SHOPEE ASSIGN SESSION ENDPOINTS ─────────────────────────────────────────
 
 _assign_jobs: dict = {}  # ponytail: in-memory is fine; restart clears it, jobs are short-lived
