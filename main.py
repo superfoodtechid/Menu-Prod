@@ -1282,8 +1282,13 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                 )
 
                                 if not (upsert_res and not upsert_err):
-                                    status_str = "FAILED"
-                                    err_msg = upsert_err or "Unknown Grab API error."
+                                    raw_err = str(upsert_err or "Unknown Grab API error.")
+                                    if "ItemPromoAttributeLimit" in raw_err or "not allowed during item promotion" in raw_err.lower() or ("409" in raw_err and "promo" in raw_err.lower()):
+                                        status_str = "SKIPPED_ACTIVE_PROMO"
+                                        err_msg = "Menu sedang dalam promo aktif di GrabFood. Perubahan harga tidak diizinkan selama masa promo."
+                                    else:
+                                        status_str = "FAILED"
+                                        err_msg = raw_err
                                     logger.error(f"❌ Grab PUSH tahap harga Rp {step_p:,.0f} gagal: {err_msg}")
                                     break
 
