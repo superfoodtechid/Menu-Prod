@@ -3944,13 +3944,22 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
             for rp in recent_pushes:
                 i_id = str(rp.item_id)
                 if i_id not in shopee_24h_locked and rp.created_at:
-                    elapsed_sec = (now_utc - rp.created_at).total_seconds()
+                    c_at = rp.created_at
+                    if c_at.tzinfo is not None:
+                        c_at_utc = c_at.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        c_at_utc = c_at
+                    elapsed_sec = (now_utc - c_at_utc).total_seconds()
                     rem_sec = max(0, 86400 - elapsed_sec)
                     rem_hours = round(rem_sec / 3600, 1)
+                    available_at_utc = c_at_utc + timedelta(seconds=86400)
+                    available_at_wib = available_at_utc + timedelta(hours=7)
+                    time_fmt = available_at_wib.strftime("%H:%M")
                     shopee_24h_locked[i_id] = {
-                        "pushed_at": rp.created_at.isoformat(),
+                        "pushed_at": c_at_utc.isoformat() + "Z",
+                        "available_at": available_at_utc.isoformat() + "Z",
                         "remaining_hours": rem_hours,
-                        "lock_reason": f"Telah di-push {int(elapsed_sec // 3600)}j lalu. Cooldown 24 jam Shopee (sisa {rem_hours} jam)."
+                        "lock_reason": f"Item dapat diedit pada {time_fmt}"
                     }
         except Exception as ex:
             logger.warning(f"Error querying Shopee 24h push cooldown: {ex}")
@@ -4079,6 +4088,7 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
             "is_price_locked": is_price_locked,
             "is_pushed_24h": is_pushed_24h,
             "pushed_24h_remaining_hours": cooldown_info["remaining_hours"] if cooldown_info else 0,
+            "pushed_24h_available_at": cooldown_info["available_at"] if cooldown_info else None,
             "pushed_24h_reason": cooldown_info["lock_reason"] if cooldown_info else "",
             "promo_details": promo_details
         })
