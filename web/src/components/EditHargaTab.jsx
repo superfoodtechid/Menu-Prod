@@ -151,6 +151,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   // Auto-pull sync state
   const [syncPhase, setSyncPhase] = useState("idle"); // "idle" | "syncing" | "done"
   const [syncJobs, setSyncJobs] = useState([]);
+  const [showSyncCard, setShowSyncCard] = useState(true);
   const syncPollingRef = useRef({});
 
   const [openPlatformDropdown, setOpenPlatformDropdown] = useState(false);
@@ -333,18 +334,17 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     if (!targetBranches || targetBranches.length === 0) return;
     clearSyncPolling();
     setSyncPhase("syncing");
+    setShowSyncCard(true);
 
     const initialJobs = targetBranches.map(b => ({
       id: null,
       branchId: b.id,
-      name: b.brand || b.nama_resto_final || b.merchant_name,
+      name: b.brand || b.nama_resto_final || b.nama_outlet || b.merchant_name,
       storeId: b.store_id,
-      platform: b.platform,
+      platform: b.platform || platform,
       status: "PENDING",
       progress_pct: 0,
       current_step: "Mengantrekan tugas penarikan real-time...",
-      name: b.brand || b.nama_outlet || b.merchant_name,
-      platform: b.platform || "shopee",
     }));
     setSyncJobs(initialJobs);
 
@@ -419,7 +419,9 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
               status: job.status,
               progress_pct: job.progress_pct,
               current_step: job.current_step,
-              error_message: job.error_message
+              error_message: job.error_message,
+              result_metadata: job.result_metadata,
+              completed_at: job.completed_at
             } : j));
 
             if (job.status === "SUCCESS" || job.status === "FAILED") {
@@ -439,11 +441,11 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
       }, 2000);
     });
 
-  }, [API_BASE_URL, API_SECRET_KEY, clearSyncPolling, fetchMenusAndVerify, intendedPushPrices]);
+  }, [API_BASE_URL, API_SECRET_KEY, clearSyncPolling, fetchMenusAndVerify, intendedPushPrices, platform]);
 
   const [cacheInfo, setCacheInfo] = useState(null);
 
-  const fetchCacheStatus = (branchId) => {
+  const fetchCacheStatus = useCallback((branchId) => {
     if (!branchId) return;
     fetch(`${API_BASE_URL}/api/outlets/${branchId}/menu-cache-status`, {
       headers: { "X-API-Key": API_SECRET_KEY || "" }
@@ -453,7 +455,16 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         if (data) setCacheInfo(data);
       })
       .catch(err => console.error("Error fetching cache status:", err));
-  };
+  }, [API_BASE_URL, API_SECRET_KEY]);
+
+  // Automatic cache status fetching whenever selectedBrandId changes
+  useEffect(() => {
+    if (!selectedBrandId) {
+      setCacheInfo(null);
+      return;
+    }
+    fetchCacheStatus(selectedBrandId);
+  }, [selectedBrandId, fetchCacheStatus]);
 
   // When selected parent (Outlet) changes
   const handleSelectOutlet = (name) => {
@@ -461,10 +472,17 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     setOpenOutletDropdown(false);
     const targetBranches = allOutlets.filter(o => (o.nama_outlet || o.nama_resto_final || o.merchant_name) === name);
     setBranches(targetBranches);
-    setSelectedBrandId("");
-    setCheckedIds([]);
+    if (targetBranches.length === 1) {
+      setSelectedBrandId(targetBranches[0].id);
+      setCheckedIds([targetBranches[0].id]);
+    } else {
+      setSelectedBrandId("");
+      setCheckedIds([]);
+    }
     setSyncPhase("idle");
     setCacheInfo(null);
+    setSyncJobs([]);
+    setShowSyncCard(true);
     triggerGSheetSync();
   };
 
@@ -475,7 +493,8 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     setOpenBranchDropdown(false);
     setSyncPhase("idle");
     setCacheInfo(null);
-    fetchCacheStatus(branchId);
+    setSyncJobs([]);
+    setShowSyncCard(true);
     triggerGSheetSync();
   };
 
@@ -483,6 +502,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const handleStartPullAndEdit = () => {
     setActiveJobs([]);
     setShowPostPushMenu(false);
+    setShowSyncCard(true);
     const targetBranches = branches.filter(b => b.id === selectedBrandId);
     if (targetBranches.length > 0) {
       triggerAutoPull(targetBranches);
@@ -493,6 +513,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const handleSkipSync = () => {
     setActiveJobs([]);
     setShowPostPushMenu(false);
+    setShowSyncCard(false);
     clearSyncPolling();
     const targetBranches = branches.filter(b => b.id === selectedBrandId);
     fetchMenusAndVerify(targetBranches);
@@ -1065,61 +1086,134 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         )}
       </section>
 
-      {/* ── Auto-Pull Syncing Loading Section ── */}
-      {syncPhase === "syncing" && (
-        <section className="surface-card p-6 space-y-5 border-2 border-red-200 dark:border-zinc-800 bg-red-50/20 dark:bg-zinc-900/40">
+      {/* ── Auto-Pull Syncing & Pull Result History Section ── */}
+      {syncJobs.length > 0 && showSyncCard && (
+        <section className={`surface-card p-6 space-y-5 border-2 transition-all ${
+          syncPhase === "syncing"
+            ? "border-red-200 dark:border-zinc-800 bg-red-50/20 dark:bg-zinc-900/40"
+            : syncJobs.every(j => j.status === "SUCCESS")
+            ? "border-emerald-200 dark:border-emerald-900/40 bg-emerald-50/20 dark:bg-emerald-950/20"
+            : "border-amber-200 dark:border-amber-900/40 bg-amber-50/20 dark:bg-amber-950/20"
+        }`}>
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-red-100 dark:border-zinc-800 pb-4">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-700 text-white shadow-md">
-                <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-md ${
+                syncPhase === "syncing"
+                  ? "bg-red-700 text-white"
+                  : syncJobs.every(j => j.status === "SUCCESS")
+                  ? "bg-emerald-600 text-white"
+                  : "bg-amber-600 text-white"
+              }`}>
+                {syncPhase === "syncing" ? (
+                  <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                ) : syncJobs.every(j => j.status === "SUCCESS") ? (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                )}
               </div>
               <div>
-                <h3 className="text-base font-bold text-slate-900 dark:text-white">Menarik data menu real-time...</h3>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  {syncPhase === "syncing"
+                    ? "Menarik data menu real-time..."
+                    : syncJobs.every(j => j.status === "SUCCESS")
+                    ? "Penarikan menu berhasil"
+                    : "Penarikan menu selesai (sebagian perlu perhatian)"}
+                </h3>
                 <p className="text-[13px] text-slate-500 dark:text-zinc-400">
-                  Brand: <strong>{selectedBrandObj ? (selectedBrandObj.brand || selectedBrandObj.nama_outlet || selectedBrandObj.merchant_name) : selectedParent}</strong> ({completedSyncCount}/{syncJobs.length} selesai)
+                  Brand: <strong>{selectedBrandObj ? (selectedBrandObj.brand || selectedBrandObj.nama_outlet || selectedBrandObj.merchant_name) : selectedParent}</strong>
+                  {" · "}
+                  {syncPhase === "syncing" ? (
+                    <span>({completedSyncCount}/{syncJobs.length} selesai)</span>
+                  ) : (
+                    <span>Selesai diproses · Data menu siap disesuaikan</span>
+                  )}
                 </p>
               </div>
             </div>
+
+            {/* Tombol Tutup jika sudah selesai */}
+            {syncPhase !== "syncing" && (
+              <button
+                type="button"
+                onClick={() => setShowSyncCard(false)}
+                className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-300 transition cursor-pointer self-start sm:self-auto"
+              >
+                Tutup Notifikasi
+              </button>
+            )}
           </div>
 
           <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-            {syncJobs.map(job => (
-              <div key={job.branchId || job.id} className="rounded-xl border border-red-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-2.5 shadow-sm">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[15px] font-semibold text-slate-800 dark:text-white truncate">{job.name}</p>
-                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px]">
-                      <PlatformBadge platform={job.platform} storeId={job.storeId} />
+            {syncJobs.map(job => {
+              const isSuccess = job.status === "SUCCESS";
+              const isFailed = job.status === "FAILED";
+
+              return (
+                <div
+                  key={job.branchId || job.id}
+                  className={`rounded-xl border p-4 space-y-2.5 shadow-sm transition-colors ${
+                    isSuccess
+                      ? "bg-white dark:bg-zinc-900 border-emerald-100 dark:border-emerald-950"
+                      : isFailed
+                      ? "bg-white dark:bg-zinc-900 border-red-100 dark:border-red-950"
+                      : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[15px] font-semibold text-slate-800 dark:text-white truncate">{job.name}</p>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px]">
+                        <PlatformBadge platform={job.platform} storeId={job.storeId} />
+                        {job.completed_at && (
+                          <span className="text-zinc-400 dark:text-zinc-500 font-mono text-[11px]">
+                            {new Date(job.completed_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                          </span>
+                        )}
+                      </div>
                     </div>
+                    <span className={`px-2.5 py-1 rounded-full text-[12px] font-bold uppercase tracking-wider ${
+                      isSuccess
+                        ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/50"
+                        : isFailed
+                        ? "bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-400 border border-red-200 dark:border-red-800/50"
+                        : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800/50"
+                    }`}>
+                      {isSuccess ? "BERHASIL ✓" : isFailed ? "GAGAL ✗" : `${job.progress_pct}%`}
+                    </span>
                   </div>
-                  <span className={`px-2.5 py-1 rounded-full text-[13px] font-bold uppercase tracking-wider ${
-                    job.status === "SUCCESS" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400" :
-                    job.status === "FAILED" ? "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-400" :
-                    "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400"
-                  }`}>
-                    {job.status === "SUCCESS" ? "SELESAI ✓" : job.status === "FAILED" ? "GAGAL ✗" : `${job.progress_pct}%`}
-                  </span>
-                </div>
 
-                <div className="w-full bg-slate-100 dark:bg-zinc-800 rounded-full h-1.5 overflow-hidden">
-                  <div className={`h-1.5 transition-all duration-300 ${
-                    job.status === "SUCCESS" ? "bg-emerald-500" :
-                    job.status === "FAILED" ? "bg-red-500" :
-                    "bg-red-600"
-                  }`} style={{ width: `${job.progress_pct}%` }} />
-                </div>
+                  <div className="w-full bg-slate-100 dark:bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                    <div
+                      className={`h-1.5 transition-all duration-300 ${
+                        isSuccess ? "bg-emerald-500" :
+                        isFailed ? "bg-red-500" :
+                        "bg-red-600"
+                      }`}
+                      style={{ width: `${job.progress_pct}%` }}
+                    />
+                  </div>
 
-                <div className="flex items-center justify-between text-[13px]">
-                  <span className="text-slate-500 dark:text-zinc-400 truncate">{job.current_step || "Mengantrekan..."}</span>
-                  {job.error_message && (
-                    <span className="text-red-600 dark:text-red-400 font-medium truncate ml-2">{job.error_message}</span>
-                  )}
+                  <div className="flex items-center justify-between text-[13px]">
+                    <span className={`truncate ${isSuccess ? "text-emerald-700 dark:text-emerald-400 font-medium" : "text-slate-500 dark:text-zinc-400"}`}>
+                      {isSuccess && job.result_metadata?.items_count
+                        ? `Berhasil menarik ${job.result_metadata.items_count} item menu dari portal.`
+                        : (job.current_step || "Mengantrekan...")}
+                    </span>
+                    {job.error_message && (
+                      <span className="text-red-600 dark:text-red-400 font-medium truncate ml-2">{job.error_message}</span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}
@@ -1127,6 +1221,41 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
       {/* ── Middle: Global Bulk Adjust & Mode Switcher (Step 4: Sesuaikan Harga) ── */}
       {syncPhase === "done" && preview.length > 0 && (
         <section className="surface-card p-5 lg:p-6 space-y-4">
+          {/* Data Source & Pull Status Banner */}
+          <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60 p-3.5 flex flex-wrap items-center justify-between gap-3 text-[13px]">
+            <div className="flex items-center gap-2.5">
+              <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase tracking-wide border ${
+                syncJobs.length > 0 && syncJobs.some(j => j.status === "SUCCESS")
+                  ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60"
+                  : "bg-slate-100 text-slate-800 dark:bg-zinc-800 dark:text-zinc-200 border-slate-200 dark:border-zinc-700"
+              }`}>
+                {syncJobs.length > 0 && syncJobs.some(j => j.status === "SUCCESS") ? "Live Sync Berhasil" : "Cache Lokal"}
+              </span>
+              <span className="text-zinc-700 dark:text-zinc-300 font-medium">
+                {syncJobs.length > 0 && syncJobs.some(j => j.status === "SUCCESS")
+                  ? `Data hasil penarikan real-time (${currentItems.length} item dimuat)`
+                  : cacheInfo?.has_cache
+                  ? `Ditarik ${cacheInfo.human_age} (${currentItems.length} item dimuat)`
+                  : `${currentItems.length} item dimuat`}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              {cacheInfo?.last_sync_at && (
+                <span className="text-[12px] text-zinc-500 dark:text-zinc-400 font-mono">
+                  {new Date(cacheInfo.last_sync_at).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}
+                </span>
+              )}
+              {cacheInfo?.has_cache && syncJobs.length === 0 && (
+                <button
+                  type="button"
+                  onClick={handleStartPullAndEdit}
+                  className="text-[12px] font-bold text-red-700 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 underline cursor-pointer"
+                >
+                  Tarik Ulang Live
+                </button>
+              )}
+            </div>
+          </div>
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-red-100 dark:border-zinc-800 pb-4">
             <div>
               <StepLabel number={4} label="Sesuaikan Harga" active={true} done={false} className="mb-1" />
