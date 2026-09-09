@@ -231,7 +231,7 @@ def ambil_otp_dari_endpoint(url_dasar, action="getOtp", label_email=None):
         return ""
 
 
-def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_detik=2, otp_awal_override=None, timeout_detik=40):
+def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_detik=2, otp_awal_override=None, timeout_detik=40, is_cancelled_func=None):
     """
     Menunggu OTP terbaru yang valid dari endpoint Gmail Apps Script.
     Jika dalam batas waktu tidak ada OTP baru yang masuk, kembalikan None.
@@ -241,6 +241,9 @@ def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_de
 
     attempt_count = 0
     while time.time() < batas_waktu:
+        if is_cancelled_func and is_cancelled_func():
+            print("   🛑 Polling OTP dibatalkan oleh pengguna.")
+            return None
         attempt_count += 1
         sisa = max(0, int(batas_waktu - time.time()))
         try:
@@ -421,14 +424,27 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
     except Exception:
         pass
 
-    if not os.getenv("DISPLAY"):
-        headless_mode = True
+    job_id = outlet_info.get('job_id')
+    def _is_cancelled():
+        if not job_id:
+            return False
+        try:
+            from menu_core.job_control import is_job_cancelled
+            return is_job_cancelled(job_id)
+        except Exception:
+            return False
+
+    if _is_cancelled():
+        print(f"🛑 [GoFood] Job {job_id} telah dibatalkan oleh pengguna sebelum browser dibuka.")
+        return None
 
     result = None
 
     chrome_process = None
     chrome_log = None
     try:
+        if _is_cancelled():
+            return None
         p = sync_playwright().start()
         chromium_bin = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else ("/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else None)
         browser = p.chromium.launch(
@@ -781,7 +797,7 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                                 try:
                                     print("   🤖 Polling OTP dari Gmail...")
                                     
-                                    otp_code = tunggu_otp_terbaru(otp_endpoint, action=action_type, label_email=label_email_cfg, interval_detik=2, otp_awal_override=otp_snapshot_awal, timeout_detik=35)
+                                    otp_code = tunggu_otp_terbaru(otp_endpoint, action=action_type, label_email=label_email_cfg, interval_detik=2, otp_awal_override=otp_snapshot_awal, timeout_detik=35, is_cancelled_func=_is_cancelled)
                                     
                                     if otp_code and not (otp_code.isdigit() and len(otp_code) in (4, 6)):
                                         print(f"   ⚠️ OTP dari endpoint bukan format angka valid: {otp_code[:50]}...")

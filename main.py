@@ -651,19 +651,35 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
     lock_acquired = False
 
     try:
-        GLOBAL_BROWSER_SEMAPHORE.acquire()
+        from menu_core.job_control import is_job_cancelled, clear_cancelled_job
+        if is_job_cancelled(job_id, db):
+            logger.info(f"🛑 Job {job_id} ({platform}) was CANCELLED before acquiring semaphore.")
+            return
+
+        while not GLOBAL_BROWSER_SEMAPHORE.acquire(timeout=0.5):
+            if is_job_cancelled(job_id, db):
+                logger.info(f"🛑 Job {job_id} ({platform}) was CANCELLED while waiting for global browser slot.")
+                return
         sem_acquired = True
         logger.info(f"🚦 Job {job_id} ({platform}) acquired global browser slot.")
 
+        if is_job_cancelled(job_id, db):
+            logger.info(f"🛑 Job {job_id} ({platform}) was CANCELLED after acquiring global browser slot.")
+            return
+
         if lock:
             logger.info(f"🔒 Job {job_id} ({platform}) waiting for lock...")
-            lock.acquire()
+            while not lock.acquire(timeout=0.5):
+                if is_job_cancelled(job_id, db):
+                    logger.info(f"🛑 Job {job_id} ({platform}) was CANCELLED while waiting for lock.")
+                    return
             lock_acquired = True
             logger.info(f"🔓 Job {job_id} ({platform}) acquired lock. Starting execution.")
 
         # Re-fetch job under lock to ensure we have the latest database state
+        db.expire_all()
         job = db.query(Job).filter(Job.id == job_id).first()
-        if not job or job.status == "CANCELLED":
+        if not job or job.status == "CANCELLED" or is_job_cancelled(job_id, db):
             logger.info(f"🛑 Job {job_id} was CANCELLED or deleted before execution.")
             return
 
@@ -700,6 +716,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
 
             # Setup store_metadata payload for shopee.core.pull
             store_metadata = {
+                "job_id": str(job_id),
                 "store_id": outlet.store_id,
                 "merchant_name": outlet.merchant_name,
                 "nama_outlet": outlet.nama_outlet,
@@ -727,8 +744,9 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                     outlet.store_id = resolved_store_id
                     logger.info(f"💾 Dynamically updated store_id to {resolved_store_id} for outlet {outlet.merchant_name}")
             
+            db.expire_all()
             db.refresh(job)
-            if job.status == "CANCELLED":
+            if job.status == "CANCELLED" or is_job_cancelled(job_id, db):
                 logger.info(f"🛑 Job {job_id} was CANCELLED before Shopee success commit.")
                 return
 
@@ -753,6 +771,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             db.commit()
             
             store_metadata = {
+                "job_id": str(job_id),
                 "store_id": outlet.store_id,
                 "merchant_name": outlet.merchant_name,
                 "nama_outlet": outlet.nama_outlet,
@@ -773,8 +792,9 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             if not success:
                 raise Exception(f"GoFood extraction failed: {result}")
                 
+            db.expire_all()
             db.refresh(job)
-            if job.status == "CANCELLED":
+            if job.status == "CANCELLED" or is_job_cancelled(job_id, db):
                 logger.info(f"🛑 Job {job_id} was CANCELLED before GoFood success commit.")
                 return
 
@@ -797,6 +817,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             db.commit()
             
             store_metadata = {
+                "job_id": str(job_id),
                 "store_id": outlet.store_id,
                 "merchant_name": outlet.merchant_name,
                 "nama_outlet": outlet.nama_outlet,
@@ -817,8 +838,9 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             if not success:
                 raise Exception(f"Grab extraction failed: {result}")
                 
+            db.expire_all()
             db.refresh(job)
-            if job.status == "CANCELLED":
+            if job.status == "CANCELLED" or is_job_cancelled(job_id, db):
                 logger.info(f"🛑 Job {job_id} was CANCELLED before Grab success commit.")
                 return
 
@@ -840,16 +862,19 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
     except Exception as e:
         logger.error(f"❌ Job {job_id} failed: {e}")
         try:
+            db.expire_all()
             db.refresh(job)
         except Exception:
             pass
-        if job and job.status == "CANCELLED":
+        from menu_core.job_control import is_job_cancelled
+        if (job and job.status == "CANCELLED") or is_job_cancelled(job_id, db):
             logger.info(f"🛑 Job {job_id} was CANCELLED by user, keeping CANCELLED status.")
         else:
             job.status = "FAILED"
-            if "user membatalkan otp" in str(e).lower():
+            if "user membatalkan otp" in str(e).lower() or "dibatalkan oleh pengguna" in str(e).lower():
+                job.status = "CANCELLED"
                 job.error_message = "user membatalkan otp"
-                job.current_step = "Gagal: user membatalkan otp"
+                job.current_step = "Dibatalkan oleh pengguna"
             else:
                 job.error_message = str(e)
                 err_msg = f"Terjadi kesalahan: {str(e)}"
@@ -888,18 +913,35 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
     lock_acquired = False
 
     try:
-        GLOBAL_BROWSER_SEMAPHORE.acquire()
+        from menu_core.job_control import is_job_cancelled
+        if is_job_cancelled(job_id, db):
+            logger.info(f"🛑 Job {job_id} ({platform}) was CANCELLED before acquiring semaphore.")
+            return
+
+        while not GLOBAL_BROWSER_SEMAPHORE.acquire(timeout=0.5):
+            if is_job_cancelled(job_id, db):
+                logger.info(f"🛑 Job {job_id} ({platform}) was CANCELLED while waiting for global browser slot.")
+                return
         sem_acquired = True
         logger.info(f"🚦 Job {job_id} ({platform}) acquired global browser slot.")
 
+        if is_job_cancelled(job_id, db):
+            logger.info(f"🛑 Job {job_id} ({platform}) was CANCELLED after acquiring global browser slot.")
+            return
+
         if lock:
             logger.info(f"🔒 Job {job_id} ({platform}) waiting for lock...")
-            lock.acquire()
+            while not lock.acquire(timeout=0.5):
+                if is_job_cancelled(job_id, db):
+                    logger.info(f"🛑 Job {job_id} ({platform}) was CANCELLED while waiting for lock.")
+                    return
             lock_acquired = True
             logger.info(f"🔓 Job {job_id} ({platform}) acquired lock. Starting execution.")
 
+        db.expire_all()
         job = db.query(Job).filter(Job.id == job_id).first()
-        if not job:
+        if not job or job.status == "CANCELLED" or is_job_cancelled(job_id, db):
+            logger.info(f"🛑 Job {job_id} was CANCELLED or deleted before push execution.")
             return
 
         platform = (job.platform or "").lower()
@@ -1576,16 +1618,26 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
     except Exception as e:
         logger.error(f"❌ Job {job_id} failed: {e}")
-        job.status = "FAILED"
-        if "user membatalkan otp" in str(e).lower():
-            job.error_message = "user membatalkan otp"
-            job.current_step = "Gagal: user membatalkan otp"
+        try:
+            db.expire_all()
+            db.refresh(job)
+        except Exception:
+            pass
+        from menu_core.job_control import is_job_cancelled
+        if (job and job.status == "CANCELLED") or is_job_cancelled(job_id, db):
+            logger.info(f"🛑 Job {job_id} was CANCELLED by user, keeping CANCELLED status.")
         else:
-            job.error_message = str(e)
-            err_msg = f"Terjadi kesalahan: {str(e)}"
-            job.current_step = err_msg if len(err_msg) <= 255 else err_msg[:252] + "..."
-        job.completed_at = datetime.utcnow()
-        db.commit()
+            job.status = "FAILED"
+            if "user membatalkan otp" in str(e).lower() or "dibatalkan oleh pengguna" in str(e).lower():
+                job.status = "CANCELLED"
+                job.error_message = "user membatalkan otp"
+                job.current_step = "Dibatalkan oleh pengguna"
+            else:
+                job.error_message = str(e)
+                err_msg = f"Terjadi kesalahan: {str(e)}"
+                job.current_step = err_msg if len(err_msg) <= 255 else err_msg[:252] + "..."
+            job.completed_at = datetime.utcnow()
+            db.commit()
 
     finally:
         if lock_acquired and lock:
@@ -1699,6 +1751,9 @@ def get_job_status(job_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_job_endpoint(job_id: uuid.UUID, db: Session = Depends(get_db)):
+    from menu_core.job_control import cancel_job
+    cancel_job(job_id)
+
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1713,14 +1768,38 @@ def cancel_job_endpoint(job_id: uuid.UUID, db: Session = Depends(get_db)):
     # If this job has an active OTP request waiting for Shopee, cancel it too
     if job.platform == "shopee":
         try:
-            username = (job.payload or {}).get("store_id") or (job.outlet.account.username if job.outlet and job.outlet.account else None)
-            if username:
-                for d in [BASE_DIR / "src" / "shopee-omzet-automation" / "data", BASE_DIR / "shopee" / "data"]:
-                    fpath = d / f"otp_request_{username}.json"
+            usernames = ["allvbadmin"]
+            store_user = (job.payload or {}).get("store_id")
+            if store_user:
+                usernames.append(str(store_user))
+            if job.outlet and job.outlet.account and job.outlet.account.username:
+                usernames.append(str(job.outlet.account.username))
+
+            for d in [BASE_DIR / "src" / "shopee-omzet-automation" / "data", BASE_DIR / "shopee" / "data"]:
+                if not d.exists():
+                    continue
+                for u in usernames:
+                    fpath = d / f"otp_request_{u}.json"
                     if fpath.exists():
                         fpath.write_text(json.dumps({"status": "CANCELLED", "cancelled_at": datetime.now().isoformat()}))
+                for f in d.glob("otp_request_*.json"):
+                    try:
+                        f.write_text(json.dumps({"status": "CANCELLED", "cancelled_at": datetime.now().isoformat()}))
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"Error cancelling Shopee OTP file for job {job_id}: {e}")
+
+        # Kill any active selenium browser instances immediately
+        try:
+            automation_core = BASE_DIR / "src" / "shopee-omzet-automation"
+            if str(automation_core) not in sys.path:
+                sys.path.insert(0, str(automation_core))
+            from core.browser import kill_all_active_drivers
+            kill_all_active_drivers()
+            logger.info(f"🛑 Terminated active Selenium drivers for cancelled Shopee job {job_id}")
+        except Exception as ke:
+            logger.warning(f"Could not kill active Shopee drivers: {ke}")
 
     return {"status": "SUCCESS", "message": f"Job {job_id} cancelled"}
 

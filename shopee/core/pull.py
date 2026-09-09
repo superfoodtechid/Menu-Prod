@@ -78,6 +78,20 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
     session_file = automation_data_dir / f"session_{username}.json"
     browser.set_session_file(session_file)
             
+    job_id = store_metadata.get('job_id')
+    def _is_cancelled():
+        if not job_id:
+            return False
+        try:
+            from menu_core.job_control import is_job_cancelled
+            return is_job_cancelled(job_id)
+        except Exception:
+            return False
+
+    if _is_cancelled():
+        print(f"[!] Shopee job {job_id} telah dibatalkan oleh pengguna.")
+        return False, "user membatalkan otp"
+
     print(f"[*] Membuka browser (headless={headless}) dan memilih merchant: '{target_name}'...")
     try:
         session_data = browser.get_session(
@@ -89,9 +103,13 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             interactive=True
         )
     except Exception as e:
-        if "user membatalkan otp" in str(e).lower():
+        if "user membatalkan otp" in str(e).lower() or _is_cancelled():
             return False, "user membatalkan otp"
         return False, f"Gagal menginisialisasi browser: {e}"
+
+    if _is_cancelled():
+        print(f"[!] Shopee job {job_id} telah dibatalkan setelah inisialisasi browser.")
+        return False, "user membatalkan otp"
     
     if not session_data or "shopee_tob_token" not in session_data:
         return False, "Gagal menginisialisasi browser atau memilih merchant."
