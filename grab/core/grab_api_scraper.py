@@ -1246,7 +1246,7 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
             
     return items_list, modifiers_list
 
-async def run_api_download_for_portal(user, pwd, start_date: str = None, end_date: str = None, browser=None, target_store_id: str = None):
+async def run_api_download_for_portal(user, pwd, start_date: str = None, end_date: str = None, browser=None, target_store_id: str = None, job_id: str = None):
     is_valid, err_msg = validate_credentials(user, pwd)
     if not is_valid:
         logger.error(f"  ✗ [Validation] Invalid credentials for {user}: {err_msg}")
@@ -1254,10 +1254,23 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
 
     session_path = os.path.join(SESSION_DIR, f"{user}.json")
 
+    def _is_cancelled():
+        if not job_id:
+            return False
+        try:
+            from menu_core.job_control import is_job_cancelled
+            return is_job_cancelled(job_id)
+        except Exception:
+            return False
+
     p = None
     managed_browser = None
 
     for run_attempt in range(2):
+        if _is_cancelled():
+            logger.info(f"🛑 [Grab] Job {job_id} cancelled before attempt {run_attempt+1}.")
+            return None, "Dibatalkan oleh pengguna"
+
         context = None
         page = None
         try:
@@ -1290,6 +1303,10 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                 browser = managed_browser
                 p = p_inst
 
+            if _is_cancelled():
+                logger.info(f"🛑 [Grab] Job {job_id} cancelled after browser launch.")
+                return None, "Dibatalkan oleh pengguna"
+
             storage_state = session_path if os.path.exists(session_path) and run_attempt == 0 else None
             context = await browser.new_context(
                 storage_state=storage_state,
@@ -1308,6 +1325,10 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                 await page.goto("https://merchant.grab.com/dashboard", wait_until="domcontentloaded", timeout=30000)
             except:
                 pass
+
+            if _is_cancelled():
+                logger.info(f"🛑 [Grab] Job {job_id} cancelled during session check.")
+                return None, "Dibatalkan oleh pengguna"
 
             api = GrabAPI(page, user, pwd)
             mgid = await api.get_merchant_group_id()
@@ -1329,6 +1350,10 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
             if not mgid:
                 await context.close()
                 continue
+
+            if _is_cancelled():
+                logger.info(f"🛑 [Grab] Job {job_id} cancelled before /food/menu navigation.")
+                return None, "Dibatalkan oleh pengguna"
 
             # Step 2: Navigasi ke /food/menu + intercept request halaman untuk
             # mendapatkan merchantId yang BENAR (sama dengan curl yang digunakan manual).
@@ -1379,6 +1404,10 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
             all_modifiers = []
 
             for s in stores:
+                if _is_cancelled():
+                    logger.info(f"🛑 [Grab] Job {job_id} cancelled during store extraction loop.")
+                    return None, "Dibatalkan oleh pengguna"
+
                 store_id   = s["store_id"]
                 group_id   = s["group_id"]
                 store_name = s["store_name"]
@@ -1394,6 +1423,10 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                     except Exception as nav_err:
                         logger.warning(f"  [Nav] food/menu/{store_id} navigation warning: {nav_err}")
 
+                if _is_cancelled():
+                    logger.info(f"🛑 [Grab] Job {job_id} cancelled before fetch_menu.")
+                    return None, "Dibatalkan oleh pengguna"
+
                 # Step 3: Fetch menu dari konteks halaman /food/menu
                 logger.info(f"  [Fetch] Fetching menu API for {store_name} ({store_id})...")
                 menu_data, err = await api.fetch_menu(group_id, store_id, store_name, is_mg)
@@ -1405,8 +1438,8 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                 else:
                     logger.error(f"  ✗ Failed to fetch menu for {store_name}: {err}")
 
-            job_id   = uuid.uuid4().hex[:8]
-            filename = os.path.join(DOWNLOADS_DIR, f"grab_menu_{user}_{job_id}.json")
+            file_suffix = uuid.uuid4().hex[:8]
+            filename = os.path.join(DOWNLOADS_DIR, f"grab_menu_{user}_{file_suffix}.json")
             with open(filename, "w", encoding="utf-8") as f:
                 json.dump({"items": all_items, "modifiers": all_modifiers}, f, ensure_ascii=False, indent=2)
 

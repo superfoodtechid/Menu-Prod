@@ -93,6 +93,20 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     if menu_dir not in sys.path:
         sys.path.insert(0, menu_dir)
 
+    job_id = store_metadata.get('job_id')
+    def _is_cancelled():
+        if not job_id:
+            return False
+        try:
+            from menu_core.job_control import is_job_cancelled
+            return is_job_cancelled(job_id)
+        except Exception:
+            return False
+
+    if _is_cancelled():
+        print(f"[!] GoFood job {job_id} telah dibatalkan oleh pengguna.")
+        return False, "Dibatalkan oleh pengguna"
+
     # 1. Jalankan Fast-Path Direct REST API jika sesi aktif tersedia
     login_result = None
     cached_token = store_metadata.get('access_token') or store_metadata.get('token')
@@ -104,6 +118,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             print(f"   ⚠️ Gagal mengecek sesi lokal GoFood: {e}")
 
     if cached_token:
+        if _is_cancelled():
+            return False, "Dibatalkan oleh pengguna"
         print(f"[*] Ditemukan token aktif dari sesi lokal! Memulai Fast-Path Direct REST API...")
         try:
             from menu_core.gofood_api import fetch_gofood_menu_and_modifiers
@@ -116,6 +132,9 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
 
     # 2. Fallback: Jalankan login_outlet via browser Chromium jika Fast-Path gagal / belum ada token
     if not login_result or not login_result.get('captured_menu'):
+        if _is_cancelled():
+            print(f"🛑 [GoFood] Job {job_id} dibatalkan sebelum browser fallback.")
+            return False, "Dibatalkan oleh pengguna"
         try:
             from login_gofood import login_outlet
             headless_env = os.getenv("HEADLESS") or os.getenv("HEADLESS_GOFOOD")
@@ -150,6 +169,9 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
 
             max_extract_attempts = 2
             for extract_attempt in range(1, max_extract_attempts + 1):
+                if _is_cancelled():
+                    print(f"🛑 [GoFood] Job {job_id} dibatalkan dalam loop percobaan.")
+                    return False, "Dibatalkan oleh pengguna"
                 if in_event_loop:
                     login_result = _run_login_outlet_in_clean_thread(store_metadata)
                 else:
@@ -158,6 +180,9 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                 if login_result and login_result.get('captured_menu'):
                     break
                     
+                if _is_cancelled():
+                    return False, "Dibatalkan oleh pengguna"
+
                 if extract_attempt < max_extract_attempts:
                     print(f"[🔄 RETRY {extract_attempt}/{max_extract_attempts}] Penarikan menu GoFood belum berhasil, mengulang proses login browser dalam 3 detik...")
                     import time

@@ -69,6 +69,29 @@ class ThreadLocalSessionFileProxy:
 
 SESSION_FILE = ThreadLocalSessionFileProxy()
 
+_ACTIVE_DRIVERS = set()
+_drivers_lock = threading.Lock()
+
+def register_active_driver(d):
+    if d:
+        with _drivers_lock:
+            _ACTIVE_DRIVERS.add(d)
+
+def unregister_active_driver(d):
+    if d:
+        with _drivers_lock:
+            _ACTIVE_DRIVERS.discard(d)
+
+def kill_all_active_drivers():
+    with _drivers_lock:
+        drivers = list(_ACTIVE_DRIVERS)
+        _ACTIVE_DRIVERS.clear()
+    for d in drivers:
+        try:
+            d.quit()
+        except Exception:
+            pass
+
 # Wrap the module class to intercept external writes to SESSION_FILE
 class ModuleWrapper(sys.modules[__name__].__class__):
     @property
@@ -1573,6 +1596,7 @@ def _init_driver(headless: bool = True):
 
     if driver:
         driver.set_page_load_timeout(60)
+        register_active_driver(driver)
     return driver
 
 
@@ -2844,6 +2868,7 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                 raise e
         finally:
             if (close_browser or not session_success) and driver is not None:
+                unregister_active_driver(driver)
                 try: driver.quit()
                 except: pass
 
