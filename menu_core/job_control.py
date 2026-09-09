@@ -41,3 +41,4 @@ def clear_cancelled_job(job_id) -> None:
         return
     with _lock:
         _CANCELLED_JOB_IDS.discard(str(job_id))
+
