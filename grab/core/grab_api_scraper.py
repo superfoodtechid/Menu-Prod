@@ -859,7 +859,11 @@ class GrabAPI:
                 finally:
                     self._in_upsert_fallback = False
 
-        return None, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
+        raw_err = res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
+        raw_str = str(raw_err)
+        if "ItemPromoAttributeLimit" in raw_str or "not allowed during item promotion" in raw_str.lower() or ("409" in raw_str and "promo" in raw_str.lower()):
+            return None, "Menu sedang dalam promo aktif di GrabFood. Perubahan harga tidak diizinkan selama masa promo."
+        return None, raw_err
 
     async def delete_item(self, group_id, store_id, item_id):
         """DELETE /food/merchant/v2/items/{item_id}"""

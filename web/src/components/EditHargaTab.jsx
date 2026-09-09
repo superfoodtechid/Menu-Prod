@@ -19,6 +19,61 @@ const group = (items) => {
   }, {});
 };
 
+function formatUserFriendlyError(rawMsg, platform = "") {
+  if (!rawMsg) return "";
+  const s = String(rawMsg);
+
+  // 1. Grab Promo & Attribute Limit (Status 409 ItemPromoAttributeLimit)
+  if (
+    s.includes("ItemPromoAttributeLimit") ||
+    s.includes("not allowed during item promotion") ||
+    (s.includes("409") && (s.includes("promo") || s.includes("promotion"))) ||
+    (s.includes("already_exists") && s.includes("promo"))
+  ) {
+    return "Menu sedang dalam promo aktif di GrabFood. Perubahan harga tidak diizinkan selama masa promo.";
+  }
+
+  // 2. Grab Quota per month (15x per month)
+  if (s.includes("15x") || s.includes("15 per bulan") || s.includes("batas maksimal 15x")) {
+    return "Item telah mencapai batas maksimal 15x perubahan harga per bulan di GrabFood.";
+  }
+
+  // 3. Shopee Quota & Max Increase
+  if (s.includes("1100036") || s.includes("exceed the limit times") || s.includes("edit times exceed")) {
+    return "Batas kuota harian ubah harga ShopeeFood tercapai (maks. 1x per hari).";
+  }
+  if (s.includes("25") && (s.includes("exceed") || s.includes("limit") || s.includes("%"))) {
+    return "Kenaikan harga melebihi batas maksimal (25%).";
+  }
+
+  // 4. Common Promo / Campaign
+  if (s.toLowerCase().includes("promo") || s.toLowerCase().includes("campaign") || s.toLowerCase().includes("slash price")) {
+    return "Menu sedang dalam promo aktif di portal merchant. Perubahan harga dasar dikunci.";
+  }
+
+  // 5. Auth / Session Expired
+  if (s.includes("401") || s.includes("403") || s.toLowerCase().includes("unauthorized") || s.toLowerCase().includes("forbidden")) {
+    return "Sesi login aplikasi kedaluwarsa atau tidak memiliki izin mengubah harga.";
+  }
+
+  // 6. Not Found
+  if (s.includes("404") || s.toLowerCase().includes("not found") || s.includes("tidak ditemukan")) {
+    return "Menu tidak ditemukan di katalog merchant aktif.";
+  }
+
+  // 7. Timeout / Network
+  if (s.toLowerCase().includes("timeout") || s.toLowerCase().includes("timed out")) {
+    return "Waktu permintaan habis, respon portal merchant lambat.";
+  }
+
+  // 8. Raw API / JSON Error fallback
+  if (s.startsWith("Status ") || s.includes("API error:") || s.includes("{'target':") || s.includes('{"target":')) {
+    return "Ditolak oleh sistem portal merchant (detail teknis tersimpan di log).";
+  }
+
+  return s;
+}
+
 // ─── Memoized Item Row Component for Instant Performance ─────────────────────
 const MenuRowItem = memo(function MenuRowItem({
   item,
@@ -1208,7 +1263,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                         : (job.current_step || "Mengantrekan...")}
                     </span>
                     {job.error_message && (
-                      <span className="text-red-600 dark:text-red-400 font-medium truncate ml-2">{job.error_message}</span>
+                      <span className="text-red-600 dark:text-red-400 font-medium truncate ml-2">{formatUserFriendlyError(job.error_message, job.platform)}</span>
                     )}
                   </div>
                 </div>
@@ -1419,7 +1474,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                     <div className="rounded-xl border border-red-200 bg-red-50/90 p-3 flex items-start gap-2 text-[13px] text-red-800 font-medium shadow-sm">
                       <div className="flex-1">
                         <div className="font-bold text-red-900 mb-0.5">Detail Kesalahan Pembaruan:</div>
-                        <div>{job.error_message || "Pembaruan harga tidak dapat diselesaikan atau 0 item terverifikasi."}</div>
+                        <div>{formatUserFriendlyError(job.error_message, job.platform) || "Pembaruan harga tidak dapat diselesaikan atau 0 item terverifikasi."}</div>
                       </div>
                     </div>
                   )}
@@ -1443,28 +1498,44 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                            {job.result_metadata.items_breakdown.map((item, idx) => (
-                              <tr key={idx} className={item.status === 'SUCCESS' ? 'bg-emerald-50/20 dark:bg-emerald-950/10' : 'bg-red-50/20 dark:bg-red-950/10'}>
-                                <td className="py-2 px-3 font-semibold text-zinc-800 dark:text-zinc-100">{item.item_name}</td>
-                                <td className="py-2 px-3 text-zinc-500 dark:text-zinc-400">{item.old_price ? `Rp ${Number(item.old_price).toLocaleString('id-ID')}` : '-'}</td>
-                                <td className="py-2 px-3 font-medium text-zinc-800 dark:text-zinc-200">{item.requested_price ? `Rp ${Number(item.requested_price).toLocaleString('id-ID')}` : '-'}</td>
-                                <td className="py-2 px-3 font-medium text-emerald-700 dark:text-emerald-400">{item.verified_price ? `Rp ${Number(item.verified_price).toLocaleString('id-ID')}` : '-'}</td>
-                                <td className="py-2 px-3">
-                                  <span className={`inline-flex px-2 py-0.5 font-bold rounded-md text-[11px] ${
-                                    item.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
-                                  }`}>
-                                    {item.status === 'SUCCESS' ? 'SUKSES' : 'GAGAL'}
-                                  </span>
-                                </td>
-                                <td className="py-2 px-3 text-[11px] text-zinc-500">
-                                  {item.error_message ? (
-                                    <span className="text-red-700 font-medium">{item.error_message}</span>
-                                  ) : (
-                                    <span className="text-emerald-700 font-medium">Berhasil diupdate</span>
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
+                            {job.result_metadata.items_breakdown.map((item, idx) => {
+                              const isSuccess = item.status === 'SUCCESS';
+                              const isPromo = item.status === 'SKIPPED_ACTIVE_PROMO' || (item.error_message && (item.error_message.includes('promo') || item.error_message.includes('promotion') || item.error_message.includes('ItemPromoAttributeLimit')));
+                              return (
+                                <tr key={idx} className={
+                                  isSuccess 
+                                    ? 'bg-emerald-50/20 dark:bg-emerald-950/10' 
+                                    : isPromo 
+                                      ? 'bg-amber-50/30 dark:bg-amber-950/15'
+                                      : 'bg-red-50/20 dark:bg-red-950/10'
+                                }>
+                                  <td className="py-2 px-3 font-semibold text-zinc-800 dark:text-zinc-100">{item.item_name}</td>
+                                  <td className="py-2 px-3 text-zinc-500 dark:text-zinc-400">{item.old_price ? `Rp ${Number(item.old_price).toLocaleString('id-ID')}` : '-'}</td>
+                                  <td className="py-2 px-3 font-medium text-zinc-800 dark:text-zinc-200">{item.requested_price ? `Rp ${Number(item.requested_price).toLocaleString('id-ID')}` : '-'}</td>
+                                  <td className="py-2 px-3 font-medium text-emerald-700 dark:text-emerald-400">{item.verified_price ? `Rp ${Number(item.verified_price).toLocaleString('id-ID')}` : '-'}</td>
+                                  <td className="py-2 px-3">
+                                    <span className={`inline-flex px-2 py-0.5 font-bold rounded-md text-[11px] ${
+                                      isSuccess 
+                                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' 
+                                        : isPromo 
+                                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                                          : 'bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300'
+                                    }`}>
+                                      {isSuccess ? 'SUKSES' : isPromo ? 'PROMO AKTIF' : 'GAGAL'}
+                                    </span>
+                                  </td>
+                                  <td className="py-2 px-3 text-[11px]">
+                                    {item.error_message ? (
+                                      <span className={isPromo ? 'text-amber-700 dark:text-amber-400 font-medium' : 'text-red-700 dark:text-red-400 font-medium'}>
+                                        {formatUserFriendlyError(item.error_message, job.platform)}
+                                      </span>
+                                    ) : (
+                                      <span className="text-emerald-700 font-medium">Berhasil diupdate</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
