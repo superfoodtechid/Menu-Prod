@@ -438,8 +438,16 @@ def sync_sheets(db: Session = Depends(get_db)):
             continue
         
         m_name_raw = row.get("Merchant Name")
-        merchant_name = str(m_name_raw).strip() if pd.notna(m_name_raw) and str(m_name_raw).strip() not in ("-", "", "nan", "None") else str(row.get("Nama Outlet", "")).strip()
-        if not merchant_name or merchant_name.lower() in ("-", "", "nan", "none"):
+        n_out_candidate = row.get("Nama Outlet")
+        n_resto_candidate = row.get("Nama Resto Final")
+        merchant_name = None
+        for candidate in (m_name_raw, n_out_candidate, n_resto_candidate):
+            if pd.notna(candidate):
+                normalized = str(candidate).strip()
+                if normalized not in ("-", "", "nan", "None"):
+                    merchant_name = normalized
+                    break
+        if not merchant_name:
             continue
 
         owner_raw = row.get("Owner")
