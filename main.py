@@ -503,14 +503,64 @@ def sync_sheets(db: Session = Depends(get_db)):
                 outlets_by_store_id[store_id] = db_outlet
             updated_outlets += 1
 
+    # Clean up legacy ghost outlets that have no store_id or empty store_id
+    ghost_outlets = db.query(Outlet).filter(
+        (Outlet.store_id.is_(None)) | (Outlet.store_id == "")
+    ).all()
+    cleaned_ghost_count = 0
+    for g in ghost_outlets:
+        has_jobs = db.query(Job).filter(Job.outlet_id == g.id).first() is not None
+        has_audits = db.query(AuditTrail).filter(AuditTrail.outlet_id == g.id).first() is not None
+        if not has_jobs and not has_audits:
+            db.delete(g)
+        else:
+            g.is_active = False
+        cleaned_ghost_count += 1
+
     db.commit()
-    logger.info(f"📊 Sync Sheet Complete. Added Accounts: {added_accounts}, Added Outlets: {added_outlets}, Updated Outlets: {updated_outlets}")
+    logger.info(f"📊 Sync Sheet Complete. Added Accounts: {added_accounts}, Added Outlets: {added_outlets}, Updated Outlets: {updated_outlets}, Cleaned Ghost Outlets: {cleaned_ghost_count}")
     return {
         "status": "success",
         "added_accounts": added_accounts,
         "added_outlets": added_outlets,
-        "updated_outlets": updated_outlets
+        "updated_outlets": updated_outlets,
+        "cleaned_ghost_count": cleaned_ghost_count
     }
+
+
+@app.post("/api/maintenance/cleanup-ghost-outlets")
+def cleanup_ghost_outlets(db: Session = Depends(get_db)):
+    """
+    Membersihkan outlet residu tanpa Store ID dari database.
+    Outlet yang tidak memiliki riwayat job/audit akan dihapus, sedangkan yang memiliki riwayat dinonaktifkan (is_active=False).
+    """
+    ghost_outlets = db.query(Outlet).filter(
+        (Outlet.store_id.is_(None)) | (Outlet.store_id == "")
+    ).all()
+
+    deleted_ids = []
+    deactivated_ids = []
+    for g in ghost_outlets:
+        gid = str(g.id)
+        has_jobs = db.query(Job).filter(Job.outlet_id == g.id).first() is not None
+        has_audits = db.query(AuditTrail).filter(AuditTrail.outlet_id == g.id).first() is not None
+        if not has_jobs and not has_audits:
+            db.delete(g)
+            deleted_ids.append(gid)
+        else:
+            g.is_active = False
+            deactivated_ids.append(gid)
+
+    db.commit()
+    logger.info(f"🧹 Cleanup ghost outlets: {len(deleted_ids)} deleted, {len(deactivated_ids)} deactivated")
+    return {
+        "status": "success",
+        "deleted_count": len(deleted_ids),
+        "deactivated_count": len(deactivated_ids),
+        "deleted_ids": deleted_ids,
+        "deactivated_ids": deactivated_ids
+    }
+
 
 
 # ─── ACCOUNTS ENDPOINTS ───────────────────────────────────────────────────────
@@ -618,6 +668,7 @@ def list_outlets(
         description="Filter platform berulang, contoh: ?platform=grab&platform=gofood",
     ),
     refresh: bool = Query(default=False, description="Paksa sync ulang dari Google Sheets"),
+    include_inactive: bool = Query(default=False, description="Sertakan outlet tidak aktif"),
     db: Session = Depends(get_db),
 ):
     if refresh:
@@ -625,9 +676,18 @@ def list_outlets(
 
     platforms = normalize_platform_filters(platform)
     query = db.query(Outlet).options(joinedload(Outlet.account))
+
+    if not include_inactive:
+        query = query.filter(
+            Outlet.is_active == True,
+            Outlet.store_id.isnot(None),
+            Outlet.store_id != ""
+        )
+
     if platforms:
         query = query.join(Outlet.account).filter(Account.platform.in_(platforms))
     return query.all()
+
 
 
 # ─── BACKGROUND JOBS WORKER ───────────────────────────────────────────────────
