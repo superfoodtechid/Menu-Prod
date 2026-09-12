@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Base Image: Python 3.11 Debian Bookworm (ARM64 compatible)
 FROM python:3.11-bookworm
 
