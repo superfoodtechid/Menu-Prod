@@ -1,5 +1,5 @@
 # Stage 1: Build static assets using Node 20
-FROM node:20-alpine AS builder
+FROM docker.io/library/node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Production static web server using Nginx
-FROM nginx:alpine
+FROM docker.io/library/nginx:alpine
 
 # Copy Nginx server configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf

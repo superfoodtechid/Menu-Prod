@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Base Image: Python 3.11 Debian Bookworm (ARM64 compatible)
-FROM python:3.11-bookworm
+FROM docker.io/library/python:3.11-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

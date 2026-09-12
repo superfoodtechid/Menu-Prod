@@ -17,8 +17,25 @@ web/node_modules
 web/dist
 node_modules/
 
-# Local databases & persistent data (mounted via volume)
+# Local databases & persistent runtime data (mounted via volume)
 data/
+**/data/
+**/data/**
+**/chrome_profile*/**
+**/chrome-profile*/**
+**/browser_data/**
+**/browser-data/**
+**/portal_f_user_test/**
+**/logs/**
+**/screenshots/**
+**/downloads/**
+**/laporan*/**
+**/reports/**
+**/exports/**
+**/outlets/**
+src/shopee-omzet-automation/data/**
+shopee/data/**
+Gofood/data/**
 *.sqlite*
 *.db
 
