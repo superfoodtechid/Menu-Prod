@@ -6,6 +6,8 @@ services:
     container_name: foodmaster-backend
     restart: unless-stopped
     init: true
+    shm_size: '2gb'
+    userns_mode: keep-id
     ports:
       - "8000:8000"
       - "18800:8000"
