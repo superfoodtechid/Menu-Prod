@@ -45,6 +45,13 @@ OTP_WAIT_TIMEOUT    = 900  # 15 menit
 
 def _init_push_driver(username: str, headless: bool = True) -> webdriver.Chrome:
     """Inisialisasi Chrome dengan profil terisolasi untuk username tertentu."""
+    # Ensure HOME and cache directories point to a writable path in rootless container
+    current_home = os.environ.get("HOME", "")
+    if not current_home or current_home == "/app" or not os.access(current_home, os.W_OK):
+        os.environ["HOME"] = "/tmp"
+    os.environ.setdefault("SE_CACHE_PATH", "/tmp/.cache/selenium")
+    os.environ.setdefault("WDM_DIR", "/tmp/.wdm")
+
     options = Options()
     options.add_argument("--log-level=3")
     options.add_argument("--disable-blink-features=AutomationControlled")
