@@ -1504,6 +1504,14 @@ def resolve_shopee_headless(headless_override: bool = None) -> bool:
 
 def _init_driver(headless: bool = True):
     headless = resolve_shopee_headless(headless)
+
+    # Ensure HOME and cache directories point to a writable path in rootless container
+    current_home = os.environ.get("HOME", "")
+    if not current_home or current_home == "/app" or not os.access(current_home, os.W_OK):
+        os.environ["HOME"] = "/tmp"
+    os.environ.setdefault("SE_CACHE_PATH", "/tmp/.cache/selenium")
+    os.environ.setdefault("WDM_DIR", "/tmp/.wdm")
+
     options = Options()
     options.add_argument("--log-level=3")
     options.add_argument("--disable-blink-features=AutomationControlled")

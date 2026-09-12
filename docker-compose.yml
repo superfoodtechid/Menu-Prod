@@ -8,6 +8,10 @@ services:
     init: true
     shm_size: '2gb'
     userns_mode: keep-id
+    environment:
+      - HOME=/tmp
+      - SE_CACHE_PATH=/tmp/.cache/selenium
+      - WDM_DIR=/tmp/.wdm
     ports:
       - "8000:8000"
       - "18800:8000"

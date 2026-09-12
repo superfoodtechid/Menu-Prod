@@ -6,6 +6,9 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    HOME=/tmp \
+    SE_CACHE_PATH=/tmp/.cache/selenium \
+    WDM_DIR=/tmp/.wdm \
     PATH="/app/.venv/bin:/usr/local/bin:$PATH"
 
 # Install System Dependencies: Chromium & Chromedriver
