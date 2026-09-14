@@ -54,7 +54,7 @@ const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
   const availableTimeStr = formatAvailableTime(item.pushed_24h_available_at, item.pushed_24h_remaining_hours);
   const isLocked = item.is_price_locked || item.is_pushed_24h;
   const lockTitle = item.is_pushed_24h
-    ? (availableTimeStr ? `Item dapat diedit pada ${availableTimeStr}` : (item.pushed_24h_reason || "Item dapat diedit setelah 24 jam"))
+    ? (availableTimeStr ? `Item dapat diedit besok pada ${availableTimeStr}` : (item.pushed_24h_reason || "Item dapat diedit setelah 24 jam"))
     : item.is_flash_sale
     ? "Harga dikunci karena menu sedang dalam Flash Sale aktif"
     : item.is_price_locked
@@ -132,11 +132,11 @@ const ShopeeMenuRowItem = React.memo(function ShopeeMenuRowItem({
       <td className="p-3.5 text-center align-middle">
         {item.is_pushed_24h ? (
           <span
-            title={availableTimeStr ? `Item dapat diedit pada ${availableTimeStr}` : (item.pushed_24h_reason || "Item dapat diedit setelah 24 jam")}
+            title={availableTimeStr ? `Item dapat diedit besok pada ${availableTimeStr}` : (item.pushed_24h_reason || "Item dapat diedit setelah 24 jam")}
             className="px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 text-[11px] font-semibold border border-amber-300 dark:border-amber-800 inline-flex items-center gap-1 shadow-xs whitespace-nowrap"
           >
             <span>🔒</span>
-            <span>{availableTimeStr ? `Item dapat diedit pada ${availableTimeStr}` : "Dapat diedit dalam 24 jam"}</span>
+            <span>{availableTimeStr ? `Item dapat diedit besok pada ${availableTimeStr}` : "Dapat diedit dalam 24 jam"}</span>
           </span>
         ) : item.is_flash_sale ? (
           <span title="Harga menu dikunci karena sedang dalam promo Flash Sale aktif" className="px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 text-[11px] font-semibold border border-rose-300 dark:border-rose-800 inline-block">
