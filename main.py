@@ -332,14 +332,20 @@ def sync_sheets(db: Session = Depends(get_db)):
     # Filter Live and Pending status merchants
     df_live = df[df["Status"].astype(str).str.lower().str.contains("live|pending", na=False)]
 
+    synced_outlet_ids = set()
+
     # Pre-fetch all accounts and outlets to prevent N+1 queries in the loop
     all_accounts = db.query(Account).all()
     accounts_by_key = {(a.username, a.platform): a for a in all_accounts}
 
     all_outlets = db.query(Outlet).all()
     outlets_by_store_id = {o.store_id: o for o in all_outlets if o.store_id}
+    outlets_by_account_cabang = {
+        (o.account_id, str(o.cabang).strip().lower()): o for o in all_outlets if o.cabang
+    }
     outlets_by_fallback = {
-        (o.account_id, o.merchant_name, o.nama_outlet, o.cabang): o for o in all_outlets if not o.store_id
+        (o.account_id, str(o.merchant_name).strip().lower(), str(o.nama_outlet).strip().lower(), str(o.cabang).strip().lower()): o
+        for o in all_outlets
     }
 
     for _, row in df_live.iterrows():
@@ -461,11 +467,20 @@ def sync_sheets(db: Session = Depends(get_db)):
 
         # 3. Upsert Outlet
         db_outlet = None
+        cabang_norm = str(cabang).strip().lower() if cabang else ""
+
         if store_id:
             db_outlet = outlets_by_store_id.get(store_id)
-        else:
-            # Fallback query only if store_id was not provided
-            db_outlet = outlets_by_fallback.get((db_account.id, merchant_name, nama_outlet, cabang))
+
+        # Fallback 1: If store_id changed/edited in Google Sheet, match by (account_id, cabang)
+        if not db_outlet and cabang_norm:
+            db_outlet = outlets_by_account_cabang.get((db_account.id, cabang_norm))
+
+        # Fallback 2: Match by (account_id, merchant_name, nama_outlet, cabang)
+        if not db_outlet:
+            m_norm = str(merchant_name).strip().lower() if merchant_name else ""
+            n_norm = str(nama_outlet).strip().lower() if nama_outlet else ""
+            db_outlet = outlets_by_fallback.get((db_account.id, m_norm, n_norm, cabang_norm))
 
         if not db_outlet:
             db_outlet = Outlet(
@@ -481,12 +496,14 @@ def sync_sheets(db: Session = Depends(get_db)):
             )
             db.add(db_outlet)
             db.flush()
-            if store_id:
-                outlets_by_store_id[store_id] = db_outlet
-            else:
-                outlets_by_fallback[(db_account.id, merchant_name, nama_outlet, cabang)] = db_outlet
             added_outlets += 1
         else:
+            old_store_id = db_outlet.store_id
+            if old_store_id and store_id and old_store_id != store_id:
+                logger.info(f"🔄 [SYNC] Store ID updated for {db_outlet.merchant_name} - {db_outlet.cabang}: {old_store_id} -> {store_id}")
+                if old_store_id in outlets_by_store_id:
+                    del outlets_by_store_id[old_store_id]
+
             db_outlet.account_id = db_account.id
             db_outlet.store_id = store_id
             db_outlet.owner = owner
@@ -499,17 +516,38 @@ def sync_sheets(db: Session = Depends(get_db)):
             db_outlet.brand = brand
             db_outlet.is_active = True
             db.flush()
-            if store_id and store_id not in outlets_by_store_id:
-                outlets_by_store_id[store_id] = db_outlet
             updated_outlets += 1
 
+        if store_id:
+            outlets_by_store_id[store_id] = db_outlet
+        if cabang_norm:
+            outlets_by_account_cabang[(db_account.id, cabang_norm)] = db_outlet
+        synced_outlet_ids.add(db_outlet.id)
+
+    # Clean up obsolete ghost outlets that are no longer in Google Sheets
+    pruned_outlets = 0
+    for o in all_outlets:
+        if o.id not in synced_outlet_ids:
+            logger.info(f"🗑️ [SYNC] Pruning obsolete outlet no longer in Google Sheets: {o.merchant_name} - {o.cabang} ({o.store_id})")
+            cabang_key = (o.account_id, str(o.cabang).strip().lower()) if o.cabang else None
+            replacement = outlets_by_account_cabang.get(cabang_key) if cabang_key else None
+            if replacement and replacement.id != o.id:
+                db.query(Job).filter(Job.outlet_id == o.id).update({"outlet_id": replacement.id})
+                db.query(AuditTrail).filter(AuditTrail.outlet_id == o.id).update({"outlet_id": replacement.id})
+            else:
+                db.query(Job).filter(Job.outlet_id == o.id).delete()
+                db.query(AuditTrail).filter(AuditTrail.outlet_id == o.id).delete()
+            db.delete(o)
+            pruned_outlets += 1
+
     db.commit()
-    logger.info(f"📊 Sync Sheet Complete. Added Accounts: {added_accounts}, Added Outlets: {added_outlets}, Updated Outlets: {updated_outlets}")
+    logger.info(f"📊 Sync Sheet Complete. Added Accounts: {added_accounts}, Added Outlets: {added_outlets}, Updated Outlets: {updated_outlets}, Pruned Outlets: {pruned_outlets}")
     return {
         "status": "success",
         "added_accounts": added_accounts,
         "added_outlets": added_outlets,
-        "updated_outlets": updated_outlets
+        "updated_outlets": updated_outlets,
+        "pruned_outlets": pruned_outlets
     }
 
 
@@ -624,10 +662,22 @@ def list_outlets(
         check_and_auto_sync_sheets(db, force=True)
 
     platforms = normalize_platform_filters(platform)
-    query = db.query(Outlet).options(joinedload(Outlet.account))
+    query = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.is_active == True)
     if platforms:
         query = query.join(Outlet.account).filter(Account.platform.in_(platforms))
     return query.all()
+
+
+@app.delete("/api/outlets/{outlet_id}", status_code=status.HTTP_200_OK)
+def delete_outlet_endpoint(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
+    outlet = db.query(Outlet).filter(Outlet.id == outlet_id).first()
+    if not outlet:
+        raise HTTPException(status_code=404, detail="Outlet tidak ditemukan")
+    db.query(Job).filter(Job.outlet_id == outlet.id).delete()
+    db.query(AuditTrail).filter(AuditTrail.outlet_id == outlet.id).delete()
+    db.delete(outlet)
+    db.commit()
+    return {"status": "SUCCESS", "message": f"Outlet {outlet.merchant_name} ({outlet.store_id}) berhasil dihapus."}
 
 
 # ─── BACKGROUND JOBS WORKER ───────────────────────────────────────────────────
