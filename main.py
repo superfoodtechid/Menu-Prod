@@ -4801,22 +4801,32 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
             Job.platform == "shopee"
         ).all()
         for j in running_jobs:
+            matched = False
             if j.outlet and j.outlet.account and (j.outlet.account.username or "").strip().lower() == username.lower():
-                j.status = "FAILED"
+                matched = True
+            elif username.lower() in str(j.input_payload or "").lower():
+                matched = True
+            if matched:
+                from menu_core.job_control import cancel_job
+                cancel_job(j.id)
+                j.status = "CANCELLED"
                 j.error_message = "user membatalkan otp"
-                j.current_step = "Gagal: user membatalkan otp"
+                j.current_step = "Dibatalkan oleh pengguna"
                 j.completed_at = datetime.utcnow()
                 logger.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id}")
-            elif username.lower() in str(j.input_payload or "").lower():
-                j.status = "FAILED"
-                j.error_message = "user membatalkan otp"
-                j.current_step = "Gagal: user membatalkan otp"
-                j.completed_at = datetime.utcnow()
-                logger.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id} (via payload match)")
         db.commit()
         db.close()
     except Exception as dbe:
         logger.error(f"Error updating DB for cancelled OTP: {dbe}")
+
+    try:
+        automation_core = BASE_DIR / "src" / "shopee-omzet-automation"
+        if str(automation_core) not in sys.path:
+            sys.path.insert(0, str(automation_core))
+        from core.browser import kill_all_active_drivers
+        kill_all_active_drivers()
+    except Exception as ke:
+        logger.warning(f"Could not kill active Shopee drivers: {ke}")
 
     return {"status": "SUCCESS", "message": f"OTP request cancelled for {username}"}
 
