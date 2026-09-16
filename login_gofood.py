@@ -55,6 +55,11 @@ def safe_goto_with_retry(
         except Exception as e:
             last_err = e
             print(f"   ⚠️ [Timeout/Error] Navigasi ke {url} gagal pada percobaan {attempt}/{max_attempts}: {e}")
+            try:
+                if page.is_closed():
+                    raise e
+            except Exception:
+                raise e
             if attempt < max_attempts:
                 print(f"   🔄 [Reload Mekanisme 2x] Melakukan reload / re-try navigasi ke {url} (Coba {attempt}/{max_attempts - 1})...")
                 time.sleep(2.0)
@@ -243,7 +248,8 @@ def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_de
     while time.time() < batas_waktu:
         if is_cancelled_func and is_cancelled_func():
             print("   🛑 Polling OTP dibatalkan oleh pengguna.")
-            return None
+            from menu_core.job_control import JobCancelledException
+            raise JobCancelledException("Polling OTP dibatalkan oleh pengguna.")
         attempt_count += 1
         sisa = max(0, int(batas_waktu - time.time()))
         try:
@@ -259,7 +265,13 @@ def tunggu_otp_terbaru(url_dasar, action="getOtp", label_email=None, interval_de
                 print(f"   ⏳ [Polling #{attempt_count}] Email OTP belum masuk ke Gmail (sisa waktu: {sisa}s)...")
         except Exception as e:
             print(f"   ⚠️ [Polling #{attempt_count}] Error cek endpoint: {e}")
-        time.sleep(interval_detik)
+
+        for _ in range(max(1, int(interval_detik * 2))):
+            if is_cancelled_func and is_cancelled_func():
+                print("   🛑 Polling OTP dibatalkan oleh pengguna.")
+                from menu_core.job_control import JobCancelledException
+                raise JobCancelledException("Polling OTP dibatalkan oleh pengguna.")
+            time.sleep(0.5)
 
     return None
 
@@ -439,7 +451,9 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
         return None
 
     result = None
-
+    p = None
+    browser = None
+    context = None
     chrome_process = None
     chrome_log = None
     try:
@@ -477,6 +491,24 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
             viewport={'width': 1366, 'height': 768},
             proxy=proxy_config
         )
+
+        def _cancel_kill():
+            try:
+                if context: context.close()
+            except Exception:
+                pass
+            try:
+                if browser: browser.close()
+            except Exception:
+                pass
+            try:
+                if p: p.stop()
+            except Exception:
+                pass
+
+        if job_id:
+            from menu_core.job_control import register_job_canceller
+            register_job_canceller(job_id, _cancel_kill)
 
         # Block images, fonts, media, and 3rd party tracking analytics to speed up loading on high-CPU servers
         def _route_filter(route):
@@ -621,15 +653,21 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
             emails_to_try = []
 
         for email_idx, current_email in enumerate(emails_to_try):
+            if _is_cancelled():
+                print(f"🛑 [GoFood] Job {job_id} dibatalkan oleh pengguna. Menghentikan antrian email.")
+                raise JobCancelledException(f"Job {job_id} dibatalkan oleh pengguna.")
             if access_token:
                 break
-                
+
             max_login_attempts = 2
             attempts_made = 0
             email_input_selector = 'input[type="email"]:visible, input[name*="email" i]:visible, input[placeholder*="email" i]:visible, input[data-testid*="email" i]:visible, input[type="text"]:not([placeholder*="●"]):not([placeholder*="otp" i]):visible'
             otp_input_selector = 'input[autocomplete="one-time-code"], input[placeholder*="●" i], input[placeholder*="otp" i], input[aria-label*="digit" i], input[aria-label*="otp" i], div[class*="otp" i] input:not([type="checkbox"]):not([type="radio"]), input[name*="otp" i]:not([type="checkbox"]):not([type="radio"]), input[maxlength="1"]:not([type="checkbox"]):not([type="radio"])'
-            
+
             while attempts_made < max_login_attempts:
+                if _is_cancelled():
+                    print(f"🛑 [GoFood] Job {job_id} dibatalkan oleh pengguna. Menghentikan percobaan login.")
+                    raise JobCancelledException(f"Job {job_id} dibatalkan oleh pengguna.")
                 attempt = attempts_made
                 attempts_made += 1
 
@@ -832,25 +870,38 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                                     else:
                                         print("   ⚠️ Gagal mendapatkan OTP dalam batas waktu (atau format tidak valid).")
                                         otp_failed_timeout = True
+                                except JobCancelledException:
+                                    raise
                                 except Exception as e:
                                     print(f"   ⚠️ Gagal melakukan automasi OTP: {e}.")
                                     otp_failed_timeout = True
                         else:
                             print("   👉 Silakan isi kode OTP secara MANUAL di browser.")
+                    except JobCancelledException:
+                        raise
                     except Exception as e:
                         print(f"   ⚠️ Gagal ketik email: {e}")
+
+                if _is_cancelled():
+                    print(f"🛑 [GoFood] Job {job_id} dibatalkan oleh pengguna.")
+                    raise JobCancelledException(f"Job {job_id} dibatalkan oleh pengguna.")
 
                 if is_banned:
                     continue
 
                 if otp_failed_timeout:
+                    if _is_cancelled():
+                        raise JobCancelledException(f"Job {job_id} dibatalkan oleh pengguna.")
                     if attempt < max_login_attempts - 1:
                         print("   ⚠️ Menutup halaman dan menunggu 15 detik sebelum mengulang login (attempt ke-2)...")
                         try:
                             page.close()
                         except Exception:
                             pass
-                        time.sleep(15)
+                        for _ in range(15):
+                            if _is_cancelled():
+                                raise JobCancelledException(f"Job {job_id} dibatalkan oleh pengguna.")
+                            time.sleep(1)
                         continue
                     else:
                         print(f"   ⚠️ Melewati batas percobaan login untuk {current_email}. Rotasi ke email berikutnya/gagal.")
@@ -865,6 +916,8 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                 start_time = time.time()
                 try:
                     while True:
+                        if _is_cancelled():
+                            raise JobCancelledException(f"Job {job_id} dibatalkan oleh pengguna saat menunggu token.")
                         if page.is_closed():
                             print("⚠️ Browser ditutup sebelum login selesai.")
                             break
@@ -1434,15 +1487,34 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
         else:
             print(f"❌ Gagal mendapatkan token untuk {label}.")
 
-        try:
-            browser.close()
-        except Exception:
-            pass
-        try:
-            p.stop()
-        except Exception:
-            pass
+    except JobCancelledException as jce:
+        print(f"🛑 [GoFood] {jce}")
+        return None
+    except Exception as e:
+        print(f"❌ Terjadi kesalahan pada login_outlet: {e}")
+        return None
     finally:
+        if job_id:
+            try:
+                from menu_core.job_control import unregister_job_canceller
+                unregister_job_canceller(job_id)
+            except Exception:
+                pass
+        try:
+            if context:
+                context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if p:
+                p.stop()
+        except Exception:
+            pass
         if chrome_process:
             from src.core.browser_factory import kill_process_tree
             kill_process_tree(chrome_process)

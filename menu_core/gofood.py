@@ -156,7 +156,13 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                         err[0] = e
                 t = threading.Thread(target=_worker)
                 t.start()
-                t.join()
+                while t.is_alive():
+                    t.join(timeout=0.5)
+                    if _is_cancelled():
+                        print(f"🛑 [GoFood] Job {job_id} terdeteksi batal saat worker thread berjalan.")
+                        break
+                if _is_cancelled():
+                    return None
                 if err[0]:
                     raise err[0]
                 return res[0]
@@ -176,17 +182,23 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                     login_result = _run_login_outlet_in_clean_thread(store_metadata)
                 else:
                     login_result = login_outlet(store_metadata)
-                    
+
+                if _is_cancelled():
+                    return False, "Dibatalkan oleh pengguna"
+
                 if login_result and login_result.get('captured_menu'):
                     break
-                    
+
                 if _is_cancelled():
                     return False, "Dibatalkan oleh pengguna"
 
                 if extract_attempt < max_extract_attempts:
                     print(f"[🔄 RETRY {extract_attempt}/{max_extract_attempts}] Penarikan menu GoFood belum berhasil, mengulang proses login browser dalam 3 detik...")
                     import time
-                    time.sleep(3)
+                    for _ in range(6):
+                        if _is_cancelled():
+                            return False, "Dibatalkan oleh pengguna"
+                        time.sleep(0.5)
 
             if not login_result or not login_result.get('access_token'):
                 print(f"[!] Login atau penarikan menu dibatalkan/gagal setelah {max_extract_attempts} percobaan.")

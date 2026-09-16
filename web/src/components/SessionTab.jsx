@@ -368,7 +368,20 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
                     {s.store_id || "-"}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-300">
-                    <div>{s.phone || "-"}</div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span>{s.phone || s.username || "-"}</span>
+                      {!s.has_password && (
+                        <span 
+                          title="Outlet ini tidak memiliki password di Google Sheet. Login dilakukan langsung dengan OTP."
+                          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-sans font-semibold bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800"
+                        >
+                          ⚠️ Tanpa Password
+                        </span>
+                      )}
+                    </div>
+                    {s.username && s.phone && s.username !== s.phone && (
+                      <div className="text-[10px] text-zinc-400 dark:text-zinc-500 font-sans">User: {s.username}</div>
+                    )}
                     {s.session_file && <div className="mt-0.5 text-zinc-400 dark:text-zinc-500 break-all max-w-xs font-sans text-[11px]">{s.session_file}</div>}
                   </td>
                   <td className="px-4 py-3">
@@ -414,6 +427,18 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
                 Akun: <span className="font-mono">{assignTarget.phone || assignTarget.store_id}</span>
               </p>
             </div>
+
+            {!assignTarget.has_password && (
+              <div className="rounded-xl bg-amber-50 dark:bg-amber-950/40 p-3 border border-amber-200 dark:border-amber-800/60 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2">
+                <span className="text-sm">⚠️</span>
+                <div>
+                  <strong>Peringatan Akun Tanpa Password:</strong>
+                  <p className="mt-0.5 leading-relaxed">
+                    Outlet ini tidak memiliki password pada Google Sheet. Sistem akan mencoba masuk langsung via nomor HP dan meminta kode OTP.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {!assignStatus && (
               <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800 p-4 border border-zinc-200/80 dark:border-zinc-700 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">

@@ -1560,6 +1560,12 @@ export default function ShopeeEditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                   <span>Branch ini belum memiliki sesi aktif Shopee Food. Harap hubungkan sesi di tab <strong>Kelola Sesi</strong> terlebih dahulu agar dapat menggunakan fitur edit harga dan penarikan live.</span>
                 </div>
               )}
+              {(!selectedBrandObj.account?.password || selectedBrandObj.account?.password === "-") && (
+                <div className="mb-3 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs flex items-center gap-2 font-medium">
+                  <span className="text-base">⚠️</span>
+                  <span><strong>Perhatian:</strong> Akun portal outlet ini tidak memiliki password di Google Sheet (Kolom S kosong). Login / otentikasi Shopee akan dilakukan langsung menggunakan Nomor HP (OTP).</span>
+                </div>
+              )}
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div className="space-y-1.5 min-w-0 flex-1">
                   <div className="flex items-center gap-2">

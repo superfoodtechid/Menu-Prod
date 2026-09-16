@@ -364,26 +364,47 @@ def sync_sheets(db: Session = Depends(get_db)):
         password = None
 
         if platform == "shopee":
+            # Sheet columns:
+            # Kolom Q: Nama Pengguna (Username portal)
+            # Kolom R: Nomor HP (Nomor HP Owner)
+            # Kolom S: Kata Sandi (Password portal)
+            # Kolom AA: Nama Pengguna.1 (Staff 'allvbadmin' - JANGAN DIGUNAKAN)
+            # Kolom AB: Nomor HP.1 (Staff phone - JANGAN DIGUNAKAN)
             user_col_q = "Nama Pengguna"
-            user_col_z = "Nama Pengguna.1"
+            phone_col_r = "Nomor HP"
             pwd_col_s = "Kata Sandi"
-            pwd_col_ab = "Kata Sandi.1"
 
-            user_q_val = row.get(user_col_q)
-            if pd.notna(user_q_val) and str(user_q_val).strip() not in ("-", "", "nan", "None"):
-                username = str(user_q_val).strip()
-                pwd_s_val = row.get(pwd_col_s)
-                if pd.notna(pwd_s_val) and str(pwd_s_val).strip() not in ("-", "", "nan", "None"):
-                    password = str(pwd_s_val).strip()
-                else:
-                    password = "" # No password used, login directly via OTP
+            user_q_val = str(row.get(user_col_q) or "").strip()
+            if user_q_val in ("-", "", "nan", "None"):
+                user_q_val = ""
+
+            phone_r_val = str(row.get(phone_col_r) or "").strip()
+            if phone_r_val in ("-", "", "nan", "None"):
+                phone_r_val = ""
+            if "." in phone_r_val:
+                phone_r_val = phone_r_val.split(".")[0]
+
+            pwd_s_val = str(row.get(pwd_col_s) or "").strip()
+            if pwd_s_val in ("-", "", "nan", "None"):
+                pwd_s_val = ""
+
+            # Aturan:
+            # 1. Jika Kolom Q ada dan Kolom S ada -> gunakan Kolom Q dan Kolom S
+            # 2. Jika Kolom Q ada dan Kolom S TIDAK ADA -> gunakan Kolom R (Nomor HP) sebagai username login OTP (password kosong)
+            # 3. Jika Kolom Q tidak ada tapi Kolom R ada -> gunakan Kolom R
+            # 4. Jika keduanya tidak ada -> fallback ke user_q_val jika ada
+            if user_q_val and pwd_s_val:
+                username = user_q_val
+                password = pwd_s_val
+            elif user_q_val and not pwd_s_val:
+                username = phone_r_val if phone_r_val else user_q_val
+                password = ""
+            elif phone_r_val:
+                username = phone_r_val
+                password = pwd_s_val
             else:
-                user_z_val = row.get(user_col_z)
-                if pd.notna(user_z_val) and str(user_z_val).strip() not in ("-", "", "nan", "None"):
-                    username = str(user_z_val).strip()
-                else:
-                    username = None
-                    password = ""
+                username = user_q_val or None
+                password = pwd_s_val
         elif platform == "grab":
             user_col_sf = "Nama Pengguna.1"
             user_col_mt = "Nama Pengguna"
@@ -4269,8 +4290,11 @@ def get_cached_phone_map(cache_path: Path) -> dict:
             
         import pandas as pd
         df = pd.read_csv(cache_path)
-        phone_cols = [col for col in df.columns if 'nomor hp' in str(col).lower()]
-        col_phone = phone_cols[1] if len(phone_cols) > 1 else (phone_cols[0] if phone_cols else None)
+        # Prioritize exact 'Nomor HP' (Kolom R - Owner) over 'Nomor HP.1' (Kolom AB - Staff)
+        col_phone = "Nomor HP" if "Nomor HP" in df.columns else None
+        if not col_phone:
+            phone_cols = [col for col in df.columns if 'nomor hp' in str(col).lower() and not str(col).lower().endswith('.1')]
+            col_phone = phone_cols[0] if phone_cols else None
         phone_map = {}
         if col_phone:
             for _, row in df.iterrows():
@@ -4278,6 +4302,8 @@ def get_cached_phone_map(cache_path: Path) -> dict:
                 if not sid or sid == '-' or sid.lower() == 'nan':
                     sid = str(row.get('Merchant ID', '')).strip().split('.')[0]
                 p_val = str(row.get(col_phone, '')).strip()
+                if '.' in p_val:
+                    p_val = p_val.split('.')[0]
                 if sid and p_val and p_val not in ('-', 'nan', ''):
                     phone_map[sid] = p_val
                     
@@ -4311,9 +4337,11 @@ def get_sessions_status(db: Session = Depends(get_db)):
             continue
             
         phone = phone_map.get(o.store_id)
-        if not phone and o.account:
-            phone = o.account.username
-            
+        acct_user = o.account.username if o.account else ""
+        acct_pwd = (o.account.password or "").strip() if o.account else ""
+        has_password = bool(acct_pwd and acct_pwd not in ("-", "nan", "None", ""))
+        display_acc = phone or acct_user or o.store_id or "-"
+
         status_info = {
             "id": str(o.id),
             "store_id": o.store_id,
@@ -4324,7 +4352,10 @@ def get_sessions_status(db: Session = Depends(get_db)):
             "has_session": False,
             "session_file": None,
             "last_active": None,
-            "phone": phone or (o.account.username if o.account else "") or o.store_id or "-"
+            "phone": display_acc,
+            "username": acct_user,
+            "has_password": has_password,
+            "password_warning": "Outlet tidak memiliki password (login langsung via OTP)" if not has_password else None
         }
         
         # Sanitize profile name
@@ -4662,12 +4693,12 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
         raise HTTPException(status_code=404, detail="Outlet tidak ditemukan")
     if outlet.platform != "shopee":
         raise HTTPException(status_code=400, detail="Hanya outlet Shopee yang didukung")
-    if not outlet.account or not outlet.account.username or not outlet.account.password:
-        raise HTTPException(status_code=400, detail="Akun outlet tidak memiliki username/password")
+    if not outlet.account or not outlet.account.username:
+        raise HTTPException(status_code=400, detail="Akun outlet tidak memiliki username/nomor HP")
 
     job_id = str(_uuid.uuid4())
     username = outlet.account.username
-    password = outlet.account.password
+    password = outlet.account.password or ""
     merchant_name = outlet.merchant_name or outlet.nama_resto_final or outlet.nama_outlet or username
     profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
     profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
@@ -4688,9 +4719,13 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
         try:
             session_file = auto_dir / "data" / f"session_{username}.json"
             browser.set_session_file(session_file)
+            
+            # If username looks like a phone number or password is empty, pass phone to browser.get_session
+            is_phone = bool(re.match(r'^(?:\+?62|08|62)\d+$', username)) or not password
             session = browser.get_session(
-                username=username,
-                password=password,
+                username=username if not is_phone else None,
+                password=password if password else None,
+                phone=username if is_phone else None,
                 headless=True,
                 close_browser=True,
                 target_name=profile_name,
@@ -4801,22 +4836,32 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
             Job.platform == "shopee"
         ).all()
         for j in running_jobs:
+            matched = False
             if j.outlet and j.outlet.account and (j.outlet.account.username or "").strip().lower() == username.lower():
-                j.status = "FAILED"
+                matched = True
+            elif username.lower() in str(j.input_payload or "").lower():
+                matched = True
+            if matched:
+                from menu_core.job_control import cancel_job
+                cancel_job(j.id)
+                j.status = "CANCELLED"
                 j.error_message = "user membatalkan otp"
-                j.current_step = "Gagal: user membatalkan otp"
+                j.current_step = "Dibatalkan oleh pengguna"
                 j.completed_at = datetime.utcnow()
                 logger.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id}")
-            elif username.lower() in str(j.input_payload or "").lower():
-                j.status = "FAILED"
-                j.error_message = "user membatalkan otp"
-                j.current_step = "Gagal: user membatalkan otp"
-                j.completed_at = datetime.utcnow()
-                logger.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id} (via payload match)")
         db.commit()
         db.close()
     except Exception as dbe:
         logger.error(f"Error updating DB for cancelled OTP: {dbe}")
+
+    try:
+        automation_core = BASE_DIR / "src" / "shopee-omzet-automation"
+        if str(automation_core) not in sys.path:
+            sys.path.insert(0, str(automation_core))
+        from core.browser import kill_all_active_drivers
+        kill_all_active_drivers()
+    except Exception as ke:
+        logger.warning(f"Could not kill active Shopee drivers: {ke}")
 
     return {"status": "SUCCESS", "message": f"OTP request cancelled for {username}"}
 
