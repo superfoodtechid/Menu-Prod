@@ -34,9 +34,11 @@ shopee/credentials.json
 # Local Browser data, user profiles & chrome sessions (recursive)
 **/chrome_profile*
 **/chrome-profile*
+**/temp_profiles/
 **/browser_data/
 **/browser-data/
 **/portal_f_user_test/
+shopee_session_exporter/
 
 # Logs, Screenshots, and Downloads (recursive)
 **/logs/
