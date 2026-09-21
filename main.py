@@ -3,6 +3,7 @@ import json
 import sys
 import uuid
 import logging
+import shutil
 
 # Force urllib3 to use IPv4 only because IPv6 is broken/blocked on some hosts and causes connection hangs
 try:
@@ -5018,6 +5019,228 @@ def submit_shopee_otp(req: ShopeeOTPRequest):
             json.dump(request_data, f, indent=2)
             
     return {"status": "SUCCESS", "message": f"OTP {code} ({channel.upper()}) berhasil dikirim untuk user {username}."}
+
+
+# ─── SHOPEE SESSION UPLOAD ENDPOINTS ──────────────────────────────────────────
+
+class UploadShopeeSessionRequest(BaseModel):
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    store_id: Optional[str] = None
+    outlet_id: Optional[str] = None
+    merchant_name: Optional[str] = None
+    shopee_tob_token: str
+    shopee_tob_entity_id: Optional[str] = None
+    extra_cookies: Optional[dict] = None
+    profile_archive_base64: Optional[str] = None
+
+@app.post("/api/shopee/upload-session")
+def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends(get_db)):
+    """
+    Menerima sesi Shopee yang diekstrak dari login lokal / headed browser (untuk bypass CAPTCHA/WAF).
+    Menyimpan sesi ke direktori shopee dan src/shopee-omzet-automation/data di server.
+    """
+    raw_user = (req.username or req.phone or "").strip()
+    tob_token = req.shopee_tob_token.strip()
+    if not tob_token:
+        raise HTTPException(status_code=400, detail="shopee_tob_token tidak boleh kosong")
+
+    outlet = None
+    if req.outlet_id:
+        outlet = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.id == req.outlet_id.strip()).first()
+    if not outlet and req.store_id:
+        outlet = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.store_id == req.store_id.strip()).first()
+    if not outlet and raw_user:
+        outlet = db.query(Outlet).options(joinedload(Outlet.account)).join(Account).filter(Account.username == raw_user).first()
+
+    merchant_name = req.merchant_name or (outlet.merchant_name if outlet else "") or (outlet.nama_resto_final if outlet else "") or (outlet.nama_outlet if outlet else "") or raw_user or "shopee_merchant"
+    store_id = req.store_id or (outlet.store_id if outlet else "")
+    username = raw_user or (outlet.account.username if outlet and outlet.account else "") or store_id or "shopee_user"
+
+    profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
+    profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
+    if not profile_name:
+        profile_name = "shopee_merchant"
+
+    entity_id = req.shopee_tob_entity_id or store_id or ""
+
+    session_payload = {
+        "username": username,
+        "shopee_tob_token": tob_token,
+        "shopee_tob_entity_id": entity_id,
+        "saved_at": datetime.now().isoformat(),
+        "extra_cookies": req.extra_cookies or {},
+        "merchant_name": merchant_name,
+        "store_id": store_id
+    }
+    payload_json = json.dumps(session_payload, indent=2)
+
+    target_keys = set()
+    for k in [profile_name, username, store_id, raw_user]:
+        if k:
+            clean_k = re.sub(r'[^a-zA-Z0-9_]', '_', str(k)).strip('_').lower()
+            if clean_k:
+                target_keys.add(clean_k)
+            target_keys.add(str(k).strip())
+
+    saved_paths = []
+    target_dirs = [
+        BASE_DIR / "shopee" / "data",
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "data",
+    ]
+
+    for d in target_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        for k in target_keys:
+            target_file = d / f"session_{k}.json"
+            target_file.write_text(payload_json, encoding="utf-8")
+            saved_paths.append(str(target_file))
+
+    # Ekstrak chrome profile archive bila disertakan (timpa in-place profil yang sama untuk menghemat disk)
+    if req.profile_archive_base64:
+        try:
+            import base64
+            import zipfile
+            import io
+            archive_bytes = base64.b64decode(req.profile_archive_base64)
+            raw_targets = [
+                BASE_DIR / "data" / f"chrome_profile_{username}",
+                BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"chrome_profile_{username}"
+            ]
+            if profile_name != username:
+                raw_targets.extend([
+                    BASE_DIR / "data" / f"chrome_profile_{profile_name}",
+                    BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"chrome_profile_{profile_name}"
+                ])
+            if "allvbadmin" in (username, profile_name):
+                raw_targets.extend([
+                    BASE_DIR / "data" / "chrome_profile",
+                    BASE_DIR / "src" / "shopee-omzet-automation" / "data" / "chrome_profile",
+                    BASE_DIR / "shopee" / "data" / "chrome_profile"
+                ])
+
+            seen_dirs = set()
+            unique_targets = []
+            for t in raw_targets:
+                resolved_str = str(t.resolve())
+                if resolved_str not in seen_dirs:
+                    seen_dirs.add(resolved_str)
+                    unique_targets.append(t)
+
+            junk_names = [
+                "Cache", "Code Cache", "GPUCache", "DawnGraphiteCache", "DawnWebGPUCache",
+                "component_crx_cache", "WasmTtsEngine", "WidevineCdm", "blob_storage",
+                "GraphiteDawnCache"
+            ]
+
+            for p_dir in unique_targets:
+                p_dir.mkdir(parents=True, exist_ok=True)
+
+                # 1. Hapus lock files lama agar Selenium tidak error SessionNotCreatedException
+                for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK"]:
+                    for candidate_p in [p_dir / lock, p_dir / "Default" / lock]:
+                        try:
+                            if candidate_p.is_symlink() or candidate_p.exists():
+                                candidate_p.unlink()
+                        except Exception:
+                            pass
+
+                # 2. Bersihkan sisa direktori cache usang agar kapasitas server hemat
+                for jname in junk_names:
+                    for parent in [p_dir, p_dir / "Default", p_dir / f"profile_{username}", p_dir / f"profile_{profile_name}", p_dir / "shopee_profile"]:
+                        jp = parent / jname
+                        if jp.is_dir():
+                            try:
+                                shutil.rmtree(jp, ignore_errors=True)
+                            except Exception:
+                                pass
+
+                # 3. Ekstrak arsip profil menimpa berkas yang ada (in-place overwrite)
+                with zipfile.ZipFile(io.BytesIO(archive_bytes)) as z:
+                    z.extractall(p_dir)
+
+                # 4. Sinkronkan profil ke subfolder yang diharapkan browser.py
+                # Browser automation di server dapat memanggil --profile-directory=profile_{account_name} atau shopee_profile
+                default_sub = p_dir / "Default"
+                if default_sub.is_dir():
+                    alias_profiles = [
+                        p_dir / f"profile_{username}",
+                        p_dir / f"profile_{profile_name}",
+                        p_dir / "shopee_profile"
+                    ]
+                    for alias_dir in alias_profiles:
+                        if alias_dir.resolve() == default_sub.resolve():
+                            continue
+                        alias_dir.mkdir(parents=True, exist_ok=True)
+                        for item in default_sub.iterdir():
+                            dst_item = alias_dir / item.name
+                            try:
+                                if item.is_file():
+                                    shutil.copy2(item, dst_item)
+                                elif item.is_dir():
+                                    shutil.copytree(item, dst_item, dirs_exist_ok=True)
+                            except Exception:
+                                pass
+                        for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK"]:
+                            lp = alias_dir / lock
+                            if lp.is_symlink() or lp.exists():
+                                try:
+                                    lp.unlink()
+                                except Exception:
+                                    pass
+
+                logger.info(f"📦 Overwrote Chrome profile in-place at {p_dir}")
+
+        except Exception as ze:
+            logger.warning(f"⚠️ Gagal mengekstrak profil chrome dari payload: {ze}")
+
+    SESSION_METADATA_CACHE.clear()
+
+    if outlet:
+        outlet.last_sync_at = datetime.utcnow()
+        db.commit()
+
+    logger.info(f"✅ Sesi Shopee untuk '{merchant_name}' ({username}) berhasil disimpan ke {len(saved_paths)} berkas.")
+    return {
+        "status": "SUCCESS",
+        "message": f"Sesi Shopee untuk '{merchant_name}' berhasil disimpan di server.",
+        "profile_name": profile_name,
+        "username": username,
+        "store_id": store_id,
+        "saved_files_count": len(saved_paths)
+    }
+
+@app.post("/api/shopee/upload-session-file")
+async def upload_shopee_session_file(
+    file: UploadFile = File(...),
+    username: Optional[str] = Form(None),
+    merchant_name: Optional[str] = Form(None),
+    store_id: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Menerima berkas session_*.json secara langsung untuk disimpan di server.
+    """
+    content = await file.read()
+    try:
+        data = json.loads(content.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="File harus berupa JSON session Shopee yang valid")
+
+    tob_token = data.get("shopee_tob_token") or ""
+    if not tob_token:
+        raise HTTPException(status_code=400, detail="Data tidak memiliki shopee_tob_token")
+
+    req = UploadShopeeSessionRequest(
+        username=username or data.get("username"),
+        store_id=store_id or data.get("store_id"),
+        merchant_name=merchant_name or data.get("merchant_name"),
+        shopee_tob_token=tob_token,
+        shopee_tob_entity_id=data.get("shopee_tob_entity_id"),
+        extra_cookies=data.get("extra_cookies") or {}
+    )
+    return upload_shopee_session(req, db=db)
 
 
 # ─── FRONTEND SPA STATIC MOUNTING ─────────────────────────────────────────────
