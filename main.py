@@ -122,13 +122,14 @@ def startup_event():
         for src_d in persistent_data_dir.glob("chrome_profile*"):
             if src_d.is_dir():
                 for dst_dir in [shopee_auto_dir, shopee_core_dir]:
-                    dst_prof = dst_dir / (src_d.name if "allvbadmin" in src_d.name else "chrome_profile")
+                    dst_prof = dst_dir / src_d.name
                     if not dst_prof.exists():
                         shutil.copytree(src_d, dst_prof, dirs_exist_ok=True)
-                # also mirror to standard chrome_profile name in shopee_core
-                dst_shopee_prof = shopee_core_dir / "chrome_profile"
-                if not dst_shopee_prof.exists():
-                    shutil.copytree(src_d, dst_shopee_prof, dirs_exist_ok=True)
+                # also mirror allvbadmin or fallback to standard chrome_profile name in shopee_core
+                if "allvbadmin" in src_d.name:
+                    dst_shopee_prof = shopee_core_dir / "chrome_profile"
+                    if not dst_shopee_prof.exists():
+                        shutil.copytree(src_d, dst_shopee_prof, dirs_exist_ok=True)
         logger.info("✅ Persistent Shopee sessions & Chrome profiles synced from /app/data")
     except Exception as err:
         logger.warning(f"⚠️ Shopee session persistence sync warning: {err}")
@@ -5053,6 +5054,17 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
         outlet = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.store_id == req.store_id.strip()).first()
     if not outlet and raw_user:
         outlet = db.query(Outlet).options(joinedload(Outlet.account)).join(Account).filter(Account.username == raw_user).first()
+        if not outlet:
+            # Cari variasi nomor HP jika raw_user mengandung digit
+            raw_digits = re.sub(r'[^0-9]', '', raw_user)
+            if len(raw_digits) >= 8:
+                all_shopee_outlets = db.query(Outlet).options(joinedload(Outlet.account)).join(Account).filter(Account.platform == 'shopee').all()
+                for cand in all_shopee_outlets:
+                    if cand.account and cand.account.username:
+                        acc_digits = re.sub(r'[^0-9]', '', cand.account.username)
+                        if acc_digits and (acc_digits.endswith(raw_digits[-9:]) or raw_digits.endswith(acc_digits[-9:])):
+                            outlet = cand
+                            break
 
     merchant_name = req.merchant_name or (outlet.merchant_name if outlet else "") or (outlet.nama_resto_final if outlet else "") or (outlet.nama_outlet if outlet else "") or raw_user or "shopee_merchant"
     store_id = req.store_id or (outlet.store_id if outlet else "")
@@ -5077,12 +5089,24 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
     payload_json = json.dumps(session_payload, indent=2)
 
     target_keys = set()
-    for k in [profile_name, username, store_id, raw_user]:
+    for k in [profile_name, username, store_id, raw_user, (outlet.account.username if outlet and outlet.account else None)]:
         if k:
             clean_k = re.sub(r'[^a-zA-Z0-9_]', '_', str(k)).strip('_').lower()
             if clean_k:
                 target_keys.add(clean_k)
             target_keys.add(str(k).strip())
+            k_digits = re.sub(r'[^0-9]', '', str(k))
+            if len(k_digits) >= 8:
+                target_keys.add(k_digits)
+                if k_digits.startswith('08'):
+                    target_keys.add(k_digits[1:])
+                    target_keys.add('62' + k_digits[1:])
+                elif k_digits.startswith('628'):
+                    target_keys.add('0' + k_digits[2:])
+                    target_keys.add(k_digits[2:])
+                elif k_digits.startswith('8'):
+                    target_keys.add('0' + k_digits)
+                    target_keys.add('62' + k_digits)
 
     saved_paths = []
     target_dirs = [
@@ -5098,23 +5122,40 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
             target_file.write_text(payload_json, encoding="utf-8")
             saved_paths.append(str(target_file))
 
-    # Ekstrak chrome profile archive bila disertakan (timpa in-place profil yang sama untuk menghemat disk)
+    # Ekstrak chrome profile archive bila disertakan (dipisahkan spesifik per nomor HP/username akun)
     if req.profile_archive_base64:
         try:
             import base64
             import zipfile
             import io
             archive_bytes = base64.b64decode(req.profile_archive_base64)
-            raw_targets = [
-                BASE_DIR / "data" / f"chrome_profile_{username}",
-                BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"chrome_profile_{username}"
-            ]
-            if profile_name != username:
-                raw_targets.extend([
-                    BASE_DIR / "data" / f"chrome_profile_{profile_name}",
-                    BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"chrome_profile_{profile_name}"
-                ])
-            if "allvbadmin" in (username, profile_name):
+
+            # Kunci utama Chrome Profile: nomor HP / username akun spesifik (tidak dicampur dengan merchant name)
+            account_keys = set()
+            for cand in [raw_user, username, req.phone, (outlet.account.username if outlet and outlet.account else None)]:
+                if cand:
+                    clean_c = re.sub(r'[^a-zA-Z0-9_]', '_', str(cand)).strip('_').lower()
+                    if clean_c:
+                        account_keys.add(clean_c)
+                    digits = re.sub(r'[^0-9]', '', str(cand))
+                    if len(digits) >= 8:
+                        account_keys.add(digits)
+                        if digits.startswith('08'):
+                            account_keys.add(digits[1:])
+                            account_keys.add('62' + digits[1:])
+                        elif digits.startswith('628'):
+                            account_keys.add('0' + digits[2:])
+                            account_keys.add(digits[2:])
+                        elif digits.startswith('8'):
+                            account_keys.add('0' + digits)
+                            account_keys.add('62' + digits)
+
+            raw_targets = []
+            for ak in account_keys:
+                raw_targets.append(BASE_DIR / "data" / f"chrome_profile_{ak}")
+                raw_targets.append(BASE_DIR / "src" / "shopee-omzet-automation" / "data" / f"chrome_profile_{ak}")
+
+            if any("allvbadmin" in ak for ak in account_keys):
                 raw_targets.extend([
                     BASE_DIR / "data" / "chrome_profile",
                     BASE_DIR / "src" / "shopee-omzet-automation" / "data" / "chrome_profile",
