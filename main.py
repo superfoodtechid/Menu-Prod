@@ -5088,25 +5088,29 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
     }
     payload_json = json.dumps(session_payload, indent=2)
 
+    # Tentukan kunci kanonikal nomor HP format '628xxx' (standar tunggal database FoodMaster)
+    canonical_phone = ""
+    for cand in [(outlet.account.username if outlet and outlet.account else None), req.phone, raw_user, username]:
+        if cand:
+            c_digits = re.sub(r'[^0-9]', '', str(cand))
+            if len(c_digits) >= 8:
+                if c_digits.startswith("0"):
+                    canonical_phone = "62" + c_digits[1:]
+                elif c_digits.startswith("8"):
+                    canonical_phone = "62" + c_digits
+                elif c_digits.startswith("62"):
+                    canonical_phone = c_digits
+                else:
+                    canonical_phone = "62" + c_digits
+                break
+
     target_keys = set()
-    for k in [profile_name, username, store_id, raw_user, (outlet.account.username if outlet and outlet.account else None)]:
-        if k:
-            clean_k = re.sub(r'[^a-zA-Z0-9_]', '_', str(k)).strip('_').lower()
-            if clean_k:
-                target_keys.add(clean_k)
-            target_keys.add(str(k).strip())
-            k_digits = re.sub(r'[^0-9]', '', str(k))
-            if len(k_digits) >= 8:
-                target_keys.add(k_digits)
-                if k_digits.startswith('08'):
-                    target_keys.add(k_digits[1:])
-                    target_keys.add('62' + k_digits[1:])
-                elif k_digits.startswith('628'):
-                    target_keys.add('0' + k_digits[2:])
-                    target_keys.add(k_digits[2:])
-                elif k_digits.startswith('8'):
-                    target_keys.add('0' + k_digits)
-                    target_keys.add('62' + k_digits)
+    if canonical_phone:
+        target_keys.add(canonical_phone)
+    if store_id:
+        target_keys.add(store_id.strip())
+    if not target_keys:
+        target_keys.add(profile_name)
 
     saved_paths = []
     target_dirs = [
@@ -5122,7 +5126,7 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
             target_file.write_text(payload_json, encoding="utf-8")
             saved_paths.append(str(target_file))
 
-    # Ekstrak chrome profile archive bila disertakan (dipisahkan spesifik per nomor HP/username akun)
+    # Ekstrak chrome profile archive bila disertakan (hanya satu profil kanonikal '628xxx')
     if req.profile_archive_base64:
         try:
             import base64
@@ -5130,25 +5134,14 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
             import io
             archive_bytes = base64.b64decode(req.profile_archive_base64)
 
-            # Kunci utama Chrome Profile: nomor HP / username akun spesifik (tidak dicampur dengan merchant name)
+            # Kunci utama Chrome Profile: format kanonikal 628xxx (menghindari duplikasi 3 folder)
             account_keys = set()
-            for cand in [raw_user, username, req.phone, (outlet.account.username if outlet and outlet.account else None)]:
-                if cand:
-                    clean_c = re.sub(r'[^a-zA-Z0-9_]', '_', str(cand)).strip('_').lower()
-                    if clean_c:
-                        account_keys.add(clean_c)
-                    digits = re.sub(r'[^0-9]', '', str(cand))
-                    if len(digits) >= 8:
-                        account_keys.add(digits)
-                        if digits.startswith('08'):
-                            account_keys.add(digits[1:])
-                            account_keys.add('62' + digits[1:])
-                        elif digits.startswith('628'):
-                            account_keys.add('0' + digits[2:])
-                            account_keys.add(digits[2:])
-                        elif digits.startswith('8'):
-                            account_keys.add('0' + digits)
-                            account_keys.add('62' + digits)
+            if canonical_phone:
+                account_keys.add(canonical_phone)
+            elif "allvbadmin" in (raw_user, username):
+                account_keys.add("allvbadmin")
+            else:
+                account_keys.add(profile_name)
 
             raw_targets = []
             for ak in account_keys:
