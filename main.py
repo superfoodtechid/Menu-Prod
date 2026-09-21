@@ -4,6 +4,7 @@ import sys
 import uuid
 import logging
 import shutil
+import re
 
 # Force urllib3 to use IPv4 only because IPv6 is broken/blocked on some hosts and causes connection hangs
 try:
