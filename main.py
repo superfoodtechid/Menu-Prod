@@ -1755,8 +1755,27 @@ def trigger_push_price_job(request: PriceUpdateRequest, background_tasks: Backgr
         merchant_name = outlet.merchant_name or outlet.nama_resto_final or outlet.nama_outlet or ''
         profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
         profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
-        session_file = BASE_DIR / "shopee" / "data" / f"session_{profile_name}.json"
-        if not session_file.exists() or os.path.getsize(str(session_file)) < 10:
+        
+        candidates = [BASE_DIR / "shopee" / "data" / f"session_{profile_name}.json"]
+        if outlet.account and outlet.account.username:
+            clean_u = re.sub(r'[^a-zA-Z0-9_]', '_', outlet.account.username).strip('_').lower()
+            if clean_u:
+                candidates.append(BASE_DIR / "shopee" / "data" / f"session_{clean_u}.json")
+        if outlet.store_id:
+            candidates.append(BASE_DIR / "shopee" / "data" / f"session_{outlet.store_id.strip()}.json")
+            cache_path = BASE_DIR / "master_merchants_cache.csv"
+            phone_map = get_cached_phone_map(cache_path)
+            phone = phone_map.get(outlet.store_id)
+            if phone:
+                p_digits = re.sub(r'[^0-9]', '', str(phone))
+                if p_digits:
+                    candidates.append(BASE_DIR / "shopee" / "data" / f"session_{p_digits}.json")
+                    if p_digits.startswith("62"):
+                        candidates.append(BASE_DIR / "shopee" / "data" / f"session_{p_digits[2:]}.json")
+                        candidates.append(BASE_DIR / "shopee" / "data" / f"session_0{p_digits[2:]}.json")
+
+        has_valid_session = any(c.exists() and os.path.getsize(str(c)) >= 10 for c in candidates)
+        if not has_valid_session:
             raise HTTPException(
                 status_code=400,
                 detail="Branch ini belum memiliki sesi aktif Shopee. Harap hubungkan sesi di tab Kelola Sesi terlebih dahulu."
@@ -4365,14 +4384,42 @@ def get_sessions_status(db: Session = Depends(get_db)):
         merchant_name = o.merchant_name or o.nama_resto_final or o.nama_outlet or ''
         profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
         profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
-        
-        session_file = BASE_DIR / "shopee" / "data" / f"session_{profile_name}.json"
-        ts = get_cached_session_last_active(session_file)
-        if ts is not None:
+
+        # Check all possible session candidate files: profile_name, username, phone, store_id
+        candidate_keys = []
+        if profile_name:
+            candidate_keys.append(profile_name)
+        if acct_user:
+            clean_acct = re.sub(r'[^a-zA-Z0-9_]', '_', str(acct_user)).strip('_').lower()
+            if clean_acct and clean_acct not in candidate_keys:
+                candidate_keys.append(clean_acct)
+        if phone:
+            p_digits = re.sub(r'[^0-9]', '', str(phone))
+            if p_digits:
+                if p_digits not in candidate_keys:
+                    candidate_keys.append(p_digits)
+                if p_digits.startswith("62") and p_digits[2:] not in candidate_keys:
+                    candidate_keys.append(p_digits[2:])
+                elif p_digits.startswith("0") and ("62" + p_digits[1:]) not in candidate_keys:
+                    candidate_keys.append("62" + p_digits[1:])
+        if o.store_id and str(o.store_id).strip() not in candidate_keys:
+            candidate_keys.append(str(o.store_id).strip())
+
+        active_file = None
+        active_ts = None
+        for k in candidate_keys:
+            cand_path = BASE_DIR / "shopee" / "data" / f"session_{k}.json"
+            ts = get_cached_session_last_active(cand_path)
+            if ts is not None:
+                active_file = f"session_{k}.json"
+                active_ts = ts
+                break
+
+        if active_ts is not None:
             status_info["has_session"] = True
-            status_info["session_file"] = f"session_{profile_name}.json"
-            status_info["last_active"] = ts
-            
+            status_info["session_file"] = active_file
+            status_info["last_active"] = active_ts
+
         result.append(status_info)
         
     return result
@@ -4410,6 +4457,7 @@ def perform_delete_session(
                 detail="Penghapusan seluruh sesi memerlukan parameter confirm_all=true."
             )
         deleted_files = []
+        deleted_profiles = []
         dirs_to_clean = []
         plat = (platform or "all").lower()
         if plat in ["shopee", "all"]:
@@ -4417,6 +4465,8 @@ def perform_delete_session(
                 BASE_DIR / "shopee" / "data",
                 BASE_DIR / "src" / "shopee-omzet-automation" / "data",
                 BASE_DIR / "data",
+                BASE_DIR / "temp_profiles",
+                BASE_DIR / "shopee_session_exporter" / "temp_profiles",
             ])
         if plat in ["gofood", "all"]:
             dirs_to_clean.extend([
@@ -4432,20 +4482,36 @@ def perform_delete_session(
             if not d.exists():
                 continue
             for f in d.iterdir():
-                if not f.is_file():
-                    continue
-                if f.name.startswith("session_") or f.name.startswith("session.") or f.name == "session.json" or f.name.startswith("otp_request_"):
-                    try:
-                        f.unlink()
-                        deleted_files.append(str(f))
-                    except Exception as err:
-                        logger.warning(f"Gagal menghapus {f}: {err}")
+                if f.is_file():
+                    if f.name.startswith("session_") or f.name.startswith("session.") or f.name == "session.json" or f.name.startswith("otp_request_"):
+                        try:
+                            f.unlink()
+                            deleted_files.append(str(f))
+                        except Exception as err:
+                            logger.warning(f"Gagal menghapus file {f}: {err}")
+                elif f.is_dir():
+                    if f.name.startswith("chrome_profile") or f.name.startswith("profile_") or f.name == "chrome_profile":
+                        try:
+                            # Hapus lock files jika ada
+                            for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK"]:
+                                for candidate_lock in [f / lock, f / "Default" / lock]:
+                                    try:
+                                        if candidate_lock.is_symlink() or candidate_lock.exists():
+                                            candidate_lock.unlink()
+                                    except Exception:
+                                        pass
+                            shutil.rmtree(f, ignore_errors=True)
+                            deleted_profiles.append(str(f))
+                            logger.info(f"🗑️ [API] Folder Chrome profile dihapus: {f}")
+                        except Exception as err:
+                            logger.warning(f"Gagal menghapus folder profile {f}: {err}")
 
         SESSION_METADATA_CACHE.clear()
         return {
             "status": "SUCCESS",
-            "message": f"Berhasil menghapus seluruh sesi ({len(deleted_files)} berkas).",
+            "message": f"Berhasil menghapus seluruh sesi ({len(deleted_files)} berkas sesi, {len(deleted_profiles)} folder profil Chrome).",
             "deleted_files": deleted_files,
+            "deleted_profiles": deleted_profiles,
             "target": "all"
         }
 
@@ -4578,6 +4644,69 @@ def perform_delete_session(
                 except Exception as err:
                     logger.error(f"Gagal menghapus berkas sesi {path_str}: {err}")
 
+    # ── Hapus Folder Profil Chrome Terkait Akun / Outlet ─────────────────────
+    profile_candidate_dirs = [
+        BASE_DIR / "shopee" / "data",
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "data",
+        BASE_DIR / "temp_profiles",
+        BASE_DIR / "shopee_session_exporter" / "temp_profiles",
+    ]
+
+    deleted_profiles = []
+    seen_profile_paths = set()
+
+    for p_dir in profile_candidate_dirs:
+        if not p_dir.exists() or not p_dir.is_dir():
+            continue
+        for item in p_dir.iterdir():
+            if not item.is_dir():
+                continue
+            item_path_str = str(item.resolve())
+            if item_path_str in seen_profile_paths:
+                continue
+
+            dir_name = item.name.lower()
+            matched_profile = False
+
+            # Khusus allvbadmin / default
+            if ("allvbadmin" in search_keys or "default" in search_keys) and dir_name in ["chrome_profile", "chrome_profile_allvbadmin"]:
+                matched_profile = True
+
+            if not matched_profile:
+                for k in search_keys:
+                    k_str = str(k).strip().lower()
+                    k_clean = re.sub(r'[^a-zA-Z0-9_]', '_', k_str).strip('_')
+                    if len(k_clean) < 3:
+                        continue
+                    if dir_name in [f"chrome_profile_{k_clean}", f"profile_{k_clean}", k_clean]:
+                        matched_profile = True
+                        break
+
+                    # Cocokkan nomor HP jika terdiri dari digit >= 8
+                    k_digits = re.sub(r'[^0-9]', '', k_str)
+                    if len(k_digits) >= 8:
+                        dir_digits = re.sub(r'[^0-9]', '', dir_name)
+                        if dir_digits and (dir_digits.endswith(k_digits[-9:]) or k_digits.endswith(dir_digits[-9:])):
+                            matched_profile = True
+                            break
+
+            if matched_profile:
+                try:
+                    for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK"]:
+                        for candidate_lock in [item / lock, item / "Default" / lock]:
+                            try:
+                                if candidate_lock.is_symlink() or candidate_lock.exists():
+                                    candidate_lock.unlink()
+                            except Exception:
+                                pass
+                    shutil.rmtree(item, ignore_errors=True)
+                    deleted_profiles.append(item_path_str)
+                    seen_profile_paths.add(item_path_str)
+                    logger.info(f"🗑️ [API] Folder profil Chrome dihapus: {item_path_str}")
+                except Exception as err:
+                    logger.error(f"Gagal menghapus folder profil {item_path_str}: {err}")
+
     SESSION_METADATA_CACHE.clear()
 
     for jid, job in list(_assign_jobs.items()):
@@ -4586,21 +4715,23 @@ def perform_delete_session(
             _assign_jobs[jid]["status"] = "CANCELLED"
             _assign_jobs[jid]["error"] = "Sesi dihapus via API"
 
-    if not deleted_files:
+    if not deleted_files and not deleted_profiles:
         return {
             "status": "NOT_FOUND",
-            "message": "Tidak ditemukan berkas sesi yang cocok.",
+            "message": "Tidak ditemukan berkas sesi atau folder profil Chrome yang cocok.",
             "target": target or outlet_id or username or store_id,
             "matched_keys": sorted(list(search_keys)),
-            "deleted_files": []
+            "deleted_files": [],
+            "deleted_profiles": []
         }
 
     return {
         "status": "SUCCESS",
-        "message": f"Berhasil menghapus {len(deleted_files)} berkas sesi.",
+        "message": f"Berhasil menghapus {len(deleted_files)} berkas sesi dan {len(deleted_profiles)} folder profil Chrome.",
         "target": target or outlet_id or username or store_id,
         "matched_keys": sorted(list(search_keys)),
-        "deleted_files": deleted_files
+        "deleted_files": deleted_files,
+        "deleted_profiles": deleted_profiles
     }
 
 
@@ -5065,6 +5196,16 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
                         if acc_digits and (acc_digits.endswith(raw_digits[-9:]) or raw_digits.endswith(acc_digits[-9:])):
                             outlet = cand
                             break
+                if not outlet:
+                    cache_path = BASE_DIR / "master_merchants_cache.csv"
+                    phone_map = get_cached_phone_map(cache_path)
+                    for sid, p_val in phone_map.items():
+                        p_digits = re.sub(r'[^0-9]', '', str(p_val))
+                        if p_digits and (p_digits.endswith(raw_digits[-9:]) or raw_digits.endswith(p_digits[-9:])):
+                            found_o = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.store_id == sid).first()
+                            if found_o:
+                                outlet = found_o
+                                break
 
     merchant_name = req.merchant_name or (outlet.merchant_name if outlet else "") or (outlet.nama_resto_final if outlet else "") or (outlet.nama_outlet if outlet else "") or raw_user or "shopee_merchant"
     store_id = req.store_id or (outlet.store_id if outlet else "")
@@ -5109,7 +5250,13 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
         target_keys.add(canonical_phone)
     if store_id:
         target_keys.add(store_id.strip())
-    if not target_keys:
+    if outlet and outlet.store_id:
+        target_keys.add(str(outlet.store_id).strip())
+    if username:
+        clean_u = re.sub(r'[^a-zA-Z0-9_]', '_', str(username)).strip('_').lower()
+        if clean_u:
+            target_keys.add(clean_u)
+    if profile_name:
         target_keys.add(profile_name)
 
     saved_paths = []
