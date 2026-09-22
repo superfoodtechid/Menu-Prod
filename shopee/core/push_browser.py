@@ -35,10 +35,8 @@ from selenium.webdriver.support import expected_conditions as EC
 log = logging.getLogger(__name__)
 
 PARTNER_DASHBOARD   = "https://partner.shopee.co.id/food/dashboard"
-PARTNER_LOGIN_URL   = "https://partner.shopee.co.id/login"
 TOKEN_TRIGGER_PAGE  = "https://partner.shopee.co.id/settings/shopee-food/business-hours-settings"
-
-OTP_WAIT_TIMEOUT    = 900  # 15 menit
+OTP_WAIT_TIMEOUT    = 0  # 0 = tanpa batas waktu (menunggu input OTP atau dibatalkan pengguna)
 
 
 # ── Driver ─────────────────────────────────────────────────────────────────────
@@ -230,9 +228,14 @@ def _wait_for_otp_code(username: str, timeout: int = OTP_WAIT_TIMEOUT) -> str | 
     if not otp_file.exists():
         _write_otp_request(username)
 
-    log.info(f"⏳ [OTP] Menunggu input OTP untuk akun '{username}' (timeout {timeout}s)...")
+    if timeout and timeout > 0:
+        log.info(f"⏳ [OTP] Menunggu input OTP untuk akun '{username}' (timeout {timeout}s)...")
+    else:
+        log.info(f"⏳ [OTP] Menunggu input OTP untuk akun '{username}' (tanpa batas waktu)...")
     start = time.time()
-    while time.time() - start < timeout:
+    while True:
+        if timeout and timeout > 0 and (time.time() - start >= timeout):
+            break
         try:
             if otp_file.exists():
                 data = json.loads(otp_file.read_text())
@@ -251,7 +254,10 @@ def _wait_for_otp_code(username: str, timeout: int = OTP_WAIT_TIMEOUT) -> str | 
             log.debug(f"  OTP file read error: {e}")
         time.sleep(2)
 
-    log.error(f"❌ [OTP] Timeout menunggu OTP untuk '{username}'")
+    if timeout and timeout > 0:
+        log.error(f"❌ [OTP] Timeout menunggu OTP untuk '{username}'")
+    else:
+        log.error(f"❌ [OTP] Berhenti menunggu OTP untuk '{username}'")
     otp_file.unlink(missing_ok=True)
     return None
 

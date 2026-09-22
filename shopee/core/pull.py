@@ -73,9 +73,8 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
     master_user, master_pass = get_shopee_master_credentials()
     username = store_metadata.get("username") or master_user
     password = store_metadata.get("password") or master_pass
-    automation_data_dir = AUTOMATION_DIR / "data"
-    automation_data_dir.mkdir(parents=True, exist_ok=True)
-    session_file = automation_data_dir / f"session_{username}.json"
+    from shopee.core.session_utils import resolve_shopee_session
+    session_file = resolve_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
     browser.set_session_file(session_file)
             
     job_id = store_metadata.get('job_id')
