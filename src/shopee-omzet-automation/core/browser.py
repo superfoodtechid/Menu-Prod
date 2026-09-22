@@ -703,7 +703,7 @@ def _trigger_and_extract_tokens(driver) -> tuple:
     return extract_tokens_from_driver(driver, allow_file_fallback=False)
 
 
-def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: str = "", driver=None) -> str:
+def get_otp_code(username: str, phone: str = "", timeout: int = 0, error_msg: str = "", driver=None) -> str:
     script_dir = Path(__file__).resolve().parent.parent
     data_dir = script_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -727,7 +727,8 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: 
         try:
             otp_file_alt.write_text(json.dumps(request_data, indent=2))
         except Exception: pass
-        log.info(f"🔑 [OTP] File request OTP dibuat untuk '{username}': {otp_file.name} (error='{error_msg}'). Menunggu input OTP via Web UI / API (timeout {timeout}s)...")
+        timeout_desc = f"(timeout {timeout}s)" if timeout and timeout > 0 else "(tanpa batas waktu)"
+        log.info(f"🔑 [OTP] File request OTP dibuat untuk '{username}': {otp_file.name} (error='{error_msg}'). Menunggu input OTP via Web UI / API {timeout_desc}...")
         print(f"DISCORD_OTP_REQUEST: {json.dumps(request_data)}", flush=True)
     except Exception as e:
         log.error(f"Gagal menulis file request OTP: {e}")
@@ -736,7 +737,9 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: 
     start_wait = time.time()
     whatsapp_triggered = False
     last_handled_action_id = None
-    while time.time() - start_wait < timeout:
+    while True:
+        if timeout and timeout > 0 and (time.time() - start_wait >= timeout):
+            break
         target_fpath = otp_file if otp_file.exists() else (otp_file_alt if otp_file_alt.exists() else None)
         if target_fpath:
             try:
@@ -802,7 +805,10 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 900, error_msg: 
                 log.error(f"Error membaca file OTP: {e}")
         time.sleep(1)
         
-    log.warning(f"❌ [OTP] Timeout ({timeout}s) menunggu OTP untuk '{username}'")
+    if timeout and timeout > 0:
+        log.warning(f"❌ [OTP] Timeout ({timeout}s) menunggu OTP untuk '{username}'")
+    else:
+        log.warning(f"❌ [OTP] Berhenti menunggu OTP untuk '{username}'")
     otp_file.unlink(missing_ok=True)
     otp_file_alt.unlink(missing_ok=True)
     return ""
@@ -2534,12 +2540,23 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
             # Check if username is specified and cached session belongs to a different username
             saved_sess = load_session()
             if username and saved_sess and saved_sess.get("username") and saved_sess.get("username") != username:
-                log.info(f"🔄 [SESSION] Active session is for '{saved_sess.get('username')}', target user is '{username}'. Resetting cookies for target user login...")
-                try: driver.delete_all_cookies()
-                except: pass
-                driver.get("https://partner.shopee.co.id/login")
-                time.sleep(3)
-                current_url = driver.current_url.lower()
+                sess_u = str(saved_sess.get("username") or "").strip().lower()
+                target_u = str(username or "").strip().lower()
+                sess_digits = re.sub(r'[^0-9]', '', sess_u)
+                target_digits = re.sub(r'[^0-9]', '', target_u)
+                is_same_account = False
+                if sess_digits and target_digits and (sess_digits.endswith(target_digits[-9:]) or target_digits.endswith(sess_digits[-9:])):
+                    is_same_account = True
+                elif saved_sess.get("shopee_tob_token") and (SESSION_FILE.stem != "session"):
+                    is_same_account = True
+
+                if not is_same_account:
+                    log.info(f"🔄 [SESSION] Active session is for '{saved_sess.get('username')}', target user is '{username}'. Resetting cookies for target user login...")
+                    try: driver.delete_all_cookies()
+                    except: pass
+                    driver.get("https://partner.shopee.co.id/login")
+                    time.sleep(3)
+                    current_url = driver.current_url.lower()
             elif "dashboard" in current_url or "merchant-selector" in current_url or "onboarding" in current_url:
                 log.info("✅ [SESSION] Browser is already logged in.")
                 is_logged_in = True

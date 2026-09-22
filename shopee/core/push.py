@@ -18,6 +18,7 @@ AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
 from core import browser
+from shopee.core.session_utils import resolve_shopee_session
 
 def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeModifyClient | None, str]:
     store_id = store_metadata.get("store_id")
@@ -37,12 +38,10 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
         
     target_name = _resolve_target_merchant_name(username, target_name, store_metadata)
     
-    automation_data_dir = AUTOMATION_DIR / "data"
-    automation_data_dir.mkdir(parents=True, exist_ok=True)
-    session_file = automation_data_dir / f"session_{username}.json"
+    session_file = resolve_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
     browser.set_session_file(session_file)
     
-    print(f"[*] [PUSH] Membuka browser (headless={headless}) untuk akun '{username}', merchant: '{target_name}'...")
+    print(f"[*] [PUSH] Membuka browser (headless={headless}) untuk akun '{username}', merchant: '{target_name}', session: '{session_file.name}'...")
     session_data = None
     try:
         session_data = browser.get_session(

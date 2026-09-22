@@ -1050,9 +1050,21 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                 sys.path.insert(0, str(BASE_DIR))
             from shopee.core.push import push_price_update_batch
 
+            phone_val = ""
+            if account and account.username and any(c.isdigit() for c in account.username):
+                phone_val = account.username
+            if not phone_val and outlet.store_id:
+                try:
+                    c_file = BASE_DIR / "master_merchants_cache.csv"
+                    p_map = get_cached_phone_map(c_file)
+                    phone_val = p_map.get(str(outlet.store_id).strip(), "")
+                except Exception:
+                    pass
+
             store_metadata = {
                 "store_id": outlet.store_id,
                 "username": account.username,
+                "phone": phone_val,
                 "password": account.password,
                 "merchant_name": outlet.merchant_name,
                 "nama_resto_final": outlet.nama_resto_final,
@@ -4973,7 +4985,7 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
             matched = False
             if j.outlet and j.outlet.account and (j.outlet.account.username or "").strip().lower() == username.lower():
                 matched = True
-            elif username.lower() in str(j.input_payload or "").lower():
+            elif username.lower() in str(getattr(j, "payload", "") or "").lower():
                 matched = True
             if matched:
                 from menu_core.job_control import cancel_job
