@@ -5436,6 +5436,144 @@ async def upload_shopee_session_file(
     )
     return upload_shopee_session(req, db=db)
 
+@app.api_route("/api/shopee/test-session", methods=["GET", "POST"])
+def test_shopee_session(
+    identifier: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Endpoint pengujian sesi Shopee tanpa mengubah harga menu:
+    1. Memeriksa keberadaan file sesi (session_*.json).
+    2. Menguji validasi token secara langsung via API.
+    3. Menguji peluncuran browser headless dan pemulihan sesi multi-domain.
+    4. Menguji ekstraksi token segar via business-hours settings.
+    """
+    raw_ident = (identifier or "").strip()
+    if not raw_ident:
+        # Default: cari sesi akun Shopee pertama di database jika tidak diberikan
+        first_shopee = db.query(Outlet).join(Account).filter(Account.platform == "shopee").first()
+        if first_shopee and first_shopee.account and first_shopee.account.username:
+            raw_ident = first_shopee.account.username
+        else:
+            raw_ident = "6285183151531"
+
+    logger.info(f"🧪 [TEST-SESSION] Memulai pengujian sesi Shopee untuk identifier '{raw_ident}'...")
+
+    try:
+        from shopee.core.session_utils import sync_session_files_for_account
+    except ImportError:
+        def sync_session_files_for_account(acc, cand):
+            return None
+
+    # Sinkronisasi kandidat sesi
+    session_path = sync_session_files_for_account(raw_ident, [raw_ident])
+    sess_file = Path(session_path) if session_path and os.path.exists(session_path) else None
+
+    if not sess_file or not sess_file.exists():
+        # Coba pencarian manual di direktori data
+        search_dirs = [
+            BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+            BASE_DIR / "shopee" / "data",
+            BASE_DIR / "data",
+        ]
+        for sdir in search_dirs:
+            cand = sdir / f"session_{raw_ident}.json"
+            if cand.exists():
+                sess_file = cand
+                break
+
+    if not sess_file or not sess_file.exists():
+        return {
+            "status": "ERROR",
+            "identifier": raw_ident,
+            "session_found": False,
+            "message": f"Berkas sesi 'session_{raw_ident}.json' tidak ditemukan di server. Silakan jalankan shopee_session_exporter.py terlebih dahulu."
+        }
+
+    sess_data = {}
+    try:
+        sess_data = json.loads(sess_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {
+            "status": "ERROR",
+            "identifier": raw_ident,
+            "session_found": True,
+            "message": f"Gagal membaca file sesi: {e}"
+        }
+
+    tob_token = sess_data.get("shopee_tob_token") or ""
+    entity_id = sess_data.get("shopee_tob_entity_id") or ""
+    saved_at = sess_data.get("saved_at") or "unknown"
+    extra_cookies = sess_data.get("extra_cookies") or {}
+
+    # Uji validitas token via API langsung
+    direct_token_valid = False
+    if tob_token:
+        try:
+            import requests
+            headers = {
+                "Cookie": f"shopee_tob_entity_id={entity_id}; shopee_tob_token={tob_token}",
+                "x-merchant-token": tob_token,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            resp = requests.post("https://api.partner.shopee.co.id/nb/mss/web-api/PartnerAccountServer/GetUserInfo", json={}, headers=headers, timeout=6)
+            if resp.status_code == 200 and resp.json().get("code") == 0:
+                direct_token_valid = True
+        except Exception:
+            pass
+
+    # Uji peluncuran browser headless dan pemulihan sesi
+    browser_restore_success = False
+    new_token_extracted = False
+    new_entity_id = entity_id
+    merchant_name = sess_data.get("merchant_name") or "Shopee Merchant"
+    browser_error = ""
+
+    try:
+        from shopee_core import browser
+        browser.set_session_file(sess_file)
+        # Jalankan get_session headless tanpa interaksi OTP
+        sess_result = browser.get_session(
+            username=raw_ident,
+            headless=True,
+            close_browser=True,
+            interactive=False
+        )
+        if sess_result and sess_result.get("shopee_tob_token"):
+            browser_restore_success = True
+            new_token_extracted = True
+            new_entity_id = sess_result.get("shopee_tob_entity_id") or entity_id
+        else:
+            browser_error = "Browser tidak dapat mencapai dashboard atau token tidak ditemukan."
+    except Exception as b_err:
+        browser_error = str(b_err)
+        logger.warning(f"⚠️ [TEST-SESSION] Browser test error: {browser_error}")
+
+    overall_status = "SUCCESS" if browser_restore_success else ("WARNING" if direct_token_valid else "FAILED")
+    message = (
+        "Sesi Shopee valid dan aktif. Browser headless berhasil memulihkan sesi dan mengekstrak token segar."
+        if browser_restore_success
+        else (
+            "Token API masih aktif tetapi browser headless gagal memulihkan sesi. "
+            f"Detail: {browser_error or 'Kredensial kedaluwarsa'}. Silakan perbarui sesi via shopee_session_exporter.py."
+        )
+    )
+
+    return {
+        "status": overall_status,
+        "identifier": raw_ident,
+        "session_file": str(sess_file.name),
+        "session_saved_at": saved_at,
+        "extra_cookies_count": len(extra_cookies),
+        "direct_token_valid": direct_token_valid,
+        "browser_restore_success": browser_restore_success,
+        "new_token_extracted": new_token_extracted,
+        "merchant_name": merchant_name,
+        "entity_id": new_entity_id,
+        "message": message
+    }
+
 
 # ─── FRONTEND SPA STATIC MOUNTING ─────────────────────────────────────────────
 web_dist = BASE_DIR / "web" / "dist"

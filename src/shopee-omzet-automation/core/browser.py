@@ -2565,6 +2565,158 @@ def return_to_selector(driver) -> bool:
             pass
         return True
 
+def _restore_saved_session(driver, saved: dict, target_username: str = None) -> bool:
+    """
+    Memulihkan sesi multi-domain Shopee dari file session yang diekspor:
+    1. Domain SSO (partner.business.accounts.shopee.co.id): Injeksi cookies SPC_SI, ds, _sapid, csrftoken, dll.
+    2. Domain Dashboard (partner.shopee.co.id): Injeksi shopee_tob_token, shopee_tob_entity_id, dan extra_cookies.
+    3. Navigasi ke Dashboard: Jika muncul layar konfirmasi 'Lanjutkan dengan Shopee' (SSO consent), klik tombol 'Lanjutkan' otomatis.
+    4. Tangani Onboarding / Merchant invitation / Merchant selector jika muncul.
+    Mengembalikan True jika browser berhasil berada di lingkungan dashboard/merchant portal, False jika gagal.
+    """
+    if not saved or not isinstance(saved, dict):
+        return False
+
+    log.info("🔍 [SESSION-RESTORE] Memulai pemulihan sesi multi-domain Shopee...")
+    extra_cookies = saved.get("extra_cookies", {}) or {}
+    tob_token = saved.get("shopee_tob_token")
+    entity_id = saved.get("shopee_tob_entity_id")
+
+    # ── Tahap 1: Injeksi SSO Domain Cookies (partner.business.accounts.shopee.co.id) ──
+    sso_url = "https://partner.business.accounts.shopee.co.id/authenticate/login/"
+    try:
+        log.info("🌐 [SESSION-RESTORE] Mengunjungi domain SSO Shopee untuk injeksi cookie autentikasi...")
+        driver.get(sso_url)
+        time.sleep(2)
+        sso_injected_count = 0
+        for name, value in extra_cookies.items():
+            if not name or not value:
+                continue
+            try:
+                driver.add_cookie({"name": name, "value": str(value), "path": "/"})
+                sso_injected_count += 1
+            except Exception:
+                pass
+        log.info(f"  ✅ [SESSION-RESTORE] Berhasil menginjeksi {sso_injected_count} cookie ke domain SSO.")
+    except Exception as sso_err:
+        log.warning(f"  ⚠️ [SESSION-RESTORE] Gagal menginjeksi cookie ke domain SSO: {sso_err}")
+
+    # ── Tahap 2: Injeksi Merchant Partner Domain Cookies (partner.shopee.co.id) ──
+    try:
+        log.info("🌐 [SESSION-RESTORE] Mengunjungi domain partner.shopee.co.id...")
+        driver.get("https://partner.shopee.co.id/login")
+        time.sleep(2)
+        partner_injected_count = 0
+        if tob_token:
+            try:
+                driver.add_cookie({"name": "shopee_tob_token", "value": str(tob_token), "path": "/"})
+                partner_injected_count += 1
+            except Exception:
+                pass
+        if entity_id:
+            try:
+                driver.add_cookie({"name": "shopee_tob_entity_id", "value": str(entity_id), "path": "/"})
+                partner_injected_count += 1
+            except Exception:
+                pass
+        for name, value in extra_cookies.items():
+            if not name or not value or name in ["shopee_tob_token", "shopee_tob_entity_id"]:
+                continue
+            try:
+                driver.add_cookie({"name": name, "value": str(value), "path": "/"})
+                partner_injected_count += 1
+            except Exception:
+                pass
+
+        # Injeksi juga ke localStorage / sessionStorage untuk token JWT / TOB
+        if tob_token:
+            try:
+                driver.execute_script("""
+                    try {
+                        localStorage.setItem('shopee_tob_token', arguments[0]);
+                        sessionStorage.setItem('shopee_tob_token', arguments[0]);
+                        if (arguments[1]) {
+                            localStorage.setItem('shopee_tob_entity_id', arguments[1]);
+                            sessionStorage.setItem('shopee_tob_entity_id', arguments[1]);
+                        }
+                    } catch(e) {}
+                """, str(tob_token), str(entity_id or ""))
+            except Exception:
+                pass
+        log.info(f"  ✅ [SESSION-RESTORE] Berhasil menginjeksi {partner_injected_count} cookie ke domain Partner.")
+    except Exception as part_err:
+        log.warning(f"  ⚠️ [SESSION-RESTORE] Gagal menginjeksi cookie ke domain Partner: {part_err}")
+
+    # ── Tahap 3: Navigasi ke Dashboard & Handle SSO Consent ("Lanjutkan dengan Shopee") ──
+    try:
+        log.info("🌐 [SESSION-RESTORE] Membuka Dashboard Shopee Partner...")
+        driver.get(PARTNER_DASHBOARD)
+        time.sleep(3)
+
+        for wait_step in range(12):
+            curr_url = driver.current_url.lower()
+
+            # Kasus A: Langsung mendarat di Dashboard
+            if "/food/dashboard" in curr_url:
+                log.info("  ✅ [SESSION-RESTORE] Berhasil masuk ke Dashboard Shopee Partner.")
+                return True
+
+            # Kasus B: Mendarat di Merchant Selector atau Onboarding
+            if "merchant-selector" in curr_url or "onboarding" in curr_url:
+                log.info("  📍 [SESSION-RESTORE] Berhasil masuk ke halaman pemilihan/undangan merchant.")
+                if _handle_onboarding_invitation(driver):
+                    time.sleep(3)
+                return True
+
+            # Kasus C: Layar SSO Consent ("Lanjutkan dengan Shopee")
+            body_text = (driver.execute_script("return document.body.innerText || ''") or "").lower()
+            if "lanjutkan dengan shopee" in body_text or "sedang log in ke akun" in body_text or "continue with shopee" in body_text:
+                log.info("  🔎 [SESSION-RESTORE] Terdeteksi layar konfirmasi 'Lanjutkan dengan Shopee'. Mengklik tombol 'Lanjutkan'...")
+                clicked = driver.execute_script("""
+                    const elements = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'));
+                    for (const el of elements) {
+                        const txt = (el.innerText || el.textContent || '').trim();
+                        if ((txt === 'Lanjutkan' || txt === 'Continue') && el.offsetParent !== null) {
+                            const target = el.closest('button, [role="button"], a, div') || el;
+                            target.scrollIntoView({block: 'center'});
+                            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
+                                target.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+                            });
+                            if (typeof target.click === 'function') target.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                if not clicked:
+                    try:
+                        xpath_query = "//*[(self::button or self::div or self::a or @role='button') and (normalize-space(.)='Lanjutkan' or normalize-space(.)='Continue' or contains(normalize-space(.), 'Lanjutkan'))]"
+                        btns = driver.find_elements(By.XPATH, xpath_query)
+                        for b in btns:
+                            if b.is_displayed() and b.is_enabled():
+                                driver.execute_script("arguments[0].click();", b)
+                                clicked = True
+                                break
+                    except Exception:
+                        pass
+
+                if clicked:
+                    log.info("  👉 [SESSION-RESTORE] Tombol 'Lanjutkan' berhasil diklik. Menunggu redirect ke Dashboard...")
+                    time.sleep(3)
+
+            time.sleep(1)
+
+        final_url = driver.current_url.lower()
+        if any(kw in final_url for kw in ["dashboard", "merchant-selector", "onboarding"]):
+            log.info(f"  ✅ [SESSION-RESTORE] Berhasil mendarat di {final_url}")
+            return True
+
+    except Exception as nav_err:
+        log.warning(f"  ⚠️ [SESSION-RESTORE] Kesalahan saat navigasi dashboard: {nav_err}")
+
+    log.warning("  ⚠️ [SESSION-RESTORE] Pemulihan sesi dari saved tokens belum berhasil mencapai Dashboard.")
+    return False
+
 def get_session(username=None, password=None, phone=None, headless=None, close_browser=True, target_name=None, interactive=True) -> dict | None:
     headless = resolve_shopee_headless(headless)
     for attempt in range(3):
@@ -2605,53 +2757,12 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                 log.info("✅ [SESSION] Browser is already logged in.")
                 is_logged_in = True
             
-            # Restore from file only on first attempt if not logged in
-            if not is_logged_in and attempt == 0:
+            # Restore from file on first attempt or retries if not logged in
+            if not is_logged_in:
                 saved = load_session()
-                if saved and saved.get("shopee_tob_token"):
-                    log.info("🔍 Attempting to restore session from saved tokens...")
-                    try:
-                        driver.add_cookie({"name": "shopee_tob_token", "value": saved["shopee_tob_token"]})
-                        if saved.get("shopee_tob_entity_id"):
-                            driver.add_cookie({"name": "shopee_tob_entity_id", "value": saved["shopee_tob_entity_id"]})
-                        for n, v in saved.get("extra_cookies", {}).items():
-                            try: driver.add_cookie({"name": n, "value": v})
-                            except: pass
-                        
-                        # Re-navigate to PARTNER_DASHBOARD so cookies take effect on dashboard endpoint
-                        driver.get(PARTNER_DASHBOARD)
-                        time.sleep(4)
-                        current_url = driver.current_url.lower()
-                        if any(kw in current_url for kw in ["dashboard", "merchant-selector", "onboarding"]):
-                            log.info("✅ [SESSION] Restored successfully from saved tokens.")
-                            is_logged_in = True
-                    except Exception as _cookie_err:
-                        log.warning(f"  ⚠️ Cookie injection failed: {_cookie_err}")
-
-            # On retry attempts, try injecting saved session tokens BEFORE resorting
-            # to a full fresh login. Chrome may have crashed mid-session (causing
-            # "Connection refused") but the session_{username}.json written by the
-            # previous successful warm cycle is still valid. Injecting those cookies
-            # into a fresh Chrome instance avoids triggering Shopee OTP.
-            if not is_logged_in and attempt > 0:
-                log.info(f"🔄 [SESSION] Attempt {attempt+1}: trying saved tokens...")
-                saved = load_session()
-                if saved and saved.get("shopee_tob_token"):
-                    try:
-                        driver.add_cookie({"name": "shopee_tob_token", "value": saved["shopee_tob_token"]})
-                        if saved.get("shopee_tob_entity_id"):
-                            driver.add_cookie({"name": "shopee_tob_entity_id", "value": saved["shopee_tob_entity_id"]})
-                        for n, v in saved.get("extra_cookies", {}).items():
-                            try: driver.add_cookie({"name": n, "value": v})
-                            except: pass
-                        driver.get(PARTNER_DASHBOARD)
-                        time.sleep(4)
-                        current_url = driver.current_url.lower()
-                        if any(kw in current_url for kw in ["dashboard", "merchant-selector", "onboarding"]):
-                            log.info(f"✅ [SESSION] Restored from saved tokens on retry {attempt+1}.")
-                            is_logged_in = True
-                    except Exception as _cookie_err:
-                        log.warning(f"  ⚠️ Cookie injection on retry failed: {_cookie_err}")
+                if saved and (saved.get("shopee_tob_token") or saved.get("extra_cookies")):
+                    log.info(f"🔍 [SESSION] Mencoba pemulihan sesi multi-domain tersimpan (attempt {attempt+1})...")
+                    is_logged_in = _restore_saved_session(driver, saved, target_username=username)
 
 
 
