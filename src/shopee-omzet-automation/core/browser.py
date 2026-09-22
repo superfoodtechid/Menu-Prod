@@ -1545,8 +1545,51 @@ def _init_driver(headless: bool = True):
     else:
         account_name = SESSION_FILE.stem.replace("session_", "")
         profile_dir = script_dir / "data" / f"chrome_profile_{account_name}"
+
+        def _has_profile_data(p: Path) -> bool:
+            if not p.exists() or not p.is_dir():
+                return False
+            for subdir in ["Default", f"profile_{account_name}", "shopee_profile"]:
+                sub = p / subdir
+                if sub.exists():
+                    try:
+                        if any(sub.iterdir()) and ((sub / "Local Storage").exists() or (sub / "IndexedDB").exists()):
+                            return True
+                    except Exception:
+                        pass
+            return False
+
+        if not _has_profile_data(profile_dir):
+            saved_sess = load_session()
+            alt_candidates = []
+            if saved_sess:
+                alt_candidates.extend([
+                    saved_sess.get("phone"),
+                    saved_sess.get("username"),
+                    saved_sess.get("store_id"),
+                ])
+            for cand in alt_candidates:
+                cand_str = str(cand or "").strip()
+                if cand_str and cand_str != account_name:
+                    for pdir in [script_dir / "data", script_dir.parent.parent / "data", script_dir.parent.parent / "shopee" / "data"]:
+                        alt_prof = pdir / f"chrome_profile_{cand_str}"
+                        if _has_profile_data(alt_prof):
+                            account_name = cand_str
+                            profile_dir = alt_prof
+                            log.info(f"📂 [BROWSER] Mengalihkan Chrome Profile ke profil owner yang memiliki data login: {profile_dir}")
+                            break
+                if _has_profile_data(profile_dir):
+                    break
+
         options.add_argument(f"--user-data-dir={profile_dir.resolve()}")
-        options.add_argument(f"--profile-directory=profile_{account_name}")
+        sub_profile = f"profile_{account_name}"
+        if not (profile_dir / sub_profile).exists():
+            for cand_sub in ["shopee_profile", "Default"]:
+                if (profile_dir / cand_sub).exists():
+                    sub_profile = cand_sub
+                    break
+        options.add_argument(f"--profile-directory={sub_profile}")
+        log.info(f"🌐 [BROWSER] User data dir: {profile_dir.resolve()} (profile: {sub_profile})")
 
     # Delete SingletonLock if it exists to avoid SessionNotCreatedException on Linux
     singleton_lock = profile_dir / "SingletonLock"

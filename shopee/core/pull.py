@@ -76,6 +76,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
     from shopee.core.session_utils import resolve_shopee_session
     session_file = resolve_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
     browser.set_session_file(session_file)
+    active_account = session_file.stem.replace("session_", "") if session_file.stem.startswith("session_") else username
             
     job_id = store_metadata.get('job_id')
     def _is_cancelled():
@@ -91,10 +92,10 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         print(f"[!] Shopee job {job_id} telah dibatalkan oleh pengguna.")
         return False, "user membatalkan otp"
 
-    print(f"[*] Membuka browser (headless={headless}) dan memilih merchant: '{target_name}'...")
+    print(f"[*] Membuka browser (headless={headless}) untuk akun '{active_account}' (target: '{username}'), merchant: '{target_name}', session: '{session_file.name}'...")
     try:
         session_data = browser.get_session(
-            username=username,
+            username=active_account,
             password=password,
             headless=headless,
             close_browser=True,

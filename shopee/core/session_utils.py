@@ -152,20 +152,32 @@ def resolve_shopee_session(store_metadata: dict, base_dir: Path = None) -> Path:
             for pdir in [auto_dir, root_dir, shopee_dir]:
                 src_prof = pdir / source_profile_name
                 tgt_prof = auto_dir / target_profile_name
-                if src_prof.exists() and src_prof.is_dir() and not tgt_prof.exists():
-                    try:
-                        # Buat symlink pada sistem linux bila memungkinkan
+                if src_prof.exists() and src_prof.is_dir() and src_prof.resolve() != tgt_prof.resolve():
+                    # Periksa apakah tgt_prof kosong atau tidak memiliki database sesi aktif
+                    def _has_session_storage(p: Path) -> bool:
+                        if not p.exists() or not p.is_dir():
+                            return False
+                        for sub in ["Default", f"profile_{username}", "shopee_profile"]:
+                            if (p / sub / "IndexedDB").exists() or (p / sub / "Local Storage").exists():
+                                return True
+                        return False
+
+                    if not tgt_prof.exists() or not _has_session_storage(tgt_prof):
                         try:
-                            os.symlink(str(src_prof.resolve()), str(tgt_prof))
-                            log.info(f"🔗 [SESSION] Membuat symlink profil Chrome: {tgt_prof} -> {src_prof}")
-                        except Exception:
-                            shutil.copytree(str(src_prof), str(tgt_prof), dirs_exist_ok=True)
-                            log.info(f"📋 [SESSION] Menyalin profil Chrome: {src_prof} -> {tgt_prof}")
-                    except Exception as prof_err:
-                        log.warning(f"Gagal menyinkronkan folder profil Chrome: {prof_err}")
+                            if tgt_prof.exists() or tgt_prof.is_symlink():
+                                shutil.rmtree(tgt_prof, ignore_errors=True)
+                            try:
+                                os.symlink(str(src_prof.resolve()), str(tgt_prof))
+                                log.info(f"🔗 [SESSION] Membuat symlink profil Chrome: {tgt_prof} -> {src_prof}")
+                            except Exception:
+                                shutil.copytree(str(src_prof), str(tgt_prof), dirs_exist_ok=True)
+                                log.info(f"📋 [SESSION] Menyalin profil Chrome: {src_prof} -> {tgt_prof}")
+                        except Exception as prof_err:
+                            log.warning(f"Gagal menyinkronkan folder profil Chrome: {prof_err}")
                     break
 
-        return target_session_file
+        # Kembalikan file sesi yang sebenarnya ditemukan agar Chrome langsung memuat profil owner
+        return found_session_path
 
     log.info(f"ℹ️ [SESSION] Tidak ditemukan sesi tersimpan untuk kunci {sorted(list(search_keys))}. Menggunakan default: {target_session_file}")
     return target_session_file

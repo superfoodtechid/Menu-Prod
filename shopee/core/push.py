@@ -40,12 +40,13 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
     
     session_file = resolve_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
     browser.set_session_file(session_file)
+    active_account = session_file.stem.replace("session_", "") if session_file.stem.startswith("session_") else username
     
-    print(f"[*] [PUSH] Membuka browser (headless={headless}) untuk akun '{username}', merchant: '{target_name}', session: '{session_file.name}'...")
+    print(f"[*] [PUSH] Membuka browser (headless={headless}) untuk akun '{active_account}' (target: '{username}'), merchant: '{target_name}', session: '{session_file.name}'...")
     session_data = None
     try:
         session_data = browser.get_session(
-            username=username,
+            username=active_account,
             password=password,
             headless=headless,
             close_browser=True,
@@ -58,7 +59,7 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
         print(f"[WARN] get_session with target_name '{target_name}' failed ({e}). Retrying without target_name filter...")
         try:
             session_data = browser.get_session(
-                username=username,
+                username=active_account,
                 password=password,
                 headless=headless,
                 close_browser=True,
