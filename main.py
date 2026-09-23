@@ -5177,6 +5177,7 @@ class UploadShopeeSessionRequest(BaseModel):
     shopee_tob_token: str
     shopee_tob_entity_id: Optional[str] = None
     extra_cookies: Optional[dict] = None
+    cookies_detailed: Optional[list] = None
     profile_archive_base64: Optional[str] = None
 
 @app.post("/api/shopee/upload-session")
@@ -5236,6 +5237,7 @@ def upload_shopee_session(req: UploadShopeeSessionRequest, db: Session = Depends
         "shopee_tob_entity_id": entity_id,
         "saved_at": datetime.now().isoformat(),
         "extra_cookies": req.extra_cookies or {},
+        "cookies_detailed": req.cookies_detailed or [],
         "merchant_name": merchant_name,
         "store_id": store_id
     }
