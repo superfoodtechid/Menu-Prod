@@ -4883,6 +4883,8 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
         raise HTTPException(status_code=400, detail="Hanya outlet Shopee yang didukung")
     if not outlet.account or not outlet.account.username:
         raise HTTPException(status_code=400, detail="Akun outlet tidak memiliki username/nomor HP")
+    if not outlet.account.password or outlet.account.password.strip() in ("-", "nan", "None", ""):
+        raise HTTPException(status_code=400, detail="Akun outlet tidak memiliki password di Google Sheet. Assign sesi hanya dapat dilakukan untuk akun yang memiliki password.")
 
     job_id = str(_uuid.uuid4())
     username = outlet.account.username

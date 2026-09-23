@@ -414,8 +414,16 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
                   <td className="px-4 py-3 text-xs text-zinc-500 dark:text-zinc-400">{fmt(s.last_active)}</td>
                   <td className="px-4 py-3">
                     {!s.has_session ? (
-                      <button onClick={() => openAssign(s)}
-                        className="rounded-lg border border-zinc-200 dark:border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:border-orange-300 hover:bg-orange-50 hover:text-orange-700 dark:hover:border-orange-700 dark:hover:bg-orange-950/30 dark:hover:text-orange-400 transition-colors cursor-pointer">
+                      <button
+                        disabled={!s.has_password}
+                        onClick={() => openAssign(s)}
+                        title={!s.has_password ? "Tidak dapat assign sesi: akun outlet tidak memiliki password di Google Sheet" : "Assign sesi untuk outlet ini"}
+                        className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                          !s.has_password
+                            ? "border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-800/40 text-zinc-400 dark:text-zinc-500 cursor-not-allowed opacity-60"
+                            : "border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:border-orange-300 hover:bg-orange-50 hover:text-orange-700 dark:hover:border-orange-700 dark:hover:bg-orange-950/30 dark:hover:text-orange-400 cursor-pointer"
+                        }`}
+                      >
                         Assign Sesi
                       </button>
                     ) : (
@@ -435,7 +443,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
           <div className="bg-white dark:bg-zinc-900 rounded-2xl p-6 max-w-md w-full shadow-xl border border-zinc-200 dark:border-zinc-800 space-y-4" onClick={e => e.stopPropagation()}>
 
             <div>
-              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-1">Shopee — Assign Sesi</div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-1">Shopee: Assign Sesi</div>
               <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-100">
                 {assignTarget.nama_resto_final || assignTarget.merchant_name}
               </h3>
