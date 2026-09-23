@@ -71,12 +71,16 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
     nama_pendek = store_metadata.get('brand') or store_metadata.get('nama_pendek') or store_metadata.get('nama_outlet') or target_name
     
     master_user, master_pass = get_shopee_master_credentials()
-    username = store_metadata.get("username") or master_user
-    password = store_metadata.get("password") or master_pass
-    from shopee.core.session_utils import resolve_shopee_session
-    session_file = resolve_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
+    username = master_user
+    password = master_pass
+    # Penarikan menu (PULL) selalu menggunakan akun master allvbadmin
+    session_file = AUTOMATION_DIR / "data" / f"session_{master_user}.json"
+    if not session_file.exists():
+        session_file = MENU_DIR / "data" / f"session_{master_user}.json"
+        if not session_file.exists():
+            session_file = WORKSPACE_DIR / "data" / f"session_{master_user}.json"
     browser.set_session_file(session_file)
-    active_account = session_file.stem.replace("session_", "") if session_file.stem.startswith("session_") else username
+    active_account = master_user
             
     job_id = store_metadata.get('job_id')
     def _is_cancelled():
