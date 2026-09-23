@@ -4527,16 +4527,43 @@ def perform_delete_session(
             "target": "all"
         }
 
-    outlet = None
+    matched_outlets = []
     candidate_id = (outlet_id or target or "").strip()
     candidate_sid = (store_id or target or "").strip()
+    candidate_user = (username or target or "").strip()
+
+    cache_path = BASE_DIR / "master_merchants_cache.csv"
+    phone_map = get_cached_phone_map(cache_path)
+
+    # Reverse lookup phone_map jika target/username/store_id adalah nomor HP
+    clean_target_digits = re.sub(r'[^0-9]', '', candidate_user or candidate_sid)
+    matched_store_ids = set()
+    if candidate_sid:
+        matched_store_ids.add(candidate_sid)
+    if clean_target_digits and len(clean_target_digits) >= 8:
+        for sid, p_val in phone_map.items():
+            p_digits = re.sub(r'[^0-9]', '', str(p_val))
+            if p_digits and (p_digits == clean_target_digits or p_digits.endswith(clean_target_digits[-9:]) or clean_target_digits.endswith(p_digits[-9:])):
+                matched_store_ids.add(str(sid))
 
     if db:
         try:
             if candidate_id:
-                outlet = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.id == candidate_id).first()
-            if not outlet and candidate_sid:
-                outlet = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.store_id == candidate_sid).first()
+                try:
+                    import uuid as _uuid
+                    _uuid.UUID(candidate_id)
+                    for o in db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.id == candidate_id).all():
+                        matched_outlets.append(o)
+                except ValueError:
+                    pass
+            if matched_store_ids:
+                for o in db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.store_id.in_(list(matched_store_ids))).all():
+                    if o not in matched_outlets:
+                        matched_outlets.append(o)
+            if candidate_user:
+                for o in db.query(Outlet).join(Account).filter(Account.username == candidate_user).options(joinedload(Outlet.account)).all():
+                    if o not in matched_outlets:
+                        matched_outlets.append(o)
         except Exception as e:
             logger.warning(f"Error querying outlet during session deletion: {e}")
 
@@ -4588,22 +4615,23 @@ def perform_delete_session(
     if outlet_id:
         add_key(outlet_id)
 
-    if outlet:
-        merchant_name = outlet.merchant_name or outlet.nama_resto_final or outlet.nama_outlet or ""
+    for o in matched_outlets:
+        merchant_name = o.merchant_name or o.nama_resto_final or o.nama_outlet or ""
         profile_name = re.sub(r'[^a-zA-Z0-9_]', '_', merchant_name)
         profile_name = re.sub(r'_+', '_', profile_name).strip('_').lower()
         if profile_name:
             add_key(profile_name)
-        if outlet.store_id:
-            add_key(outlet.store_id)
-        if outlet.account and outlet.account.username:
-            add_key(outlet.account.username)
+        if o.store_id:
+            add_key(o.store_id)
+            if str(o.store_id) in phone_map:
+                add_key(phone_map[str(o.store_id)])
+        if o.account and o.account.username:
+            add_key(o.account.username)
 
-    cache_path = BASE_DIR / "master_merchants_cache.csv"
-    phone_map = get_cached_phone_map(cache_path)
-    for sid in [store_id, candidate_sid, getattr(outlet, "store_id", None)]:
-        if sid and str(sid) in phone_map:
-            add_key(phone_map[str(sid)])
+    for sid in matched_store_ids:
+        add_key(sid)
+        if sid in phone_map:
+            add_key(phone_map[sid])
 
     candidate_dirs = [
         BASE_DIR / "shopee" / "data",
@@ -4646,6 +4674,20 @@ def perform_delete_session(
                     if k == "allvbadmin" and fname == "session.json":
                         matched = True
                         break
+
+            # Jika belum cocok tapi berkas sesi bertipe JSON, periksa apakah isinya memuat username/phone yang cocok
+            if not matched and fname.startswith("session_") and fname.endswith(".json") and fname != "session_allvbadmin.json":
+                try:
+                    content = json.loads(f.read_text(encoding="utf-8"))
+                    f_user = str(content.get("username", "")).strip().lower()
+                    f_phone = str(content.get("phone", "")).strip()
+                    f_clean_phone = re.sub(r'[^0-9]', '', f_phone)
+                    if f_user and f_user in search_keys:
+                        matched = True
+                    elif f_clean_phone and any(re.sub(r'[^0-9]', '', str(k)) == f_clean_phone for k in search_keys if len(re.sub(r'[^0-9]', '', str(k))) >= 8):
+                        matched = True
+                except Exception:
+                    pass
 
             if matched:
                 try:
