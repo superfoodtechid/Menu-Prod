@@ -704,7 +704,7 @@ def _trigger_and_extract_tokens(driver) -> tuple:
     return extract_tokens_from_driver(driver, allow_file_fallback=False)
 
 
-def get_otp_code(username: str, phone: str = "", timeout: int = 0, error_msg: str = "", driver=None) -> str:
+def get_otp_code(username: str, phone: str = "", timeout: int = 3600, error_msg: str = "", driver=None) -> str:
     script_dir = Path(__file__).resolve().parent.parent
     data_dir = script_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -728,7 +728,7 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 0, error_msg: st
         try:
             otp_file_alt.write_text(json.dumps(request_data, indent=2))
         except Exception: pass
-        timeout_desc = f"(timeout {timeout}s)" if timeout and timeout > 0 else "(tanpa batas waktu)"
+        timeout_desc = f"(timeout {timeout}s)" if timeout and timeout > 0 else "(timeout default 1 jam)"
         log.info(f"🔑 [OTP] File request OTP dibuat untuk '{username}': {otp_file.name} (error='{error_msg}'). Menunggu input OTP via Web UI / API {timeout_desc}...")
         print(f"DISCORD_OTP_REQUEST: {json.dumps(request_data)}", flush=True)
     except Exception as e:
@@ -736,7 +736,7 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 0, error_msg: st
         return ""
     
     if not timeout or timeout <= 0:
-        timeout = 900  # Default timeout 15 menit agar tidak terjadi lock abadi
+        timeout = 3600  # Default timeout 1 jam (3600 detik) agar tidak terjadi lock abadi
 
     start_wait = time.time()
     whatsapp_triggered = False

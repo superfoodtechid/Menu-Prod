@@ -21,7 +21,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [smsResending, setSmsResending] = useState(false);
   const [waRequested, setWaRequested] = useState(false);
   const [waResending, setWaResending] = useState(false);
-  const [otpTotalTime, setOtpTotalTime] = useState(900); // 15 minutes overall timeout
+  const [otpTotalTime, setOtpTotalTime] = useState(3600); // 1 hour overall timeout
   const [resendMsg, setResendMsg] = useState("");
   const pollRef = useRef(null);
   const otpTimerRef = useRef(null);
@@ -53,8 +53,12 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const formatTimer = sec => {
-    const m = Math.floor(sec / 60);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
+    if (h > 0) {
+      return `${h}:${m < 10 ? "0" : ""}${m}:${s < 10 ? "0" : ""}${s}`;
+    }
     return `${m}:${s < 10 ? "0" : ""}${s}`;
   };
 
@@ -73,7 +77,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     setSmsResending(false);
     setWaRequested(false);
     setWaResending(false);
-    setOtpTotalTime(900);
+    setOtpTotalTime(3600);
     setResendMsg("");
     clearInterval(otpTimerRef.current);
   };
@@ -103,7 +107,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     setSmsResending(false);
     setWaRequested(false);
     setWaResending(false);
-    setOtpTotalTime(900);
+    setOtpTotalTime(3600);
     setResendMsg("");
     clearInterval(otpTimerRef.current);
 
@@ -133,7 +137,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     if (assignStatus === "OTP") {
       setCooldown(60);
       setCooldownChannel(otpChannel || "sms");
-      setOtpTotalTime(900);
+      setOtpTotalTime(3600);
       setResendMsg("");
       clearInterval(otpTimerRef.current);
       otpTimerRef.current = setInterval(() => {
@@ -143,7 +147,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
             clearInterval(otpTimerRef.current);
             clearInterval(pollRef.current);
             setAssignStatus("FAILED");
-            setAssignError("Waktu verifikasi OTP habis (Timeout 15 menit).");
+            setAssignError("Waktu verifikasi OTP habis (Timeout 1 jam).");
             if (assignTarget) {
               fetch(`${API_BASE_URL}/api/shopee/cancel-otp`, {
                 method: "POST",
