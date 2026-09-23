@@ -85,28 +85,32 @@ def resolve_shopee_session(store_metadata: dict, base_dir: Path = None) -> Path:
         phone = p_map.get(store_id, "")
 
     search_keys = set()
-    if username:
-        search_keys.add(username)
-        search_keys.add(username.lower())
-        u_clean = re.sub(r'[^a-zA-Z0-9_]', '_', username).strip('_').lower()
-        if u_clean:
-            search_keys.add(u_clean)
+    if username and username.lower() == "allvbadmin":
+        search_keys.add("allvbadmin")
+        search_keys.add("session")
+    else:
+        if username:
+            search_keys.add(username)
+            search_keys.add(username.lower())
+            u_clean = re.sub(r'[^a-zA-Z0-9_]', '_', username).strip('_').lower()
+            if u_clean:
+                search_keys.add(u_clean)
 
-    if store_id and store_id != "-" and store_id.lower() != "nan":
-        search_keys.add(store_id)
+        if store_id and store_id != "-" and store_id.lower() != "nan":
+            search_keys.add(store_id)
 
-    for p_candidate in [phone, username]:
-        can_p = to_canonical_phone(p_candidate)
-        if can_p:
-            search_keys.add(can_p)
-            if can_p.startswith("62"):
-                search_keys.add("0" + can_p[2:])
-                search_keys.add(can_p[2:])
+        for p_candidate in [phone, username]:
+            can_p = to_canonical_phone(p_candidate)
+            if can_p:
+                search_keys.add(can_p)
+                if can_p.startswith("62"):
+                    search_keys.add("0" + can_p[2:])
+                    search_keys.add(can_p[2:])
 
-    if m_name and m_name != "-" and m_name.lower() != "nan":
-        m_clean = re.sub(r'[^a-zA-Z0-9_]', '_', m_name).strip('_').lower()
-        if m_clean:
-            search_keys.add(m_clean)
+        if m_name and m_name != "-" and m_name.lower() != "nan":
+            m_clean = re.sub(r'[^a-zA-Z0-9_]', '_', m_name).strip('_').lower()
+            if m_clean:
+                search_keys.add(m_clean)
 
     # Direktori pencarian sesuai prioritas
     search_dirs = [auto_dir, shopee_dir, root_dir]
