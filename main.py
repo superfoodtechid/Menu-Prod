@@ -4858,9 +4858,21 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
         from core import browser
 
         lock = PLATFORM_LOCKS.get("shopee")
+        lock_acquired = False
         if lock:
             logger.info(f"🔒 Assign Sesi ({username}) waiting for Shopee job lock...")
-            lock.acquire()
+            for _ in range(60):
+                if lock.acquire(timeout=0.5):
+                    lock_acquired = True
+                    break
+            if not lock_acquired:
+                logger.warning(f"⚠️ Assign Sesi ({username}) lock timeout. Melepaskan lock lama yang menggantung...")
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+                lock.acquire(timeout=2)
+                lock_acquired = True
             logger.info(f"🔓 Assign Sesi ({username}) acquired Shopee job lock. Starting login...")
         try:
             session_file = auto_dir / "data" / f"session_{username}.json"
@@ -4894,11 +4906,12 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
         except Exception as e:
             _assign_jobs[job_id].update({"status": "FAILED", "error": str(e)})
         finally:
-            if lock and lock.locked():
+            if lock and lock_acquired:
                 try:
-                    lock.release()
+                    if lock.locked():
+                        lock.release()
                     logger.info(f"🔓 Assign Sesi ({username}) released Shopee job lock.")
-                except RuntimeError:
+                except Exception:
                     pass
 
     background_tasks.add_task(_run, job_id, username, password, profile_name)
@@ -4947,45 +4960,96 @@ class ShopeeOTPResendRequest(BaseModel):
     username: str
     channel: str = "sms"  # "sms" | "whatsapp"
 
+def _get_active_otp_candidate_usernames(raw_username: str, db: Session = None) -> set:
+    candidates = set()
+    raw_u = str(raw_username or "").strip()
+    if raw_u:
+        candidates.add(raw_u)
+
+    # 1. Tambahkan dari _assign_jobs yang sedang RUNNING
+    for j_id, j_data in _assign_jobs.items():
+        if j_data.get("status") == "RUNNING" and j_data.get("username"):
+            candidates.add(str(j_data["username"]).strip())
+
+    # 2. Tambahkan kandidat dari file otp_request_*.json yang saat ini statusnya WAITING_OTP
+    shopee_dirs = [
+        BASE_DIR / "src" / "shopee-omzet-automation" / "data",
+        BASE_DIR / "shopee" / "data",
+        BASE_DIR / "data"
+    ]
+    for d in shopee_dirs:
+        if d.exists():
+            for f in d.glob("otp_request_*.json"):
+                try:
+                    parsed = json.loads(f.read_text())
+                    if parsed.get("status") == "WAITING_OTP":
+                        u = f.stem.replace("otp_request_", "").strip()
+                        if u:
+                            candidates.add(u)
+                except Exception:
+                    pass
+
+    # 3. Cari pencocokan outlet jika raw_username memuat nomor HP atau ID
+    if db and raw_u:
+        raw_digits = re.sub(r'[^0-9]', '', raw_u)
+        if len(raw_digits) >= 8:
+            matched_outlets = db.query(Outlet).options(joinedload(Outlet.account)).filter(Outlet.platform == "shopee").all()
+            for o in matched_outlets:
+                cand_phones = [o.account.username if o.account else "", getattr(o, "phone", "") or "", o.store_id or ""]
+                for cand in cand_phones:
+                    c_digits = re.sub(r'[^0-9]', '', str(cand or ""))
+                    if c_digits and (c_digits.endswith(raw_digits[-9:]) or raw_digits.endswith(c_digits[-9:])):
+                        if o.account and o.account.username:
+                            candidates.add(o.account.username.strip())
+                        if o.store_id:
+                            candidates.add(str(o.store_id).strip())
+                        break
+    return candidates
+
 @app.post("/api/shopee/cancel-otp")
-def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
+def cancel_shopee_otp(req: ShopeeOTPChannelRequest, db: Session = Depends(get_db)):
     """Cancels OTP waiting state for the given username and cleans up request files."""
     username = req.username.strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
+    candidates = _get_active_otp_candidate_usernames(username, db=db)
     shopee_data_dirs = [
         BASE_DIR / "data",
         BASE_DIR / "src" / "shopee-omzet-automation" / "data",
         BASE_DIR / "shopee" / "data"
     ]
-    for d in shopee_data_dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        fpath = d / f"otp_request_{username}.json"
-        request_data = {
-            "status": "CANCELLED",
-            "username": username,
-            "error_msg": "user membatalkan otp",
-            "cancelled_at": datetime.now().isoformat()
-        }
-        try:
-            fpath.write_text(json.dumps(request_data, indent=2))
-            logger.info(f"🛑 [OTP] Updated OTP status to CANCELLED for {username} in {fpath}")
-        except Exception as e:
-            logger.error(f"Error writing CANCELLED to OTP file {fpath}: {e}")
+    for u in candidates:
+        for d in shopee_data_dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            fpath = d / f"otp_request_{u}.json"
+            request_data = {
+                "status": "CANCELLED",
+                "username": u,
+                "error_msg": "user membatalkan otp",
+                "cancelled_at": datetime.now().isoformat()
+            }
+            try:
+                fpath.write_text(json.dumps(request_data, indent=2))
+                logger.info(f"🛑 [OTP] Updated OTP status to CANCELLED for {u} in {fpath}")
+            except Exception as e:
+                logger.error(f"Error writing CANCELLED to OTP file {fpath}: {e}")
+
+    # Mark active _assign_jobs as FAILED / CANCELLED
+    for j_id, j_data in _assign_jobs.items():
+        if j_data.get("status") == "RUNNING" and (j_data.get("username") in candidates or username in candidates):
+            j_data.update({"status": "FAILED", "error": "user membatalkan otp"})
 
     try:
-        from menu_core.database import SessionLocal
-        db = SessionLocal()
         running_jobs = db.query(Job).filter(
             Job.status.in_(["RUNNING", "PENDING"]),
             Job.platform == "shopee"
         ).all()
         for j in running_jobs:
             matched = False
-            if j.outlet and j.outlet.account and (j.outlet.account.username or "").strip().lower() == username.lower():
+            if j.outlet and j.outlet.account and (j.outlet.account.username or "").strip().lower() in [c.lower() for c in candidates]:
                 matched = True
-            elif username.lower() in str(getattr(j, "payload", "") or "").lower():
+            elif any(c.lower() in str(getattr(j, "payload", "") or "").lower() for c in candidates):
                 matched = True
             if matched:
                 from menu_core.job_control import cancel_job
@@ -4996,7 +5060,6 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
                 j.completed_at = datetime.utcnow()
                 logger.info(f"🛑 [OTP] Direct cancel DB update for Job {j.id}")
         db.commit()
-        db.close()
     except Exception as dbe:
         logger.error(f"Error updating DB for cancelled OTP: {dbe}")
 
@@ -5012,7 +5075,7 @@ def cancel_shopee_otp(req: ShopeeOTPChannelRequest):
     return {"status": "SUCCESS", "message": f"OTP request cancelled for {username}"}
 
 @app.post("/api/shopee/select-otp-channel")
-def select_shopee_otp_channel(req: ShopeeOTPChannelRequest):
+def select_shopee_otp_channel(req: ShopeeOTPChannelRequest, db: Session = Depends(get_db)):
     """Saves user's selected OTP channel (e.g. WhatsApp) to trigger channel switching in browser automation."""
     import uuid as _uuid
     username = req.username.strip()
@@ -5020,38 +5083,41 @@ def select_shopee_otp_channel(req: ShopeeOTPChannelRequest):
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
+    candidates = _get_active_otp_candidate_usernames(username, db=db)
     action_id = str(_uuid.uuid4())[:8]
     shopee_data_dirs = [
         BASE_DIR / "src" / "shopee-omzet-automation" / "data",
-        BASE_DIR / "shopee" / "data"
+        BASE_DIR / "shopee" / "data",
+        BASE_DIR / "data"
     ]
-    for d in shopee_data_dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        fpath = d / f"otp_request_{username}.json"
-        data = {}
-        if fpath.exists():
+    for u in candidates:
+        for d in shopee_data_dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            fpath = d / f"otp_request_{u}.json"
+            data = {}
+            if fpath.exists():
+                try:
+                    data = json.loads(fpath.read_text())
+                except Exception:
+                    pass
+            data.update({
+                "status": "WAITING_OTP",
+                "username": u,
+                "requested_channel": channel,
+                "action": "resend",
+                "action_channel": channel,
+                "action_id": action_id,
+                "channel_requested_at": datetime.now().isoformat()
+            })
             try:
-                data = json.loads(fpath.read_text())
-            except Exception:
-                pass
-        data.update({
-            "status": "WAITING_OTP",
-            "username": username,
-            "requested_channel": channel,
-            "action": "resend",
-            "action_channel": channel,
-            "action_id": action_id,
-            "channel_requested_at": datetime.now().isoformat()
-        })
-        try:
-            fpath.write_text(json.dumps(data, indent=2))
-        except Exception as e:
-            logger.error(f"Error updating OTP channel in {fpath}: {e}")
+                fpath.write_text(json.dumps(data, indent=2))
+            except Exception as e:
+                logger.error(f"Error updating OTP channel in {fpath}: {e}")
 
     return {"status": "SUCCESS", "channel": channel, "message": f"Channel {channel.upper()} selected for {username}"}
 
 @app.post("/api/shopee/resend-otp")
-def resend_shopee_otp(req: ShopeeOTPResendRequest):
+def resend_shopee_otp(req: ShopeeOTPResendRequest, db: Session = Depends(get_db)):
     """Signals browser automation to resend OTP via selected channel (sms or whatsapp)."""
     import uuid as _uuid
     username = req.username.strip()
@@ -5061,35 +5127,37 @@ def resend_shopee_otp(req: ShopeeOTPResendRequest):
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
+    candidates = _get_active_otp_candidate_usernames(username, db=db)
     action_id = str(_uuid.uuid4())[:8]
     shopee_data_dirs = [
         BASE_DIR / "data",
         BASE_DIR / "src" / "shopee-omzet-automation" / "data",
         BASE_DIR / "shopee" / "data"
     ]
-    for d in shopee_data_dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        fpath = d / f"otp_request_{username}.json"
-        data = {}
-        if fpath.exists():
+    for u in candidates:
+        for d in shopee_data_dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            fpath = d / f"otp_request_{u}.json"
+            data = {}
+            if fpath.exists():
+                try:
+                    data = json.loads(fpath.read_text())
+                except Exception:
+                    pass
+            data.update({
+                "status": "WAITING_OTP",
+                "username": u,
+                "action": "resend",
+                "action_channel": channel,
+                "requested_channel": channel,
+                "action_id": action_id,
+                "action_requested_at": datetime.now().isoformat(),
+                "action_status": "PENDING"
+            })
             try:
-                data = json.loads(fpath.read_text())
-            except Exception:
-                pass
-        data.update({
-            "status": "WAITING_OTP",
-            "username": username,
-            "action": "resend",
-            "action_channel": channel,
-            "requested_channel": channel,
-            "action_id": action_id,
-            "action_requested_at": datetime.now().isoformat(),
-            "action_status": "PENDING"
-        })
-        try:
-            fpath.write_text(json.dumps(data, indent=2))
-        except Exception as e:
-            logger.error(f"Error updating OTP resend in {fpath}: {e}")
+                fpath.write_text(json.dumps(data, indent=2))
+            except Exception as e:
+                logger.error(f"Error updating OTP resend in {fpath}: {e}")
 
     return {
         "status": "SUCCESS",
@@ -5137,32 +5205,41 @@ def get_shopee_otp_status(username: Optional[str] = None):
     return {"waiting": False}
 
 @app.post("/api/shopee/submit-otp")
-def submit_shopee_otp(req: ShopeeOTPRequest):
-    """Submits OTP code to Shopee login engine."""
+def submit_shopee_otp(req: ShopeeOTPRequest, db: Session = Depends(get_db)):
+    """Submits OTP code to Shopee login engine across all active candidate keys."""
     username = req.username.strip()
     code = req.code.strip()
     channel = (req.channel or "sms").strip().lower()
     if not username or not code:
         raise HTTPException(status_code=400, detail="Username and OTP code are required")
 
+    candidates = _get_active_otp_candidate_usernames(username, db=db)
     shopee_data_dirs = [
         BASE_DIR / "src" / "shopee-omzet-automation" / "data",
-        BASE_DIR / "shopee" / "data"
+        BASE_DIR / "shopee" / "data",
+        BASE_DIR / "data"
     ]
     
-    for d in shopee_data_dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        fpath = d / f"otp_request_{username}.json"
-        request_data = {
-            "status": "RECEIVED",
-            "code": code,
-            "username": username,
-            "channel": channel,
-            "received_at": datetime.now().isoformat()
-        }
-        with open(fpath, "w", encoding="utf-8") as f:
-            json.dump(request_data, f, indent=2)
+    written_count = 0
+    for u in candidates:
+        for d in shopee_data_dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            fpath = d / f"otp_request_{u}.json"
+            request_data = {
+                "status": "RECEIVED",
+                "code": code,
+                "username": u,
+                "channel": channel,
+                "received_at": datetime.now().isoformat()
+            }
+            try:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    json.dump(request_data, f, indent=2)
+                written_count += 1
+            except Exception:
+                pass
             
+    logger.info(f"✅ [OTP] Kode OTP {code} berhasil disubmit ke {written_count} file untuk kandidat: {list(candidates)}")
     return {"status": "SUCCESS", "message": f"OTP {code} ({channel.upper()}) berhasil dikirim untuk user {username}."}
 
 
