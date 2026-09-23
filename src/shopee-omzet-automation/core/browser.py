@@ -1583,13 +1583,26 @@ def _init_driver(headless: bool = True):
 
         options.add_argument(f"--user-data-dir={profile_dir.resolve()}")
         sub_profile = f"profile_{account_name}"
-        if not (profile_dir / sub_profile).exists():
-            for cand_sub in ["shopee_profile", "Default"]:
-                if (profile_dir / cand_sub).exists():
-                    sub_profile = cand_sub
+        candidate_subs = [sub_profile, "Default", "shopee_profile"]
+        if profile_dir.is_dir():
+            for p in profile_dir.iterdir():
+                if p.is_dir() and p.name not in candidate_subs:
+                    candidate_subs.append(p.name)
+
+        chosen_sub = sub_profile
+        for cand in candidate_subs:
+            cand_p = profile_dir / cand
+            if cand_p.is_dir():
+                idb = cand_p / "IndexedDB"
+                ls = cand_p / "Local Storage"
+                if (idb.is_dir() and any(idb.iterdir())) or (ls.is_dir() and any(ls.iterdir())):
+                    chosen_sub = cand
                     break
-        options.add_argument(f"--profile-directory={sub_profile}")
-        log.info(f"🌐 [BROWSER] User data dir: {profile_dir.resolve()} (profile: {sub_profile})")
+            elif (profile_dir / cand).exists():
+                chosen_sub = cand
+
+        options.add_argument(f"--profile-directory={chosen_sub}")
+        log.info(f"🌐 [BROWSER] User data dir: {profile_dir.resolve()} (profile: {chosen_sub})")
 
     # Delete SingletonLock if it exists to avoid SessionNotCreatedException on Linux
     singleton_lock = profile_dir / "SingletonLock"
@@ -2565,13 +2578,74 @@ def return_to_selector(driver) -> bool:
             pass
         return True
 
+def _select_merchant_onboarding(driver, target_name: str = "") -> bool:
+    """
+    Mendeteksi dan mengklik kartu merchant pada halaman 'Pilih Merchant' (/account/onboarding) secara dinamis.
+    """
+    try:
+        res = driver.execute_script("""
+            var targetName = (arguments[0] || "").toLowerCase().trim();
+            var selectors = [
+                '.listItem',
+                '.merchant-item',
+                '[class*="listItem"]',
+                '[class*="merchantItem"]',
+                '[class*="merchant-item"]',
+                '.merchantInfo',
+                '.ant-list-item',
+                'li[class*="item"]'
+            ];
+            var items = Array.from(document.querySelectorAll(selectors.join(',')));
+            if (items.length === 0) {
+                var allDivs = Array.from(document.querySelectorAll('div, li, a'));
+                for (var el of allDivs) {
+                    var txt = (el.innerText || el.textContent || "").trim();
+                    if (txt.includes('Pemilik') || txt.includes('Pengelola') || txt.includes('Staf') || txt.includes('Admin') || txt.includes('Owner')) {
+                        var rect = el.getBoundingClientRect();
+                        if (rect.width > 120 && rect.height >= 30 && rect.height <= 250 && el.children.length > 0) {
+                            items.push(el);
+                        }
+                    }
+                }
+            }
+            var uniqueItems = items.filter(function(item, idx) {
+                return items.indexOf(item) === idx;
+            });
+            var chosen = null;
+            if (targetName) {
+                for (var i = 0; i < uniqueItems.length; i++) {
+                    var t = (uniqueItems[i].innerText || uniqueItems[i].textContent || "").toLowerCase();
+                    if (t.includes(targetName)) {
+                        chosen = uniqueItems[i];
+                        break;
+                    }
+                }
+            }
+            if (!chosen && uniqueItems.length > 0) {
+                chosen = uniqueItems[0];
+            }
+            if (chosen) {
+                var clickTarget = chosen.closest('[role="button"], li, div') || chosen;
+                clickTarget.scrollIntoView({block: 'center'});
+                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtType) {
+                    clickTarget.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof clickTarget.click === 'function') clickTarget.click();
+                return true;
+            }
+            return false;
+        """, target_name or "")
+        return bool(res)
+    except Exception as e:
+        log.warning(f"⚠️ Error saat memilih merchant onboarding: {e}")
+        return False
+
 def _restore_saved_session(driver, saved: dict, target_username: str = None) -> bool:
     """
     Memulihkan sesi multi-domain Shopee dari file session yang diekspor:
-    1. Domain SSO (partner.business.accounts.shopee.co.id): Injeksi cookies SPC_SI, ds, _sapid, csrftoken, dll.
-    2. Domain Dashboard (partner.shopee.co.id): Injeksi shopee_tob_token, shopee_tob_entity_id, dan extra_cookies.
-    3. Navigasi ke Dashboard: Jika muncul layar konfirmasi 'Lanjutkan dengan Shopee' (SSO consent), klik tombol 'Lanjutkan' otomatis.
-    4. Tangani Onboarding / Merchant invitation / Merchant selector jika muncul.
+    1. CDP Network Injection: Injeksi cookie ke domain root .shopee.co.id dan subdomain partner.shopee.co.id.
+    2. Local Storage & Session Storage: Sinkronisasi token TOB ke penyimpanan browser di partner.shopee.co.id.
+    3. Navigasi & SSO Consent: Otomatis klik 'Lanjutkan dengan Shopee' dan seleksi merchant jika muncul.
     Mengembalikan True jika browser berhasil berada di lingkungan dashboard/merchant portal, False jika gagal.
     """
     if not saved or not isinstance(saved, dict):
@@ -2579,75 +2653,124 @@ def _restore_saved_session(driver, saved: dict, target_username: str = None) -> 
 
     log.info("🔍 [SESSION-RESTORE] Memulai pemulihan sesi multi-domain Shopee...")
     extra_cookies = saved.get("extra_cookies", {}) or {}
+    cookies_detailed = saved.get("cookies_detailed", []) or []
     tob_token = saved.get("shopee_tob_token")
     entity_id = saved.get("shopee_tob_entity_id")
+    target_merchant = saved.get("merchant_name") or target_username or ""
 
-    # ── Tahap 1: Injeksi SSO Domain Cookies (partner.business.accounts.shopee.co.id) ──
-    sso_url = "https://partner.business.accounts.shopee.co.id/authenticate/login/"
+    # ── Tahap 1: Injeksi Cookies via Chrome DevTools Protocol (CDP) ──
     try:
-        log.info("🌐 [SESSION-RESTORE] Mengunjungi domain SSO Shopee untuk injeksi cookie autentikasi...")
-        driver.get(sso_url)
-        time.sleep(2)
-        sso_injected_count = 0
-        for name, value in extra_cookies.items():
-            if not name or not value:
-                continue
-            try:
-                driver.add_cookie({"name": name, "value": str(value), "path": "/"})
-                sso_injected_count += 1
-            except Exception:
-                pass
-        log.info(f"  ✅ [SESSION-RESTORE] Berhasil menginjeksi {sso_injected_count} cookie ke domain SSO.")
-    except Exception as sso_err:
-        log.warning(f"  ⚠️ [SESSION-RESTORE] Gagal menginjeksi cookie ke domain SSO: {sso_err}")
+        try:
+            driver.execute_cdp_cmd("Network.enable", {})
+        except Exception:
+            pass
 
-    # ── Tahap 2: Injeksi Merchant Partner Domain Cookies (partner.shopee.co.id) ──
+        cdp_injected_count = 0
+
+        # A. Injeksi dari cookies_detailed jika tersedia
+        if cookies_detailed and isinstance(cookies_detailed, list):
+            log.info(f"🌐 [SESSION-RESTORE] Menyuntikkan {len(cookies_detailed)} cookie terperinci via CDP...")
+            for c in cookies_detailed:
+                if not c or not isinstance(c, dict) or not c.get("name") or not c.get("value"):
+                    continue
+                try:
+                    c_domain = c.get("domain") or ".shopee.co.id"
+                    payload = {
+                        "name": str(c["name"]),
+                        "value": str(c["value"]),
+                        "domain": c_domain,
+                        "path": c.get("path") or "/",
+                        "secure": bool(c.get("secure", True)),
+                    }
+                    if c.get("httpOnly"):
+                        payload["httpOnly"] = True
+                    if c.get("sameSite"):
+                        payload["sameSite"] = c["sameSite"]
+                    driver.execute_cdp_cmd("Network.setCookie", payload)
+                    cdp_injected_count += 1
+                except Exception:
+                    pass
+
+        # B. Injeksi dari extra_cookies (multi-domain mapping)
+        if extra_cookies and isinstance(extra_cookies, dict):
+            log.info(f"🌐 [SESSION-RESTORE] Menyuntikkan {len(extra_cookies)} cookie ke domain .shopee.co.id dan partner...")
+            for name, value in extra_cookies.items():
+                if not name or not value:
+                    continue
+                str_val = str(value)
+                is_merchant_cookie = name in [
+                    "shopee_tob_token", "shopee_tob_entity_id", "shopee_foody_mid",
+                    "x-merchant-id", "spc_merchant_id", "spc_ec", "SPC_EC",
+                    "__shopee_partner_website_x_token_live"
+                ]
+                is_sso_cookie = name in [
+                    "SPC_SI", "SPC_F", "SPC_SEC_SI", "SPC_R_T_ID", "SPC_R_T_IV",
+                    "SPC_T_ID", "SPC_T_IV", "SPC_ST", "SPC_U", "_sapid", "ds", "csrftoken"
+                ]
+
+                # Injeksi ke root domain .shopee.co.id
+                try:
+                    driver.execute_cdp_cmd("Network.setCookie", {
+                        "name": name,
+                        "value": str_val,
+                        "domain": ".shopee.co.id",
+                        "path": "/",
+                        "secure": True,
+                    })
+                    cdp_injected_count += 1
+                except Exception:
+                    pass
+
+                # Injeksi ke partner.shopee.co.id untuk cookie merchant
+                if is_merchant_cookie:
+                    try:
+                        driver.execute_cdp_cmd("Network.setCookie", {
+                            "name": name,
+                            "value": str_val,
+                            "domain": "partner.shopee.co.id",
+                            "path": "/",
+                            "secure": True,
+                        })
+                    except Exception:
+                        pass
+
+                # Injeksi ke partner.business.accounts.shopee.co.id untuk cookie SSO
+                if is_sso_cookie:
+                    try:
+                        driver.execute_cdp_cmd("Network.setCookie", {
+                            "name": name,
+                            "value": str_val,
+                            "domain": "partner.business.accounts.shopee.co.id",
+                            "path": "/",
+                            "secure": True,
+                        })
+                    except Exception:
+                        pass
+
+        log.info(f"  ✅ [SESSION-RESTORE] Berhasil menyuntikkan {cdp_injected_count} cookie via CDP.")
+    except Exception as cdp_err:
+        log.warning(f"  ⚠️ [SESSION-RESTORE] Gagal menggunakan CDP untuk setCookie: {cdp_err}")
+
+    # ── Tahap 2: Injeksi Storage di partner.shopee.co.id ──
     try:
-        log.info("🌐 [SESSION-RESTORE] Mengunjungi domain partner.shopee.co.id...")
         driver.get("https://partner.shopee.co.id/login")
         time.sleep(2)
-        partner_injected_count = 0
         if tob_token:
-            try:
-                driver.add_cookie({"name": "shopee_tob_token", "value": str(tob_token), "path": "/"})
-                partner_injected_count += 1
-            except Exception:
-                pass
-        if entity_id:
-            try:
-                driver.add_cookie({"name": "shopee_tob_entity_id", "value": str(entity_id), "path": "/"})
-                partner_injected_count += 1
-            except Exception:
-                pass
-        for name, value in extra_cookies.items():
-            if not name or not value or name in ["shopee_tob_token", "shopee_tob_entity_id"]:
-                continue
-            try:
-                driver.add_cookie({"name": name, "value": str(value), "path": "/"})
-                partner_injected_count += 1
-            except Exception:
-                pass
-
-        # Injeksi juga ke localStorage / sessionStorage untuk token JWT / TOB
-        if tob_token:
-            try:
-                driver.execute_script("""
-                    try {
-                        localStorage.setItem('shopee_tob_token', arguments[0]);
-                        sessionStorage.setItem('shopee_tob_token', arguments[0]);
-                        if (arguments[1]) {
-                            localStorage.setItem('shopee_tob_entity_id', arguments[1]);
-                            sessionStorage.setItem('shopee_tob_entity_id', arguments[1]);
-                        }
-                    } catch(e) {}
-                """, str(tob_token), str(entity_id or ""))
-            except Exception:
-                pass
-        log.info(f"  ✅ [SESSION-RESTORE] Berhasil menginjeksi {partner_injected_count} cookie ke domain Partner.")
+            driver.execute_script("""
+                try {
+                    localStorage.setItem('shopee_tob_token', arguments[0]);
+                    sessionStorage.setItem('shopee_tob_token', arguments[0]);
+                    if (arguments[1]) {
+                        localStorage.setItem('shopee_tob_entity_id', arguments[1]);
+                        sessionStorage.setItem('shopee_tob_entity_id', arguments[1]);
+                    }
+                } catch(e) {}
+            """, str(tob_token), str(entity_id or ""))
+            log.info("  ✅ [SESSION-RESTORE] Token TOB berhasil disinkronkan ke Web Storage.")
     except Exception as part_err:
-        log.warning(f"  ⚠️ [SESSION-RESTORE] Gagal menginjeksi cookie ke domain Partner: {part_err}")
+        log.warning(f"  ⚠️ [SESSION-RESTORE] Sinkronisasi storage partner gagal: {part_err}")
 
-    # ── Tahap 3: Navigasi ke Dashboard & Handle SSO Consent ("Lanjutkan dengan Shopee") ──
+    # ── Tahap 3: Navigasi ke Dashboard & Handle SSO Consent / Onboarding ──
     try:
         log.info("🌐 [SESSION-RESTORE] Membuka Dashboard Shopee Partner...")
         driver.get(PARTNER_DASHBOARD)
@@ -2666,6 +2789,12 @@ def _restore_saved_session(driver, saved: dict, target_username: str = None) -> 
                 log.info("  📍 [SESSION-RESTORE] Berhasil masuk ke halaman pemilihan/undangan merchant.")
                 if _handle_onboarding_invitation(driver):
                     time.sleep(3)
+                if _select_merchant_onboarding(driver, target_name=target_merchant):
+                    log.info("  👉 [SESSION-RESTORE] Kartu merchant berhasil diklik.")
+                    time.sleep(3)
+                if "/food/dashboard" in driver.current_url.lower():
+                    log.info("  ✅ [SESSION-RESTORE] Berhasil masuk ke Dashboard setelah memilih merchant.")
+                    return True
                 return True
 
             # Kasus C: Layar SSO Consent ("Lanjutkan dengan Shopee")
