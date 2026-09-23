@@ -248,8 +248,8 @@ def _wait_for_otp_code(username: str, timeout: int = OTP_WAIT_TIMEOUT) -> str | 
                     otp_file.unlink(missing_ok=True)
                     log.info(f"✅ [OTP] Kode OTP diterima: {code}")
                     return code
-        except RuntimeError as re:
-            raise re
+        except RuntimeError as rt_err:
+            raise rt_err
         except Exception as e:
             log.debug(f"  OTP file read error: {e}")
         time.sleep(2)
