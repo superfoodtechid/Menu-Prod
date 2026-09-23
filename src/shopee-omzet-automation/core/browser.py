@@ -826,8 +826,8 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 3600, error_msg:
                     for p in cand_files:
                         p.unlink(missing_ok=True)
                     return otp_code
-            except RuntimeError as re:
-                raise re
+            except RuntimeError as rt_err:
+                raise rt_err
             except Exception as e:
                 log.error(f"Error membaca file OTP: {e}")
         time.sleep(1)
@@ -2056,21 +2056,21 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                             continue
 
                         log.warning(f"  ⚠️ Setelah verifikasi OTP, URL masih di: {driver.current_url}")
-                    except RuntimeError as re:
-                        if "user membatalkan otp" in str(re).lower():
+                    except RuntimeError as rt_err:
+                        if "user membatalkan otp" in str(rt_err).lower():
                             log.error(f"❌ [AUTH] User membatalkan OTP untuk '{username or phone}'. Menghentikan login segera.")
-                            raise re
-                        raise re
+                            raise rt_err
+                        raise rt_err
                     except Exception as otp_err:
                         log.error(f"❌ Gagal memasukkan Kode OTP: {otp_err}")
                         otp_error_msg = f"Gagal memproses OTP: {otp_err}"
-        except RuntimeError as re:
-            if "user membatalkan otp" in str(re).lower():
+        except RuntimeError as rt_err:
+            if "user membatalkan otp" in str(rt_err).lower():
                 log.error(f"❌ [AUTH] Aborting login check loop immediately due to user OTP cancellation.")
-                raise re
-            raise re
+                raise rt_err
+            raise rt_err
         except Exception as _check_err:
-            log.debug(f"  OTP / login check loop exception: {_check_err}")
+            log.warning(f"⚠️ [AUTH] OTP / login check loop exception: {_check_err}")
 
         # Cek dan klik tombol Lanjutkan/Continue jika ada di halaman konfirmasi setelah login
         try:
