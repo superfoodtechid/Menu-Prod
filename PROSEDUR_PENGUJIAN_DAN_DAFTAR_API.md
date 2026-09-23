@@ -80,11 +80,24 @@ Setelah status pada Langkah 2 bernilai `SUCCESS`:
 
 Berikut adalah seluruh endpoint API backend FastAPI yang tersedia pada proyek ini, dikelompokkan berdasarkan fungsinya.
 
+> **PENTING: Autentikasi API (`X-API-Key`)**
+> Seluruh endpoint dengan awalan `/api/` dilindungi oleh middleware autentikasi API Key.
+> Setiap pemanggilan via `curl`, Postman, atau HTTP client wajib menyertakan:
+> - Header: `-H "X-API-Key: foodmaster-secret-api-key-2026"` (atau nilai `API_SECRET_KEY` pada `.env`)
+> - Atau query parameter: `?api_key=foodmaster-secret-api-key-2026`
+> 
+> Jika header atau query param tidak disertakan, server akan mengembalikan respons:
+> `{"detail": "Invalid or missing X-API-Key header"}` dengan HTTP 401 Unauthorized.
+
 ### 1. API Pengelolaan Sesi (Session Management)
 
 #### A. Melihat Status Sesi Seluruh Outlet
 - **Method & Path:** `GET /api/sessions`
 - **Fungsi:** Menampilkan daftar seluruh outlet aktif (Shopee, GoFood, GrabFood), status keberadaan berkas sesi, tanggal terakhir aktif, nomor HP, dan username.
+- **Contoh Request:**
+  ```bash
+  curl -H "X-API-Key: foodmaster-secret-api-key-2026" "http://localhost:8000/api/sessions"
+  ```
 - **Contoh Response:**
   ```json
   [
@@ -109,20 +122,24 @@ Berikut adalah seluruh endpoint API backend FastAPI yang tersedia pada proyek in
   - `confirm_all`: `true` untuk menghapus seluruh sesi di sistem.
 - **Contoh Request:**
   ```bash
-  curl -X DELETE "http://localhost:8000/api/sessions/6285183151531"
+  curl -H "X-API-Key: foodmaster-secret-api-key-2026" -X DELETE "http://localhost:8000/api/sessions/6285183151531"
   ```
 - **Contoh Response:**
   ```json
   {
     "status": "SUCCESS",
-    "message": "Berhasil menghapus 2 berkas sesi dan 1 folder profil Chrome.",
+    "message": "Berhasil menghapus 4 berkas sesi dan 3 folder profil Chrome.",
     "target": "6285183151531",
     "deleted_files": [
+      "/app/shopee/data/session_6285183151531.json",
       "/app/src/shopee-omzet-automation/data/session_6285183151531.json",
-      "/app/shopee/data/session_6285183151531.json"
+      "/app/data/session_6285183151531.json",
+      "/app/data/otp_request_6285183151531.json"
     ],
     "deleted_profiles": [
-      "/app/src/shopee-omzet-automation/data/chrome_profile_6285183151531"
+      "/app/shopee/data/chrome_profile_6285183151531",
+      "/app/src/shopee-omzet-automation/data/chrome_profile_6285183151531",
+      "/app/data/chrome_profile_6285183151531"
     ]
   }
   ```
@@ -195,7 +212,7 @@ Berikut adalah seluruh endpoint API backend FastAPI yang tersedia pada proyek in
   - Memperbarui atau menambahkan data `Account` dan `Outlet` di database.
 - **Contoh Request:**
   ```bash
-  curl -X POST "http://localhost:8000/api/sync-sheets"
+  curl -H "X-API-Key: foodmaster-secret-api-key-2026" -X POST "http://localhost:8000/api/sync-sheets"
   ```
 - **Contoh Response:**
   ```json
@@ -215,7 +232,7 @@ Berikut adalah seluruh endpoint API backend FastAPI yang tersedia pada proyek in
 - **Fungsi:** Menjalankan background worker untuk membuka portal merchant (Shopee Food, GoFood, atau GrabFood), mengekstrak daftar menu terbaru beserta harga, variasi, dan promo, lalu menyimpannya ke database dan cache.
 - **Contoh Request:**
   ```bash
-  curl -X POST "http://localhost:8000/api/jobs/pull?outlet_id=c2208ccd-6458-40b3-af77-526fae05a831"
+  curl -H "X-API-Key: foodmaster-secret-api-key-2026" -X POST "http://localhost:8000/api/jobs/pull?outlet_id=c2208ccd-6458-40b3-af77-526fae05a831"
   ```
 - **Contoh Response:**
   ```json
@@ -345,3 +362,4 @@ Endpoint ini digunakan jika browser headless di server memerlukan input OTP manu
 #### D. Riwayat Jejak Audit Perubahan Harga
 - **Method & Path:** `GET /api/audit-trails`
 - **Fungsi:** Menampilkan riwayat log detail mengenai siapa, kapan, item apa, dan nilai harga yang diubah.
+
