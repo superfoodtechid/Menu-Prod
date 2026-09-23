@@ -10,6 +10,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   // Assign session modal
   const [assignTarget, setAssignTarget] = useState(null);
   const [assignJobId, setAssignJobId] = useState(null);
+  const [assignUsername, setAssignUsername] = useState("");
   const [assignStatus, setAssignStatus] = useState(null); // null|"RUNNING"|"OTP"|"DONE"|"FAILED"
   const [assignError, setAssignError] = useState(null);
   const [otpCode, setOtpCode] = useState("");
@@ -20,10 +21,14 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [smsResending, setSmsResending] = useState(false);
   const [waRequested, setWaRequested] = useState(false);
   const [waResending, setWaResending] = useState(false);
-  const [otpTotalTime, setOtpTotalTime] = useState(900); // 15 minutes overall timeout
+  const [otpTotalTime, setOtpTotalTime] = useState(3600); // 1 hour overall timeout
   const [resendMsg, setResendMsg] = useState("");
   const pollRef = useRef(null);
   const otpTimerRef = useRef(null);
+
+  const getOtpUsername = () => {
+    return assignUsername || assignTarget?.account?.username || assignTarget?.phone || assignTarget?.store_id || "";
+  };
 
   const headers = { "X-API-Key": API_SECRET_KEY || "" };
 
@@ -48,8 +53,12 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   };
 
   const formatTimer = sec => {
-    const m = Math.floor(sec / 60);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
+    if (h > 0) {
+      return `${h}:${m < 10 ? "0" : ""}${m}:${s < 10 ? "0" : ""}${s}`;
+    }
     return `${m}:${s < 10 ? "0" : ""}${s}`;
   };
 
@@ -58,6 +67,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
   const openAssign = outlet => {
     setAssignTarget(outlet);
     setAssignJobId(null);
+    setAssignUsername("");
     setAssignStatus(null);
     setAssignError(null);
     setOtpCode("");
@@ -67,7 +77,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     setSmsResending(false);
     setWaRequested(false);
     setWaResending(false);
-    setOtpTotalTime(900);
+    setOtpTotalTime(3600);
     setResendMsg("");
     clearInterval(otpTimerRef.current);
   };
@@ -79,10 +89,11 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
       fetch(`${API_BASE_URL}/api/shopee/cancel-otp`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ username: assignTarget.phone || assignTarget.store_id, channel: "sms" })
+        body: JSON.stringify({ username: getOtpUsername(), channel: "sms" })
       }).catch(() => {});
     }
     setAssignTarget(null);
+    setAssignUsername("");
     setAssignStatus(null);
   };
 
@@ -96,7 +107,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     setSmsResending(false);
     setWaRequested(false);
     setWaResending(false);
-    setOtpTotalTime(900);
+    setOtpTotalTime(3600);
     setResendMsg("");
     clearInterval(otpTimerRef.current);
 
@@ -110,8 +121,10 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || "Gagal memulai assign session");
       }
-      const { job_id } = await res.json();
+      const data = await res.json();
+      const job_id = data.job_id;
       setAssignJobId(job_id);
+      if (data.username) setAssignUsername(data.username);
       pollRef.current = setInterval(() => pollJob(job_id), 3000);
     } catch (e) {
       setAssignStatus("FAILED");
@@ -124,7 +137,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
     if (assignStatus === "OTP") {
       setCooldown(60);
       setCooldownChannel(otpChannel || "sms");
-      setOtpTotalTime(900);
+      setOtpTotalTime(3600);
       setResendMsg("");
       clearInterval(otpTimerRef.current);
       otpTimerRef.current = setInterval(() => {
@@ -134,12 +147,12 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
             clearInterval(otpTimerRef.current);
             clearInterval(pollRef.current);
             setAssignStatus("FAILED");
-            setAssignError("Waktu verifikasi OTP habis (Timeout 15 menit).");
+            setAssignError("Waktu verifikasi OTP habis (Timeout 1 jam).");
             if (assignTarget) {
               fetch(`${API_BASE_URL}/api/shopee/cancel-otp`, {
                 method: "POST",
                 headers: { ...headers, "Content-Type": "application/json" },
-                body: JSON.stringify({ username: assignTarget.phone || assignTarget.store_id, channel: "sms" })
+                body: JSON.stringify({ username: getOtpUsername(), channel: "sms" })
               }).catch(() => {});
             }
             return 0;
@@ -158,6 +171,9 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
       const res = await fetch(`${API_BASE_URL}/api/shopee/assign-job-status/${job_id}`, { headers });
       if (!res.ok) return;
       const data = await res.json();
+      if (data.username && !assignUsername) {
+        setAssignUsername(data.username);
+      }
       if (data.otp_waiting) {
         setAssignStatus(prev => (prev !== "OTP" ? "OTP" : prev));
         if (data.otp_channel) {
@@ -188,7 +204,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
       const res = await fetch(`${API_BASE_URL}/api/shopee/resend-otp`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ username: assignTarget.phone || assignTarget.store_id, channel: "sms" })
+        body: JSON.stringify({ username: getOtpUsername(), channel: "sms" })
       });
       if (!res.ok) throw new Error("Gagal meminta kirim ulang SMS");
       setOtpChannel("sms");
@@ -213,7 +229,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
       const res = await fetch(`${API_BASE_URL}/api/shopee/resend-otp`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ username: assignTarget.phone || assignTarget.store_id, channel: "whatsapp" })
+        body: JSON.stringify({ username: getOtpUsername(), channel: "whatsapp" })
       });
       if (!res.ok) throw new Error("Gagal meminta kirim ulang WhatsApp");
       setOtpChannel("whatsapp");
@@ -237,7 +253,7 @@ export default function SessionTab({ API_BASE_URL, API_SECRET_KEY }) {
       const res = await fetch(`${API_BASE_URL}/api/shopee/submit-otp`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ username: assignTarget.phone, code: otpCode.trim(), channel: otpChannel })
+        body: JSON.stringify({ username: getOtpUsername(), code: otpCode.trim(), channel: otpChannel })
       });
       if (!res.ok) throw new Error("Gagal mengirim OTP");
       setAssignStatus("RUNNING");

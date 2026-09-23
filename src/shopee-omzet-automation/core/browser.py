@@ -704,7 +704,7 @@ def _trigger_and_extract_tokens(driver) -> tuple:
     return extract_tokens_from_driver(driver, allow_file_fallback=False)
 
 
-def get_otp_code(username: str, phone: str = "", timeout: int = 0, error_msg: str = "", driver=None) -> str:
+def get_otp_code(username: str, phone: str = "", timeout: int = 3600, error_msg: str = "", driver=None) -> str:
     script_dir = Path(__file__).resolve().parent.parent
     data_dir = script_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -728,28 +728,54 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 0, error_msg: st
         try:
             otp_file_alt.write_text(json.dumps(request_data, indent=2))
         except Exception: pass
-        timeout_desc = f"(timeout {timeout}s)" if timeout and timeout > 0 else "(tanpa batas waktu)"
+        timeout_desc = f"(timeout {timeout}s)" if timeout and timeout > 0 else "(timeout default 1 jam)"
         log.info(f"🔑 [OTP] File request OTP dibuat untuk '{username}': {otp_file.name} (error='{error_msg}'). Menunggu input OTP via Web UI / API {timeout_desc}...")
         print(f"DISCORD_OTP_REQUEST: {json.dumps(request_data)}", flush=True)
     except Exception as e:
         log.error(f"Gagal menulis file request OTP: {e}")
         return ""
     
+    if not timeout or timeout <= 0:
+        timeout = 3600  # Default timeout 1 jam (3600 detik) agar tidak terjadi lock abadi
+
     start_wait = time.time()
     whatsapp_triggered = False
     last_handled_action_id = None
+
+    # Daftar kandidat berkas OTP (baik username maupun phone)
+    cand_files = [otp_file, otp_file_alt]
+    clean_phone = re.sub(r'[^0-9]', '', str(phone or ""))
+    if clean_phone:
+        cand_files.extend([
+            data_dir / f"otp_request_{clean_phone}.json",
+            shopee_data_dir / f"otp_request_{clean_phone}.json",
+            script_dir.parent.parent / "data" / f"otp_request_{clean_phone}.json"
+        ])
+
     while True:
         if timeout and timeout > 0 and (time.time() - start_wait >= timeout):
             break
-        target_fpath = otp_file if otp_file.exists() else (otp_file_alt if otp_file_alt.exists() else None)
+
+        # Cari berkas kandidat yang ada di disk
+        target_fpath = None
+        for p in cand_files:
+            if p.exists():
+                target_fpath = p
+                break
+
+        # Jika berkas tidak ada sama sekali setelah beberapa detik pembuatan, berarti telah dihapus/dibatalkan
+        if not target_fpath and (time.time() - start_wait > 5):
+            log.info(f"🛑 [OTP] Berkas OTP untuk '{username}' tidak ditemukan atau dihapus. Mengakhiri tunggu OTP.")
+            break
+
         if target_fpath:
             try:
                 data = json.loads(target_fpath.read_text())
 
                 if data.get("status") == "CANCELLED":
                     log.info(f"❌ [OTP] User membatalkan OTP untuk '{username}'")
-                    otp_file.unlink(missing_ok=True)
-                    otp_file_alt.unlink(missing_ok=True)
+                    for p in cand_files:
+                        p.unlink(missing_ok=True)
                     raise RuntimeError("user membatalkan otp")
 
                 # Cek jika ada permintaan aksi Kirim Ulang / Ganti Saluran dari UI
@@ -797,8 +823,8 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 0, error_msg: st
                 if data.get("status") == "RECEIVED" and data.get("code"):
                     otp_code = str(data["code"]).strip()
                     log.info(f"✅ [OTP] Kode OTP diterima ({data.get('channel', 'sms')}): {otp_code}")
-                    otp_file.unlink(missing_ok=True)
-                    otp_file_alt.unlink(missing_ok=True)
+                    for p in cand_files:
+                        p.unlink(missing_ok=True)
                     return otp_code
             except RuntimeError as re:
                 raise re
@@ -810,8 +836,8 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 0, error_msg: st
         log.warning(f"❌ [OTP] Timeout ({timeout}s) menunggu OTP untuk '{username}'")
     else:
         log.warning(f"❌ [OTP] Berhenti menunggu OTP untuk '{username}'")
-    otp_file.unlink(missing_ok=True)
-    otp_file_alt.unlink(missing_ok=True)
+    for p in cand_files:
+        p.unlink(missing_ok=True)
     return ""
 
 
