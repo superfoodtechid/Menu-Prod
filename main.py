@@ -4922,13 +4922,12 @@ def assign_shopee_session(req: AssignSessionRequest, background_tasks: Backgroun
             session_file = auto_dir / "data" / f"session_{username}.json"
             browser.set_session_file(session_file)
             
-            # If account has a password, pass both username and password (Shopee accepts phone number in the username field).
-            # If password is not provided, fallback to passwordless phone login.
-            is_phone_only = (not password) or (str(password).strip() in ("-", "nan", "None", ""))
+            # If username looks like a phone number or password is empty, pass phone to browser.get_session
+            is_phone = bool(re.match(r'^(?:\+?62|08|62)\d+$', username)) or not password
             session = browser.get_session(
-                username=username if not is_phone_only else None,
-                password=password if not is_phone_only else None,
-                phone=username,
+                username=username if not is_phone else None,
+                password=password if password else None,
+                phone=username if is_phone else None,
                 headless=True,
                 close_browser=True,
                 target_name=profile_name,

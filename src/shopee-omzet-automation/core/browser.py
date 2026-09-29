@@ -756,20 +756,6 @@ def get_otp_code(username: str, phone: str = "", timeout: int = 3600, error_msg:
         if timeout and timeout > 0 and (time.time() - start_wait >= timeout):
             break
 
-        # Cek jika browser sudah berhasil login / redirect (misal user klik link verifikasi di WhatsApp atau Shopee App)
-        if driver:
-            try:
-                curr_u = driver.current_url.lower()
-                if any(kw in curr_u for kw in ["onboarding", "merchant-selector", "dashboard", "shopee-pos", "analytics", "settings"]) or (
-                    "login" not in curr_u and "authenticate" not in curr_u and "partner.shopee.co.id" in curr_u
-                ):
-                    log.info(f"✅ [OTP] Browser terdeteksi sudah redirect/berhasil login ({curr_u})! Keluar dari tunggu OTP.")
-                    for p in cand_files:
-                        p.unlink(missing_ok=True)
-                    return "AUTO_APPROVED"
-            except Exception:
-                pass
-
         # Cari berkas kandidat yang ada di disk
         target_fpath = None
         for p in cand_files:
@@ -1517,15 +1503,6 @@ def _handle_verification_method_selection(driver, target_method: str = None) -> 
                 time.sleep(2)
                 return True
 
-        # ── AUTO mode tapi di layar pemilihan metode: pilih SMS default agar kode terkirim
-        elif is_method_screen:
-            log.info("👉 [OTP] Mode AUTO pada layar pilihan metode verifikasi, memilih saluran default (SMS)...")
-            clicked_sms = _click_sms_method(driver)
-            if clicked_sms:
-                log.info("✅ [OTP] Berhasil memilih SMS secara otomatis dari layar metode")
-                time.sleep(2)
-                return True
-
     except Exception as err:
         log.warning(f"⚠️ [OTP] Verification method handling error: {err}")
 
@@ -1894,27 +1871,11 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
         try:
             # Check for any OTP input
             otp_input = None
-            for sel in [
-                "input.shopee-otp-input__input",
-                ".shopee-otp-input input",
-                "input.shopee-pin-code-input__input",
-                ".shopee-pin-code-input input",
-                "[class*='pin-code'] input",
-                "[class*='otp-input'] input",
-                "input[maxlength='1']",
-                "input[maxlength='6']",
-                "input[autocomplete='one-time-code']",
-                "input[type='tel']",
-                "input[name*='otp']",
-                "input[name*='code']"
-            ]:
+            for sel in ["input.shopee-otp-input__input", ".shopee-otp-input input", "input[maxlength='6']"]:
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
                 for el in els:
-                    if el.is_displayed():
-                        otp_input = el
-                        break
-                if otp_input:
-                    break
+                    if el.is_displayed(): otp_input = el; break
+                if otp_input: break
 
             # Or check for verification page elements/texts
             is_verification_page = driver.execute_script("""
@@ -1922,19 +1883,12 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                     "pilih cara verifikasi", "select verification method",
                     "pilih metode verifikasi", "verify to log in",
                     "verifikasi untuk masuk", "masukkan kode", "enter code",
-                    "kode verifikasi", "verification code", "verifikasi",
-                    "verification", "otp", "autentikasi", "authenticate",
-                    "kirimkan kode", "masukkan otp", "enter otp",
-                    "kirim tautan", "tautan verifikasi", "link verifikasi"
+                    "kode verifikasi", "verification code"
                 ];
                 var bodyText = (document.body.innerText || "").toLowerCase();
                 return texts.some(function(t) { return bodyText.includes(t); });
             """)
-
-            # URL-based check: if URL contains /otp, /verify, or authenticate/login/otp
-            is_otp_url = any(kw in current_url for kw in ["/otp", "login/otp", "/verify", "authenticate/login/otp", "authenticate/login"])
-
-            if otp_input or is_verification_page or is_otp_url:
+            if otp_input or is_verification_page:
                 if not interactive:
                     log.error(f"❌ [AUTH] OTP or verification is required for '{username or phone}'. Aborting in non-interactive mode.")
                     return False
@@ -1950,36 +1904,21 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                         log.error(f"❌ [AUTH] Timeout atau gagal menerima Kode OTP untuk '{username or phone}'")
                         return False
 
-                    if otp_code == "AUTO_APPROVED":
-                        log.info(f"✅ [AUTH] Login berhasil diverifikasi secara otomatis (link/approval)! Melanjutkan...")
-                        return True
-
                     try:
-                        # 1. Find OTP input fields robustly (retry up to 5s if page is transitioning)
+                        # 1. Find OTP input fields robustly
                         otp_fields = []
-                        for _find_try in range(10):
-                            for otp_sel in [
-                                "input.shopee-otp-input__input",
-                                ".shopee-otp-input input",
-                                "input.shopee-pin-code-input__input",
-                                ".shopee-pin-code-input input",
-                                "[class*='pin-code'] input",
-                                "[class*='otp-input'] input",
-                                "input[maxlength='1']",
-                                "input[maxlength='6']",
-                                "input[autocomplete='one-time-code']",
-                                "input[type='tel']",
-                                "input[name*='otp']",
-                                "input[name*='code']"
-                            ]:
-                                els = driver.find_elements(By.CSS_SELECTOR, otp_sel)
-                                visible = [e for e in els if e.is_displayed()]
-                                if visible:
-                                    otp_fields = visible
-                                    break
-                            if otp_fields:
+                        for otp_sel in [
+                            "input.shopee-otp-input__input",
+                            ".shopee-otp-input input",
+                            "input[maxlength='1']",
+                            "input[maxlength='6']",
+                            "input[autocomplete='one-time-code']"
+                        ]:
+                            els = driver.find_elements(By.CSS_SELECTOR, otp_sel)
+                            visible = [e for e in els if e.is_displayed()]
+                            if visible:
+                                otp_fields = visible
                                 break
-                            time.sleep(0.5)
 
                         log.info(f"  🔢 OTP fields ditemukan: {len(otp_fields)}")
                         if len(otp_fields) >= 6:
