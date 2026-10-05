@@ -12,7 +12,8 @@ try:
 except Exception:
     pass
 
-GSHEETS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ3tLKBNXDqRgBw0mNhKZFxgvKx-JoiTDzm_s5Ix1cm7O6HCv4IvExOLR2HSRVaXSsx82V348mcr9X4/pub?output=csv"
+DEFAULT_DBR_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSsAq8JmDfGI8KY7aSCRpzC2EaQARkK1OvhWrll7g3qlxFMIcwtDpAF-Wxf4aQnGET4eCmncjdEgre5/pub?output=csv"
+GSHEETS_URL = os.getenv("DBR_CSV_URL") or os.getenv("GSHEETS_URL") or os.getenv("NOMOR_HP_CSV_URL") or DEFAULT_DBR_URL
 GSHEETS_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/csv,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -49,89 +50,124 @@ def get_master_df(force_download=False):
 def get_outlets_for_applicator(applicator_choice: str):
     df = get_master_df()
     
+    # Deteksi kolom Aplikator (DBR) atau Aplikasi (Legacy)
+    col_app = None
+    for c in ["Aplikator", "Aplikasi"]:
+        if c in df.columns:
+            col_app = c
+            break
+    if not col_app:
+        raise ValueError("Kolom Aplikator/Aplikasi tidak ditemukan dalam spreadsheet.")
+
+    # Deteksi kolom Status (DBR: Status Internal, Legacy: Status)
+    col_status = None
+    for c in ["Status Internal", "Status"]:
+        if c in df.columns:
+            col_status = c
+            break
+    if not col_status:
+        raise ValueError("Kolom Status Internal/Status tidak ditemukan dalam spreadsheet.")
+
     # Filter by applicator
     app_lower = applicator_choice.lower()
     if app_lower == 'shopee':
-        mask = df['Aplikasi'].str.strip().str.lower().str.contains('shopee', na=False)
+        mask = df[col_app].astype(str).str.strip().str.lower().str.contains('shopee', na=False)
     elif app_lower == 'grab':
-        mask = df['Aplikasi'].str.strip().str.lower().str.contains('grab', na=False)
+        mask = df[col_app].astype(str).str.strip().str.lower().str.contains('grab', na=False)
     elif app_lower == 'gofood':
-        mask = df['Aplikasi'].str.strip().str.lower().str.contains('go', na=False)
+        mask = df[col_app].astype(str).str.strip().str.lower().str.contains('go', na=False)
     else:
         raise ValueError(f"Aplikator tidak didukung: {applicator_choice}")
         
-    # Filter Live status
-    live_mask = df['Status'].str.strip().str.lower() == 'live'
+    # Filter Live, Pending, and Progress status (Managed outlets)
+    live_mask = df[col_status].astype(str).str.strip().str.lower().str.contains('live|pending|progress', na=False)
     filtered_df = df[mask & live_mask].copy()
     
-    # Find columns dynamically for gofood
+    # Deteksi kolom email GoFood (DBR: Email FoodMaster1/2; Legacy: Email Login Go 1/2)
     col_email1 = None
     col_email2 = None
-    col_phone = None
     for col in df.columns:
         cl = str(col).strip().lower()
-        if cl == 'email login go 1':
+        if cl in ('email foodmaster1', 'email foodmaster 1', 'email login go 1'):
             col_email1 = col
-        elif cl == 'email login go 2':
+        elif cl in ('email foodmaster2', 'email foodmaster 2', 'email login go 2'):
             col_email2 = col
             
-    phone_cols = [col for col in df.columns if 'nomor hp' in str(col).lower()]
-    if len(phone_cols) > 1:
-        col_phone = phone_cols[1]
-    elif len(phone_cols) == 1:
-        col_phone = phone_cols[0]
+    # Deteksi kolom nomor HP
+    col_phone_owner = None
+    col_phone_shopee = None
+    for col in df.columns:
+        cl = str(col).strip().lower()
+        if cl == 's nomor hp akses pemilik':
+            col_phone_shopee = col
+        elif cl == 'nomor hp':
+            col_phone_owner = col
 
     outlets = []
     for _, row in filtered_df.iterrows():
         store_id = str(row.get('Store ID', '')).strip().split('.')[0]
         if not store_id or store_id == '-' or store_id.lower() == 'nan':
-            # Fallback to Merchant ID if Store ID is empty (e.g., for GoFood)
-            store_id = str(row.get('Merchant ID', '')).strip().split('.')[0]
+            # Fallback to Group ID / Merchant ID
+            store_id = str(row.get('Group ID', '') or row.get('Merchant ID', '')).strip().split('.')[0]
             
         if (not store_id or store_id == '-' or store_id.lower() == 'nan') and app_lower != 'shopee':
             continue
             
         email1 = str(row.get(col_email1, '')) if col_email1 else ''
         email2 = str(row.get(col_email2, '')) if col_email2 else ''
-        phone = str(row.get(col_phone, '')) if col_phone else ''
+        
+        # Phone: untuk Shopee prioritaskan S Nomor HP Akses Pemilik jika ada
+        phone = ''
+        if app_lower == 'shopee' and col_phone_shopee:
+            phone = str(row.get(col_phone_shopee, '')).strip()
+        if not phone or phone in ('-', 'nan'):
+            phone = str(row.get(col_phone_owner, '')).strip() if col_phone_owner else ''
+        if '.' in phone:
+            phone = phone.split('.')[0]
         
         emails = []
-        if email1 and email1 != '-' and email1 != 'nan':
+        if email1 and email1 not in ('-', 'nan', ''):
             emails.append(email1.strip())
-        if email2 and email2 != '-' and email2 != 'nan' and email2.strip() != email1.strip():
+        if email2 and email2 not in ('-', 'nan', '') and email2.strip() != email1.strip():
             emails.append(email2.strip())
             
         if app_lower == 'gofood' and not emails:
             continue
             
-        def get_valid(c1, c2):
-            v = str(row.get(c1, '')).strip()
-            if v and v != '-' and v != 'nan':
-                return v
-            v = str(row.get(c2, '')).strip()
-            if v and v != '-' and v != 'nan':
-                return v
+        def get_valid(*col_names):
+            for cn in col_names:
+                v = str(row.get(cn, '')).strip()
+                if v and v not in ('-', 'nan', 'None'):
+                    return v
             return ''
             
         if app_lower == 'shopee':
-            username = ''
-            password = ''
+            username = get_valid('S Username Akses Pemilik', 'Nama Pengguna', 'S Allvbadmin Username Akses Staff')
+            password = get_valid('S Kata Sandi Akses Pemilik', 'Kata Sandi', 'S Allvbadmin Kata Sandi Akses Staff')
         elif app_lower == 'grab':
-            username = get_valid('Nama Pengguna.1', 'Nama Pengguna')
-            password = get_valid('Kata Sandi.1', 'Kata Sandi')
-        else:
             username = get_valid('Nama Pengguna', 'Nama Pengguna.1')
             password = get_valid('Kata Sandi', 'Kata Sandi.1')
+        else:
+            username = emails[0] if emails else get_valid('Nama Pengguna', 'Nama Pengguna.1')
+            password = get_valid('Kata Sandi', 'Kata Sandi.1')
+
+        # Nama resto dan brand
+        owner = get_valid('Nama Pemilik', 'Owner')
+        brand = get_valid('Nama Brand', 'Brand')
+        nama_listing = get_valid('Nama Listing', 'Nama Resto Final', 'Nama Tarikan', 'Outlet', 'Nama Outlet')
+        outlet_name = get_valid('Outlet', 'Nama Outlet', 'Nama Listing')
+        merchant_name = get_valid('Outlet', 'Merchant Name', 'Nama Brand')
             
         outlets.append({
             'store_id': store_id,
-            'owner': str(row.get('Owner', '')).strip(),
-            'nama_resto_final': str(row.get('Nama Resto Final', '')).strip(),
+            'owner': owner,
+            'nama_resto_final': nama_listing,
             'nama_pendek': str(row.get('Nama Pendek Outlet (Shopee) Final', '')).strip(),
-            'nama_outlet': str(row.get('Nama Outlet', '')).strip(),
-            'aplikasi': str(row.get('Aplikasi', '')).strip(),
-            'merchant_name': str(row.get('Merchant Name', '')).strip(),
-            'brand': str(row.get('Brand', '')).strip(),
+            'nama_outlet': nama_listing or outlet_name,
+            'outlet': outlet_name,
+            'aplikasi': str(row.get(col_app, '')).strip(),
+            'merchant_name': merchant_name,
+            'brand': brand,
             'email': emails[0] if emails else '',
             'emails': emails,
             'phone': phone.strip() if phone and phone != 'nan' else '',

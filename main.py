@@ -320,20 +320,32 @@ def sync_sheets(db: Session = Depends(get_db)):
     added_outlets = 0
     updated_outlets = 0
 
-    # Forward-fill merged/header columns in Google Sheet dataframe (e.g. Owner, Status, Nama Outlet, Merchant Name)
-    # Use block_id (derived from non-null No column) to prevent global ffill leak across empty rows/different outlets
+    # Forward-fill merged/header columns in Google Sheet dataframe
+    # Use block_id (derived from non-null No column if present) to prevent global ffill leak
+    ffill_cols = [
+        "Nama Pemilik", "Owner",
+        "Status Internal", "Status",
+        "Nama Brand", "Brand",
+        "Outlet", "Nama Outlet", "Nama Listing",
+        "Merchant Name", "Cabang", "Nama Resto Final",
+        "Aplikator", "Aplikasi"
+    ]
     if "No" in df.columns:
         df["block_id"] = df["No"].notna().cumsum()
-        for col in ["Owner", "Status", "Nama Outlet", "Outlet", "Merchant Name", "Cabang", "Nama Resto Final", "Brand"]:
+        for col in ffill_cols:
             if col in df.columns:
                 df[col] = df.groupby("block_id")[col].ffill()
     else:
-        for col in ["Owner", "Status", "Nama Outlet", "Outlet", "Merchant Name", "Cabang", "Nama Resto Final", "Brand"]:
+        for col in ffill_cols:
             if col in df.columns:
                 df[col] = df[col].ffill()
 
-    # Filter Live and Pending status merchants
-    df_live = df[df["Status"].astype(str).str.lower().str.contains("live|pending", na=False)]
+    # Filter Live, Pending, and Progress status merchants
+    col_status = "Status Internal" if "Status Internal" in df.columns else ("Status" if "Status" in df.columns else None)
+    if col_status:
+        df_live = df[df[col_status].astype(str).str.lower().str.contains("live|pending|progress", na=False)]
+    else:
+        df_live = df
 
     synced_outlet_ids = set()
 
@@ -351,13 +363,15 @@ def sync_sheets(db: Session = Depends(get_db)):
         for o in all_outlets
     }
 
+    col_app = "Aplikator" if "Aplikator" in df.columns else ("Aplikasi" if "Aplikasi" in df.columns else None)
+
     for _, row in df_live.iterrows():
-        app_val = str(row.get("Aplikasi", "")).strip().lower()
-        if app_val == "shopeefood":
+        app_val = str(row.get(col_app, "")).strip().lower() if col_app else ""
+        if "shopee" in app_val:
             platform = "shopee"
-        elif app_val == "grabfood":
+        elif "grab" in app_val:
             platform = "grab"
-        elif app_val == "gofood":
+        elif "go" in app_val:
             platform = "gofood"
         else:
             continue
@@ -367,76 +381,73 @@ def sync_sheets(db: Session = Depends(get_db)):
         password = None
 
         if platform == "shopee":
-            # Sheet columns:
-            # Kolom Q: Nama Pengguna (Username portal)
-            # Kolom R: Nomor HP (Nomor HP Owner)
-            # Kolom S: Kata Sandi (Password portal)
-            # Kolom AA: Nama Pengguna.1 (Staff 'allvbadmin' - JANGAN DIGUNAKAN)
-            # Kolom AB: Nomor HP.1 (Staff phone - JANGAN DIGUNAKAN)
-            user_col_q = "Nama Pengguna"
-            phone_col_r = "Nomor HP"
-            pwd_col_s = "Kata Sandi"
+            # DBR format:
+            # S Username Akses Pemilik, S Kata Sandi Akses Pemilik, S Nomor HP Akses Pemilik
+            # S Allvbadmin Username Akses Staff, S Allvbadmin Kata Sandi Akses Staff
+            # Legacy fallback: Nama Pengguna, Kata Sandi, Nomor HP
+            user_owner = str(row.get("S Username Akses Pemilik") or row.get("Nama Pengguna") or "").strip()
+            if user_owner in ("-", "", "nan", "None"):
+                user_owner = ""
 
-            user_q_val = str(row.get(user_col_q) or "").strip()
-            if user_q_val in ("-", "", "nan", "None"):
-                user_q_val = ""
+            pwd_owner = str(row.get("S Kata Sandi Akses Pemilik") or row.get("Kata Sandi") or "").strip()
+            if pwd_owner in ("-", "", "nan", "None"):
+                pwd_owner = ""
 
-            phone_r_val = str(row.get(phone_col_r) or "").strip()
-            if phone_r_val in ("-", "", "nan", "None"):
-                phone_r_val = ""
-            if "." in phone_r_val:
-                phone_r_val = phone_r_val.split(".")[0]
+            phone_owner = str(row.get("S Nomor HP Akses Pemilik") or row.get("Nomor HP") or "").strip()
+            if phone_owner in ("-", "", "nan", "None"):
+                phone_owner = ""
+            if "." in phone_owner:
+                phone_owner = phone_owner.split(".")[0]
 
-            pwd_s_val = str(row.get(pwd_col_s) or "").strip()
-            if pwd_s_val in ("-", "", "nan", "None"):
-                pwd_s_val = ""
+            user_staff = str(row.get("S Allvbadmin Username Akses Staff") or row.get("Nama Pengguna.1") or "").strip()
+            pwd_staff = str(row.get("S Allvbadmin Kata Sandi Akses Staff") or row.get("Kata Sandi.1") or "").strip()
 
-            # Aturan:
-            # 1. Jika Kolom Q ada dan Kolom S ada -> gunakan Kolom Q dan Kolom S
-            # 2. Jika Kolom Q ada dan Kolom S TIDAK ADA -> gunakan Kolom R (Nomor HP) sebagai username login OTP (password kosong)
-            # 3. Jika Kolom Q tidak ada tapi Kolom R ada -> gunakan Kolom R
-            # 4. Jika keduanya tidak ada -> fallback ke user_q_val jika ada
-            if user_q_val and pwd_s_val:
-                username = user_q_val
-                password = pwd_s_val
-            elif user_q_val and not pwd_s_val:
-                username = phone_r_val if phone_r_val else user_q_val
+            if user_owner and pwd_owner:
+                username = user_owner
+                password = pwd_owner
+            elif user_owner and not pwd_owner:
+                username = phone_owner if phone_owner else user_owner
                 password = ""
-            elif phone_r_val:
-                username = phone_r_val
-                password = pwd_s_val
+            elif phone_owner:
+                username = phone_owner
+                password = pwd_owner
+            elif user_staff and user_staff.lower() == "allvbadmin":
+                username = user_staff
+                password = pwd_staff
             else:
-                username = user_q_val or None
-                password = pwd_s_val
+                username = user_owner or phone_owner or None
+                password = pwd_owner
+
         elif platform == "grab":
-            user_col_sf = "Nama Pengguna.1"
-            user_col_mt = "Nama Pengguna"
-            pwd_col_sf = "Kata Sandi.1"
-            pwd_col_mt = "Kata Sandi"
+            # DBR: Nama Pengguna & Kata Sandi
+            # Legacy fallback: Nama Pengguna.1 & Kata Sandi.1
+            user_val = str(row.get("Nama Pengguna") or row.get("Nama Pengguna.1") or "").strip()
+            pwd_val = str(row.get("Kata Sandi") or row.get("Kata Sandi.1") or "").strip()
 
-            user_val = row.get(user_col_sf) if pd.notna(row.get(user_col_sf)) and str(row.get(user_col_sf)).strip() != "-" else row.get(user_col_mt)
-            pwd_val = row.get(pwd_col_sf) if pd.notna(row.get(pwd_col_sf)) and str(row.get(pwd_col_sf)).strip() != "-" else row.get(pwd_col_mt)
+            if user_val not in ("-", "", "nan", "None"):
+                username = user_val
+            if pwd_val not in ("-", "", "nan", "None"):
+                password = pwd_val
 
-            if pd.notna(user_val) and str(user_val).strip() != "":
-                username = str(user_val).strip()
-            if pd.notna(pwd_val) and str(pwd_val).strip() != "":
-                password = str(pwd_val).strip()
         elif platform == "gofood":
-            # GoFood strictly uses Email Login Go 1 (Kolom Y), Email Login Go 2 (Kolom Z), or Email (Kolom P)
-            email_1 = row.get("Email Login Go 1")
-            email_2 = row.get("Email Login Go 2")
-            email_p = row.get("Email")
-            email_o = row.get("Nama Akses Mitra")
-
-            for candidate in [email_1, email_2, email_p, email_o]:
+            # DBR: Email FoodMaster1 & Email FoodMaster2
+            # Legacy fallback: Email Login Go 1, Email Login Go 2, Email, Nama Akses Mitra
+            gofood_email_cols = [
+                "Email FoodMaster1", "Email FoodMaster 1",
+                "Email Login Go 1",
+                "Email FoodMaster2", "Email FoodMaster 2",
+                "Email Login Go 2",
+                "Email", "Nama Akses Mitra"
+            ]
+            for candidate_col in gofood_email_cols:
+                candidate = row.get(candidate_col)
                 if pd.notna(candidate) and "@" in str(candidate) and str(candidate).strip() not in ("-", "", "nan", "None"):
                     username = str(candidate).strip()
                     break
 
-            # Never fallback to Shopee staff 'allvbadmin' (Nama Pengguna.1) for GoFood!
-            pwd_val = row.get("Kata Sandi") if pd.notna(row.get("Kata Sandi")) else row.get("Kata Sandi.1")
-            if pd.notna(pwd_val) and str(pwd_val).strip() not in ("-", "", "nan", "None"):
-                password = str(pwd_val).strip()
+            pwd_val = str(row.get("Kata Sandi") or row.get("Kata Sandi.1") or "").strip()
+            if pwd_val not in ("-", "", "nan", "None"):
+                password = pwd_val
 
         if not username:
             continue
@@ -462,32 +473,25 @@ def sync_sheets(db: Session = Depends(get_db)):
                 db.flush()
 
         # 2. Extract Outlet Info
-        store_id_raw = row.get("Store ID")
+        store_id_raw = row.get("Store ID") or row.get("Merchant ID") or row.get("Group ID")
         store_id = str(store_id_raw).strip().split(".")[0] if pd.notna(store_id_raw) and str(store_id_raw).strip() not in ("-", "", "nan", "None") else None
         if not store_id:
             continue
-        
-        m_name_raw = row.get("Merchant Name")
-        n_out_candidate = row.get("Nama Outlet")
-        n_resto_candidate = row.get("Nama Resto Final")
-        merchant_name = None
-        for candidate in (m_name_raw, n_out_candidate, n_resto_candidate):
-            if pd.notna(candidate):
-                normalized = str(candidate).strip()
-                if normalized not in ("-", "", "nan", "None"):
-                    merchant_name = normalized
-                    break
-        if not merchant_name:
-            continue
 
-        owner_raw = row.get("Owner")
-        owner = str(owner_raw).strip() if pd.notna(owner_raw) and str(owner_raw).strip() not in ("-", "") else None
+        owner_raw = row.get("Nama Pemilik") if pd.notna(row.get("Nama Pemilik")) else row.get("Owner")
+        owner = str(owner_raw).strip() if pd.notna(owner_raw) and str(owner_raw).strip() not in ("-", "", "nan", "None") else None
 
-        n_out_raw = row.get("Nama Outlet") if (pd.notna(row.get("Nama Outlet")) and str(row.get("Nama Outlet")).strip() not in ("-", "")) else (row.get("Outlet") if (pd.notna(row.get("Outlet")) and str(row.get("Outlet")).strip() not in ("-", "")) else row.get("Nama Resto Final"))
-        cabang = str(row.get("Cabang", "")).strip() if pd.notna(row.get("Cabang")) else str(row.get("Brand", "")).strip()
-        nama_resto_final = str(row.get("Nama Resto Final", "")).strip() if pd.notna(row.get("Nama Resto Final")) else None
-        brand = str(row.get("Brand", "")).strip() if pd.notna(row.get("Brand")) else None
-        nama_outlet = str(n_out_raw).strip() if pd.notna(n_out_raw) and str(n_out_raw).strip() not in ("-", "") else (nama_resto_final or merchant_name or None)
+        brand_raw = row.get("Nama Brand") if pd.notna(row.get("Nama Brand")) else row.get("Brand")
+        brand = str(brand_raw).strip() if pd.notna(brand_raw) and str(brand_raw).strip() not in ("-", "", "nan", "None") else None
+
+        nama_listing_raw = row.get("Nama Listing") if pd.notna(row.get("Nama Listing")) else row.get("Nama Resto Final")
+        nama_resto_final = str(nama_listing_raw).strip() if pd.notna(nama_listing_raw) and str(nama_listing_raw).strip() not in ("-", "", "nan", "None") else None
+
+        outlet_raw = row.get("Outlet") if pd.notna(row.get("Outlet")) else row.get("Nama Outlet")
+        nama_outlet = str(outlet_raw).strip() if pd.notna(outlet_raw) and str(outlet_raw).strip() not in ("-", "", "nan", "None") else (nama_resto_final or None)
+
+        merchant_name = str(row.get("Outlet") or row.get("Merchant Name") or brand or nama_outlet or "").strip()
+        cabang = brand or str(row.get("Cabang", "")).strip() or None
 
         # 3. Upsert Outlet
         db_outlet = None
@@ -4324,22 +4328,27 @@ def get_cached_phone_map(cache_path: Path) -> dict:
             
         import pandas as pd
         df = pd.read_csv(cache_path)
-        # Prioritize exact 'Nomor HP' (Kolom R - Owner) over 'Nomor HP.1' (Kolom AB - Staff)
-        col_phone = "Nomor HP" if "Nomor HP" in df.columns else None
-        if not col_phone:
+        # Prioritize 'S Nomor HP Akses Pemilik' then 'Nomor HP'
+        col_phone_s = "S Nomor HP Akses Pemilik" if "S Nomor HP Akses Pemilik" in df.columns else None
+        col_phone_gen = "Nomor HP" if "Nomor HP" in df.columns else None
+        if not col_phone_gen and not col_phone_s:
             phone_cols = [col for col in df.columns if 'nomor hp' in str(col).lower() and not str(col).lower().endswith('.1')]
-            col_phone = phone_cols[0] if phone_cols else None
+            col_phone_gen = phone_cols[0] if phone_cols else None
         phone_map = {}
-        if col_phone:
-            for _, row in df.iterrows():
-                sid = str(row.get('Store ID', '')).strip().split('.')[0]
-                if not sid or sid == '-' or sid.lower() == 'nan':
-                    sid = str(row.get('Merchant ID', '')).strip().split('.')[0]
-                p_val = str(row.get(col_phone, '')).strip()
-                if '.' in p_val:
-                    p_val = p_val.split('.')[0]
-                if sid and p_val and p_val not in ('-', 'nan', ''):
-                    phone_map[sid] = p_val
+        for _, row in df.iterrows():
+            sid = str(row.get('Store ID', '')).strip().split('.')[0]
+            if not sid or sid == '-' or sid.lower() == 'nan':
+                sid = str(row.get('Merchant ID', '') or row.get('Group ID', '')).strip().split('.')[0]
+            p_val = ""
+            if col_phone_s:
+                p_val = str(row.get(col_phone_s, '')).strip()
+            if not p_val or p_val in ('-', 'nan', ''):
+                if col_phone_gen:
+                    p_val = str(row.get(col_phone_gen, '')).strip()
+            if '.' in p_val:
+                p_val = p_val.split('.')[0]
+            if sid and p_val and p_val not in ('-', 'nan', ''):
+                phone_map[sid] = p_val
                     
         PHONE_MAP_CACHE["mtime"] = mtime
         PHONE_MAP_CACHE["data"] = phone_map
@@ -5655,7 +5664,10 @@ def test_shopee_session(
     browser_error = ""
 
     try:
-        from shopee_core import browser
+        shopee_auto_dir = BASE_DIR / "src" / "shopee-omzet-automation"
+        if str(shopee_auto_dir) not in sys.path:
+            sys.path.insert(0, str(shopee_auto_dir))
+        from core import browser
         browser.set_session_file(sess_file)
         # Jalankan get_session headless tanpa interaksi OTP
         sess_result = browser.get_session(
