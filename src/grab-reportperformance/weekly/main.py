@@ -58,7 +58,8 @@ def setup_logger():
 
 log = setup_logger()
 
-CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ3tLKBNXDqRgBw0mNhKZFxgvKx-JoiTDzm_s5Ix1cm7O6HCv4IvExOLR2HSRVaXSsx82V348mcr9X4/pub?gid=0&single=true&output=csv"
+DEFAULT_DBR_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSsAq8JmDfGI8KY7aSCRpzC2EaQARkK1OvhWrll7g3qlxFMIcwtDpAF-Wxf4aQnGET4eCmncjdEgre5/pub?output=csv"
+CSV_URL = os.getenv("DBR_CSV_URL") or os.getenv("GSHEETS_URL") or os.getenv("NOMOR_HP_CSV_URL") or DEFAULT_DBR_URL
 
 async def run_all(date_start: str = None, date_end: str = None, output_dir: str = None, user_filter: str = None, outlet_filter: str = None, branch_filter: str = None):
     # Reload env just in case
@@ -72,9 +73,11 @@ async def run_all(date_start: str = None, date_end: str = None, output_dir: str 
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
         
-        # Filter for GrabFood and Status Live
-        grab_df = df[df["Aplikasi"].str.contains("Grab", na=False, case=False)]
-        grab_df = grab_df[grab_df["Status"].str.contains("Live", na=False, case=False)]
+        # Filter for GrabFood and Status Live (support DBR: Aplikator, Status Internal)
+        col_app = "Aplikator" if "Aplikator" in df.columns else ("Aplikasi" if "Aplikasi" in df.columns else None)
+        col_st = "Status Internal" if "Status Internal" in df.columns else ("Status" if "Status" in df.columns else None)
+        grab_df = df[df[col_app].astype(str).str.contains("Grab", na=False, case=False)] if col_app else df
+        grab_df = grab_df[grab_df[col_st].astype(str).str.contains("Live", na=False, case=False)] if col_st else grab_df
         
         portals = []
         for idx, row in grab_df.iterrows():

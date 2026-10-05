@@ -18,8 +18,9 @@ MENU_DIR = Path(__file__).resolve().parent
 ENV_PATH = MENU_DIR / ".env"
 load_dotenv(ENV_PATH, override=True)
 
-# Master credential Google Sheet
-MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ3tLKBNXDqRgBw0mNhKZFxgvKx-JoiTDzm_s5Ix1cm7O6HCv4IvExOLR2HSRVaXSsx82V348mcr9X4/pub?gid=0&single=true&output=csv"
+# Master credential Google Sheet (DBR)
+DEFAULT_DBR_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSsAq8JmDfGI8KY7aSCRpzC2EaQARkK1OvhWrll7g3qlxFMIcwtDpAF-Wxf4aQnGET4eCmncjdEgre5/pub?output=csv"
+MASTER_SHEET_URL = os.getenv("DBR_CSV_URL") or os.getenv("GSHEETS_URL") or os.getenv("NOMOR_HP_CSV_URL") or DEFAULT_DBR_URL
 
 
 def normalisasi_nomor_hp(nomor_hp):
@@ -91,8 +92,8 @@ def safe_goto_with_retry(
 
 def fetch_gofood_outlets():
     """
-    Mengambil semua outlet GoFood Live dari master Google Sheet.
-    Mendeteksi kolom Email Login Go 1, Email Login Go 2, dan Nomor HP secara dinamis.
+    Mengambil semua outlet GoFood Live dari master Google Sheet (DBR / Legacy).
+    Mendeteksi kolom Email FoodMaster 1/2 atau Email Login Go 1/2 dan Nomor HP secara dinamis.
     """
     try:
         cache_buster_url = MASTER_SHEET_URL + f"&t={int(time.time())}"
@@ -111,62 +112,49 @@ def fetch_gofood_outlets():
     def col_idx(names):
         for n in names:
             for i, h in enumerate(header):
-                if n in h:
+                if n == h or n in h:
                     return i
         return None
 
-    idx_aplikasi = col_idx(['aplikasi'])
-    idx_status   = col_idx(['status'])
-    idx_outlet   = col_idx(['nama outlet'])
-    idx_cabang   = col_idx(['cabang'])
-    idx_store    = col_idx(['store id', 'store_id', 'merchant id'])
+    idx_aplikasi = col_idx(['aplikator', 'aplikasi'])
+    idx_status   = col_idx(['status internal', 'status'])
+    idx_outlet   = col_idx(['nama listing', 'outlet', 'nama outlet', 'nama resto final'])
+    idx_cabang   = col_idx(['nama brand', 'brand', 'cabang'])
+    idx_store    = col_idx(['store id', 'store_id', 'group id', 'merchant id'])
     
-    # Cari kolom email secara dinamis
-    idx_email1 = col_idx(['email login go 1'])
-    if idx_email1 is None:
-        idx_email1 = 24  # Fallback Kolom Y (0-indexed)
-        
-    idx_email2 = col_idx(['email login go 2'])
-    if idx_email2 is None:
-        idx_email2 = 25  # Fallback Kolom Z (0-indexed)
+    # Cari kolom email secara dinamis (DBR: Email FoodMaster1/2, Legacy: Email Login Go 1/2)
+    idx_email1 = col_idx(['email foodmaster1', 'email foodmaster 1', 'email login go 1'])
+    idx_email2 = col_idx(['email foodmaster2', 'email foodmaster 2', 'email login go 2'])
 
-    # Cari nomor hp untuk Superfood secara dinamis (Nomor HP setelah akses superfood/login go 1)
-    idx_phone = 27  # Default fallback ke index 27 (Kolom AB)
-    idx_superfood = None
-    for i, h in enumerate(header):
-        if 'akses superfood' in h or 'login go 1' in h:
-            idx_superfood = i
-            break
-    if idx_superfood is not None:
-        for i in range(idx_superfood, len(header)):
-            if 'nomor hp' in header[i]:
-                idx_phone = i
-                break
+    # Cari nomor hp
+    idx_phone = col_idx(['nomor hp', 's nomor hp akses pemilik'])
+    if idx_phone is None:
+        idx_phone = 5  # Posisi umum di DBR
 
     outlets = []
     for row in reader_rows[1:]:
-        if len(row) <= idx_phone:
+        if len(row) <= 5:
             continue
 
         aplikasi = str(row[idx_aplikasi]).strip().lower() if idx_aplikasi is not None and len(row) > idx_aplikasi else ''
         status   = str(row[idx_status]).strip().lower()   if idx_status is not None and len(row) > idx_status else ''
 
-        if 'gofood' not in aplikasi:
+        if 'gofood' not in aplikasi and 'go' not in aplikasi:
             continue
-        if 'live' not in status:
+        if not any(st in status for st in ['live', 'progress', 'pending']):
             continue
 
-        email1 = str(row[idx_email1]).strip() if len(row) > idx_email1 else ''
-        email2 = str(row[idx_email2]).strip() if len(row) > idx_email2 else ''
+        email1 = str(row[idx_email1]).strip() if idx_email1 is not None and len(row) > idx_email1 else ''
+        email2 = str(row[idx_email2]).strip() if idx_email2 is not None and len(row) > idx_email2 else ''
         
         emails = []
-        if email1 and email1 != "-":
+        if email1 and email1 not in ("-", "nan", ""):
             emails.append(email1)
-        if email2 and email2 != "-" and email2 != email1:
+        if email2 and email2 not in ("-", "nan", "") and email2 != email1:
             emails.append(email2)
             
         primary_email = emails[0] if emails else ""
-        phone    = str(row[idx_phone]).strip() if len(row) > idx_phone else ''
+        phone    = str(row[idx_phone]).strip() if idx_phone is not None and len(row) > idx_phone else ''
         nama     = str(row[idx_outlet]).strip() if idx_outlet is not None and len(row) > idx_outlet else ''
         cabang   = str(row[idx_cabang]).strip() if idx_cabang is not None and len(row) > idx_cabang else ''
         store_id = str(row[idx_store]).strip()  if idx_store is not None  and len(row) > idx_store  else ''
