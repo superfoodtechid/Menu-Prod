@@ -116,6 +116,7 @@ def fetch_gofood_outlets():
                     return i
         return None
 
+    idx_tipe     = col_idx(['tipe'])
     idx_aplikasi = col_idx(['aplikator', 'aplikasi'])
     idx_status   = col_idx(['status internal', 'status'])
     idx_outlet   = col_idx(['nama listing', 'outlet', 'nama outlet', 'nama resto final'])
@@ -136,12 +137,17 @@ def fetch_gofood_outlets():
         if len(row) <= 5:
             continue
 
+        if idx_tipe is not None and len(row) > idx_tipe:
+            tipe_val = str(row[idx_tipe]).strip().lower()
+            if 'agency' not in tipe_val:
+                continue
+
         aplikasi = str(row[idx_aplikasi]).strip().lower() if idx_aplikasi is not None and len(row) > idx_aplikasi else ''
         status   = str(row[idx_status]).strip().lower()   if idx_status is not None and len(row) > idx_status else ''
 
         if 'gofood' not in aplikasi and 'go' not in aplikasi:
             continue
-        if not any(st in status for st in ['live', 'progress', 'pending']):
+        if not any(st in status for st in ['live', 'progress']):
             continue
 
         email1 = str(row[idx_email1]).strip() if idx_email1 is not None and len(row) > idx_email1 else ''

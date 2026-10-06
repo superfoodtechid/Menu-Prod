@@ -73,11 +73,15 @@ async def run_all(date_start: str = None, date_end: str = None, output_dir: str 
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
         
-        # Filter for GrabFood and Status Live (support DBR: Aplikator, Status Internal)
+        # Filter for GrabFood, Tipe Agency, and Status Live/Progress
         col_app = "Aplikator" if "Aplikator" in df.columns else ("Aplikasi" if "Aplikasi" in df.columns else None)
         col_st = "Status Internal" if "Status Internal" in df.columns else ("Status" if "Status" in df.columns else None)
+        col_type = "Tipe" if "Tipe" in df.columns else None
+
         grab_df = df[df[col_app].astype(str).str.contains("Grab", na=False, case=False)] if col_app else df
-        grab_df = grab_df[grab_df[col_st].astype(str).str.contains("Live", na=False, case=False)] if col_st else grab_df
+        if col_type:
+            grab_df = grab_df[grab_df[col_type].astype(str).str.contains("Agency", na=False, case=False)]
+        grab_df = grab_df[grab_df[col_st].astype(str).str.contains("Live|Progress", na=False, case=False)] if col_st else grab_df
         
         portals = []
         for idx, row in grab_df.iterrows():
@@ -88,8 +92,10 @@ async def run_all(date_start: str = None, date_end: str = None, output_dir: str 
             
             user = user_sf if pd.notna(user_sf) and str(user_sf).strip() != "-" else user_mt
             pwd = pwd_sf if pd.notna(pwd_sf) and str(pwd_sf).strip() != "-" else pwd_mt
+            if pd.isna(pwd) or str(pwd).strip() in ("-", "", "nan", "None"):
+                pwd = "Master@123"
             
-            if pd.notna(user) and pd.notna(pwd) and str(user).strip() != "-" and str(pwd).strip() != "-":
+            if pd.notna(user) and str(user).strip() not in ("-", "", "nan", "None"):
                 u_str = str(user).strip()
                 p_str = str(pwd).strip()
                 outlet = str(row.get("Nama Outlet", "Unknown")).strip()

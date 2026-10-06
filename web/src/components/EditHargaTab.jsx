@@ -314,7 +314,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
         .then(data => {
           const list = Array.isArray(data) ? data : [];
           setAllOutlets(list);
-          setUniqueParents(Array.from(new Set(list.map(o => o.nama_outlet || o.nama_resto_final || o.merchant_name).filter(Boolean))).sort());
+          setUniqueParents(Array.from(new Set(list.map(o => o.brand || o.merchant_name).filter(Boolean))).sort());
         });
     }).catch((err) => {
       console.error("Error fetching outlets:", err);
@@ -394,7 +394,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     const initialJobs = targetBranches.map(b => ({
       id: null,
       branchId: b.id,
-      name: b.brand || b.nama_resto_final || b.nama_outlet || b.merchant_name,
+      name: b.nama_resto_final || b.nama_listing || b.nama_outlet || b.brand || b.merchant_name,
       storeId: b.store_id,
       platform: b.platform || platform,
       status: "PENDING",
@@ -405,7 +405,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
     const createdJobs = [];
     for (const b of targetBranches) {
-      const label = b.brand || b.nama_outlet || b.merchant_name;
+      const label = b.nama_resto_final || b.nama_listing || b.brand || b.nama_outlet || b.merchant_name;
       try {
         const res = await fetch(`${API_BASE_URL}/api/jobs/pull?outlet_id=${b.id}`, {
           method: "POST",
@@ -525,7 +525,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
   const handleSelectOutlet = (name) => {
     setSelectedParent(name);
     setOpenOutletDropdown(false);
-    const targetBranches = allOutlets.filter(o => (o.nama_outlet || o.nama_resto_final || o.merchant_name) === name);
+    const targetBranches = allOutlets.filter(o => (o.brand || o.merchant_name) === name);
     setBranches(targetBranches);
     if (targetBranches.length === 1) {
       setSelectedBrandId(targetBranches[0].id);
@@ -704,7 +704,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     for (const bid of targets) {
       const branch = branches.find(x => x.id === bid);
       if (!branch) continue;
-      const label = branch.brand || branch.nama_outlet || branch.merchant_name;
+      const label = branch.nama_resto_final || branch.nama_listing || branch.brand || branch.nama_outlet || branch.merchant_name;
 
       const branchEdits = edits[bid] || {};
       const branchItems = branchMenus[bid] || [];
@@ -794,7 +794,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
     targets.forEach(bid => {
       const branch = branches.find(x => x.id === bid);
       if (!branch) return;
-      const bLabel = branch.brand || branch.nama_outlet || branch.merchant_name;
+      const bLabel = branch.nama_resto_final || branch.nama_listing || branch.brand || branch.nama_outlet || branch.merchant_name;
       const branchItems = branchMenus[bid] || [];
       const itemUpdates = [];
 
@@ -889,7 +889,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
           <div>
             <p className="text-[13px] font-bold uppercase tracking-[0.18em] text-red-600 dark:text-zinc-400">Pengaturan harga</p>
             <h2 className="mt-1 text-xl font-bold text-slate-900 dark:text-white">Tentukan target perubahan</h2>
-            <p className="mt-1 text-[15px] text-slate-500 dark:text-zinc-400">Pilih aplikator, outlet, dan brand (single-select), lalu lakukan tarik menu real-time sebelum melakukan perubahan harga.</p>
+            <p className="mt-1 text-[15px] text-slate-500 dark:text-zinc-400">Pilih aplikator, brand, dan listing (single-select), lalu lakukan tarik menu real-time sebelum melakukan perubahan harga.</p>
           </div>
           <div className="flex items-center gap-2 text-[13px] font-medium shrink-0">
             {gsheetSyncing ? (
@@ -966,9 +966,9 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             )}
           </div>
 
-          {/* 2: Outlet (Single Select) */}
+          {/* 2: Brand (Single Select) */}
           <div className="relative">
-            <StepLabel number={2} label={selectedParent ? `Outlet (1)` : "Outlet"} active={!!platform && !selectedParent} done={!!selectedParent} />
+            <StepLabel number={2} label={selectedParent ? `Brand (1)` : "Brand"} active={!!platform && !selectedParent} done={!!selectedParent} />
             <button type="button"
               disabled={!platform || loading || syncPhase === "syncing"}
               onClick={() => {
@@ -983,7 +983,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                   ? "Memuat..."
                   : !platform
                   ? "Pilih Aplikator dulu"
-                  : selectedParent || "Pilih Outlet..."}
+                  : selectedParent || "Pilih Brand..."}
               </span>
               <svg className={`w-3.5 h-3.5 text-zinc-400 shrink-0 transition-transform ${openOutletDropdown ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -994,13 +994,13 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setOpenOutletDropdown(false)} />
                 <div className="absolute left-0 right-0 top-full mt-1 z-30 bg-white dark:bg-black rounded-xl shadow-xl border border-red-100 dark:border-zinc-800 p-2.5 space-y-2 animate-scale-up min-w-[240px]">
-                  <input type="text" placeholder="Cari outlet..." value={search} onChange={e => setSearch(e.target.value)}
+                  <input type="text" placeholder="Cari brand..." value={search} onChange={e => setSearch(e.target.value)}
                     className="field-control py-2" autoFocus
                   />
 
                   <div className="max-h-48 overflow-y-auto space-y-0.5 pr-1">
                     {filtered.length === 0 ? (
-                      <p className="text-center text-[15px] text-zinc-400 dark:text-zinc-500 py-3">Tidak ada outlet cocok</p>
+                      <p className="text-center text-[15px] text-zinc-400 dark:text-zinc-500 py-3">Tidak ada brand cocok</p>
                     ) : (
                       filtered.map(name => {
                         const isSelected = selectedParent === name;
@@ -1023,9 +1023,9 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             )}
           </div>
 
-          {/* 3: Brand (Single Select) */}
+          {/* 3: Listing (Single Select) */}
           <div className="relative">
-            <StepLabel number={3} label={selectedBrandId ? "Brand (1)" : "Brand"} active={!!selectedParent && !selectedBrandId} done={!!selectedBrandId} />
+            <StepLabel number={3} label={selectedBrandId ? "Listing (1)" : "Listing"} active={!!selectedParent && !selectedBrandId} done={!!selectedBrandId} />
             <button type="button"
               disabled={!selectedParent || syncPhase === "syncing"}
               onClick={() => {
@@ -1037,10 +1037,10 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
             >
               <span className={`truncate font-semibold ${!selectedBrandObj ? "text-slate-400 dark:text-zinc-500" : "text-slate-800 dark:text-white"}`}>
                 {!selectedParent
-                  ? "Pilih Outlet dulu"
+                  ? "Pilih Brand dulu"
                   : selectedBrandObj
-                  ? (selectedBrandObj.brand || selectedBrandObj.nama_outlet || selectedBrandObj.merchant_name)
-                  : "Pilih Brand..."}
+                  ? (selectedBrandObj.nama_resto_final || selectedBrandObj.nama_listing || selectedBrandObj.nama_outlet || selectedBrandObj.merchant_name)
+                  : "Pilih Listing..."}
               </span>
               <svg className={`w-3.5 h-3.5 text-zinc-400 shrink-0 transition-transform ${openBranchDropdown ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -1054,7 +1054,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                   <div className="max-h-48 overflow-y-auto space-y-0.5 pr-1">
                     {branches.map(b => {
                       const isSelected = selectedBrandId === b.id;
-                      const l = b.brand || b.nama_outlet || b.merchant_name;
+                      const l = b.nama_resto_final || b.nama_listing || b.nama_outlet || b.merchant_name;
                       return (
                         <button key={b.id} type="button"
                           onClick={() => handleSelectBrand(b.id)}
@@ -1183,7 +1183,12 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
                     : "Penarikan menu selesai (sebagian perlu perhatian)"}
                 </h3>
                 <p className="text-[13px] text-slate-500 dark:text-zinc-400">
-                  Brand: <strong>{selectedBrandObj ? (selectedBrandObj.brand || selectedBrandObj.nama_outlet || selectedBrandObj.merchant_name) : selectedParent}</strong>
+                  Brand: <strong>{selectedParent}</strong>
+                  {selectedBrandObj && (
+                    <>
+                      {" · "}Listing: <strong>{selectedBrandObj.nama_resto_final || selectedBrandObj.nama_listing || selectedBrandObj.nama_outlet || selectedBrandObj.merchant_name}</strong>
+                    </>
+                  )}
                   {" · "}
                   {syncPhase === "syncing" ? (
                     <span>({completedSyncCount}/{syncJobs.length} selesai)</span>
@@ -1584,7 +1589,7 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-red-100 dark:border-zinc-800 pb-3">
                 <div className="min-w-0">
                   <h3 className="text-base font-bold text-zinc-800 dark:text-zinc-100 flex items-center gap-2">
-                    <span>{selectedBrandObj ? (selectedBrandObj.brand || selectedBrandObj.nama_outlet || selectedBrandObj.merchant_name) : ""}</span>
+                    <span>{selectedBrandObj ? (selectedBrandObj.nama_resto_final || selectedBrandObj.nama_listing || selectedBrandObj.brand || selectedBrandObj.nama_outlet || selectedBrandObj.merchant_name) : ""}</span>
                     <PlatformBadge platform={platform} storeId={selectedBrandObj?.store_id || "No Store ID"} />
                   </h3>
                   <p className="text-[13px] text-zinc-500 dark:text-zinc-400 mt-0.5">
