@@ -79,9 +79,16 @@ def get_outlets_for_applicator(applicator_choice: str):
     else:
         raise ValueError(f"Aplikator tidak didukung: {applicator_choice}")
         
-    # Filter Live, Pending, and Progress status (Managed outlets)
-    live_mask = df[col_status].astype(str).str.strip().str.lower().str.contains('live|pending|progress', na=False)
-    filtered_df = df[mask & live_mask].copy()
+    # Filter Tipe: Agency dan Status Internal: Live atau Progress
+    col_type = None
+    for c in ["Tipe", "tipe"]:
+        if c in df.columns:
+            col_type = c
+            break
+
+    type_mask = df[col_type].astype(str).str.strip().str.lower().str.contains('agency', na=False) if col_type else True
+    live_mask = df[col_status].astype(str).str.strip().str.lower().str.contains('live|progress', na=False)
+    filtered_df = df[mask & type_mask & live_mask].copy()
     
     # Deteksi kolom email GoFood (DBR: Email FoodMaster1/2; Legacy: Email Login Go 1/2)
     col_email1 = None
@@ -146,7 +153,7 @@ def get_outlets_for_applicator(applicator_choice: str):
             password = get_valid('S Kata Sandi Akses Pemilik', 'Kata Sandi', 'S Allvbadmin Kata Sandi Akses Staff')
         elif app_lower == 'grab':
             username = get_valid('Nama Pengguna', 'Nama Pengguna.1')
-            password = get_valid('Kata Sandi', 'Kata Sandi.1')
+            password = get_valid('Kata Sandi', 'Kata Sandi.1') or 'Master@123'
         else:
             username = emails[0] if emails else get_valid('Nama Pengguna', 'Nama Pengguna.1')
             password = get_valid('Kata Sandi', 'Kata Sandi.1')
@@ -162,6 +169,7 @@ def get_outlets_for_applicator(applicator_choice: str):
             'store_id': store_id,
             'owner': owner,
             'nama_resto_final': nama_listing,
+            'nama_listing': nama_listing,
             'nama_pendek': str(row.get('Nama Pendek Outlet (Shopee) Final', '')).strip(),
             'nama_outlet': nama_listing or outlet_name,
             'outlet': outlet_name,

@@ -29,7 +29,7 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
     Downloads the entire menu under the account and filters for the target store_id.
     """
     username = store_metadata.get('username', '').strip()
-    password = store_metadata.get('password', '').strip()
+    password = store_metadata.get('password', '').strip() or "Master@123"
     store_id = store_metadata.get('store_id', '').strip()
     nama_resto = store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or ''
     brand = store_metadata.get('brand') or ''
@@ -37,9 +37,9 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
     print(f"\n[GrabFood Menu Extractor]")
     print(f"[-] Target Outlet: {nama_resto} ({store_id})")
 
-    if not username or not password:
-        print("[!] Error: Username or password is empty.")
-        return False, "Username/password kosong."
+    if not username:
+        print("[!] Error: Username is empty.")
+        return False, "Username kosong."
 
     # 1. Import Grab API Scraper
     try:

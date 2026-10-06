@@ -1251,7 +1251,8 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
     return items_list, modifiers_list
 
 async def run_api_download_for_portal(user, pwd, start_date: str = None, end_date: str = None, browser=None, target_store_id: str = None, job_id: str = None):
-    is_valid, err_msg = validate_credentials(user, pwd)
+    primary_pwd = (pwd or "").strip() or "Master@123"
+    is_valid, err_msg = validate_credentials(user, primary_pwd)
     if not is_valid:
         logger.error(f"  ✗ [Validation] Invalid credentials for {user}: {err_msg}")
         return None, f"Invalid credentials: {err_msg}"
@@ -1334,12 +1335,36 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                 logger.info(f"🛑 [Grab] Job {job_id} cancelled during session check.")
                 return None, "Dibatalkan oleh pengguna"
 
-            api = GrabAPI(page, user, pwd)
+            api = GrabAPI(page, user, primary_pwd)
             mgid = await api.get_merchant_group_id()
 
             if not mgid:
                 logger.info(f"  [Session] Not active. Logging in...")
-                if await perform_login(page, user, pwd):
+                login_success = False
+                try:
+                    login_success = await perform_login(page, user, primary_pwd)
+                except IncorrectCredentialsError as ice:
+                    if primary_pwd != "Master@123":
+                        logger.warning(f"  ⚠️ [Login] Credentials error with password for {user}. Retrying with fallback 'Master@123'...")
+                        api = GrabAPI(page, user, "Master@123")
+                        try:
+                            login_success = await perform_login(page, user, "Master@123")
+                        except Exception as fb_ice:
+                            logger.error(f"  ✗ [Login] Fallback with Master@123 also failed: {fb_ice}")
+                    else:
+                        raise ice
+                except Exception as ex:
+                    logger.warning(f"  ⚠️ [Login] Exception during initial login: {ex}")
+
+                if not login_success and primary_pwd != "Master@123":
+                    logger.warning(f"  ⚠️ [Login] Initial login attempt failed for {user}. Retrying with fallback 'Master@123'...")
+                    try:
+                        api = GrabAPI(page, user, "Master@123")
+                        login_success = await perform_login(page, user, "Master@123")
+                    except Exception as fb_err:
+                        logger.error(f"  ✗ [Login] Fallback login error: {fb_err}")
+
+                if login_success:
                     mgid = await api.get_merchant_group_id()
                     if mgid:
                         _lock = FileLock(f"{session_path}.lock", timeout=30)

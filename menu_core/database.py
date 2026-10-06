@@ -139,6 +139,10 @@ class Outlet(Base):
     def platform(self):
         return self.account.platform if self.account else None
 
+    @property
+    def nama_listing(self):
+        return self.nama_resto_final
+
     def __repr__(self):
         return f"<Outlet {self.merchant_name} ({self.store_id})>"
 

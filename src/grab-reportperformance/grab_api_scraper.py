@@ -726,7 +726,31 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
     
                 if not mgid or is_on_login_page:
                     logger.info(f"  [Session] Not active or redirected to login. Logging in...")
-                    if await perform_login(page, user, pwd, is_retry):
+                    login_ok = False
+                    try:
+                        login_ok = await perform_login(page, user, pwd, is_retry)
+                    except IncorrectCredentialsError as ice:
+                        if pwd != "Master@123":
+                            logger.warning(f"  ⚠️ [Login] Credentials error with password for {user}. Retrying with fallback 'Master@123'...")
+                            api = GrabAPI(page, user, "Master@123")
+                            try:
+                                login_ok = await perform_login(page, user, "Master@123", is_retry)
+                            except Exception as fb_ice:
+                                logger.error(f"  ✗ [Login] Fallback with Master@123 also failed: {fb_ice}")
+                        else:
+                            raise ice
+                    except Exception as ex:
+                        logger.warning(f"  ⚠️ [Login] Error during initial login: {ex}")
+
+                    if not login_ok and pwd != "Master@123":
+                        logger.warning(f"  ⚠️ [Login] Initial login attempt failed for {user}. Retrying with fallback 'Master@123'...")
+                        try:
+                            api = GrabAPI(page, user, "Master@123")
+                            login_ok = await perform_login(page, user, "Master@123", is_retry)
+                        except Exception as fb_err:
+                            logger.error(f"  ✗ [Login] Fallback login error: {fb_err}")
+
+                    if login_ok:
                         # Setelah login sukses, pastikan kita berada di merchant page sebelum ambil API
                         try:
                             await page.goto("https://merchant.grab.com/dashboard", wait_until="domcontentloaded", timeout=30000)

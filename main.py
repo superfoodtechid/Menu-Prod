@@ -203,6 +203,7 @@ class OutletResponse(BaseModel):
     cabang: Optional[str]
     nama_resto_final: Optional[str]
     brand: Optional[str]
+    nama_listing: Optional[str] = None
     is_active: bool
     last_sync_at: Optional[datetime]
     created_at: datetime
@@ -340,12 +341,17 @@ def sync_sheets(db: Session = Depends(get_db)):
             if col in df.columns:
                 df[col] = df[col].ffill()
 
-    # Filter Live, Pending, and Progress status merchants
+    # Filter: Tipe harus Agency DAN Status Internal harus Live atau Progress
+    col_type = "Tipe" if "Tipe" in df.columns else None
     col_status = "Status Internal" if "Status Internal" in df.columns else ("Status" if "Status" in df.columns else None)
+
+    filter_mask = pd.Series(True, index=df.index)
+    if col_type:
+        filter_mask &= df[col_type].astype(str).str.strip().str.lower().str.contains("agency", na=False)
     if col_status:
-        df_live = df[df[col_status].astype(str).str.lower().str.contains("live|pending|progress", na=False)]
-    else:
-        df_live = df
+        filter_mask &= df[col_status].astype(str).str.strip().str.lower().str.contains("live|progress", na=False)
+
+    df_live = df[filter_mask]
 
     synced_outlet_ids = set()
 
@@ -428,6 +434,8 @@ def sync_sheets(db: Session = Depends(get_db)):
                 username = user_val
             if pwd_val not in ("-", "", "nan", "None"):
                 password = pwd_val
+            else:
+                password = "Master@123"
 
         elif platform == "gofood":
             # DBR: Email FoodMaster1 & Email FoodMaster2
@@ -483,6 +491,8 @@ def sync_sheets(db: Session = Depends(get_db)):
 
         brand_raw = row.get("Nama Brand") if pd.notna(row.get("Nama Brand")) else row.get("Brand")
         brand = str(brand_raw).strip() if pd.notna(brand_raw) and str(brand_raw).strip() not in ("-", "", "nan", "None") else None
+        if not brand:
+            brand = str(row.get("Outlet") or row.get("Merchant Name") or "").strip() or None
 
         nama_listing_raw = row.get("Nama Listing") if pd.notna(row.get("Nama Listing")) else row.get("Nama Resto Final")
         nama_resto_final = str(nama_listing_raw).strip() if pd.notna(nama_listing_raw) and str(nama_listing_raw).strip() not in ("-", "", "nan", "None") else None
@@ -1168,11 +1178,28 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     except Exception as e:
                         logger.warning(f"Grab dashboard navigate warning: {e}")
 
-                    api = GrabAPI(page, username, password)
+                    primary_pwd = (password or "").strip() or "Master@123"
+                    api = GrabAPI(page, username, primary_pwd)
                     mgid = await api.get_merchant_group_id()
                     if not mgid:
                         logger.info("Session state invalid or expired, running perform_login...")
-                        if await perform_login(page, username, password):
+                        login_ok = False
+                        try:
+                            login_ok = await perform_login(page, username, primary_pwd)
+                        except Exception as e:
+                            logger.warning(f"Initial Grab login error: {e}")
+                            login_ok = False
+
+                        if not login_ok and primary_pwd != "Master@123":
+                            logger.info("⚠️ Login Grab gagal dengan password utama, mencoba fallback ke 'Master@123'...")
+                            api = GrabAPI(page, username, "Master@123")
+                            try:
+                                login_ok = await perform_login(page, username, "Master@123")
+                            except Exception as fb_err:
+                                logger.error(f"Fallback Grab login error: {fb_err}")
+                                login_ok = False
+
+                        if login_ok:
                             mgid = await api.get_merchant_group_id()
                             if mgid:
                                 await context.storage_state(path=session_path)
