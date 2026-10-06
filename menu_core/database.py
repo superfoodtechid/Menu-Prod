@@ -125,6 +125,7 @@ class Outlet(Base):
     cabang = Column(String(255), nullable=True)
     nama_resto_final = Column(String(255), nullable=True)
     brand = Column(String(100), nullable=True)
+    nama_portal = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True)
     last_sync_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
@@ -227,6 +228,8 @@ def init_db():
                     conn.execute(text("ALTER TABLE outlets ADD COLUMN nama_resto_final VARCHAR(255)"))
                 if "brand" not in columns:
                     conn.execute(text("ALTER TABLE outlets ADD COLUMN brand VARCHAR(255)"))
+                if "nama_portal" not in columns:
+                    conn.execute(text("ALTER TABLE outlets ADD COLUMN nama_portal VARCHAR(255)"))
                 # Create indexes if they do not exist to optimize joins and filtering
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_outlets_account_id ON outlets(account_id)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_outlets_store_id ON outlets(store_id)"))

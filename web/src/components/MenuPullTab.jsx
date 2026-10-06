@@ -166,7 +166,7 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
       ? allOutlets.filter((o) => o.owner === selectedOwner)
       : allOutlets;
     const parents = Array.from(
-      new Set(filteredByOwner.map((o) => o.nama_outlet || o.nama_resto_final || o.merchant_name).filter(Boolean))
+      new Set(filteredByOwner.map((o) => o.nama_outlet || o.merchant_name).filter(Boolean))
     ).sort();
     setUniqueParentNames(parents);
     setSelectedParents((current) => current.filter((p) => parents.includes(p)));
@@ -182,7 +182,7 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
 
     // Filter branches whose parent name is in selectedParents list and owner matches if selectedOwner exists
     const filtered = allOutlets.filter((o) => {
-      const parentName = o.nama_outlet || o.nama_resto_final || o.merchant_name;
+      const parentName = o.nama_outlet || o.merchant_name;
       const matchParent = selectedParents.includes(parentName);
       const matchOwner = selectedOwner ? o.owner === selectedOwner : true;
       return matchParent && matchOwner;
@@ -670,9 +670,9 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
             )}
           </div>
 
-          {/* 4: CABANG */}
+          {/* 4: LISTING */}
           <div className="relative">
-            <StepLabel number={4} label={`Cabang ${availableBranches.length ? `(${checkedBranchIds.length})` : ""}`} active={selectedParents.length > 0 && checkedBranchIds.length === 0} done={checkedBranchIds.length > 0} />
+            <StepLabel number={4} label={`Listing ${availableBranches.length ? `(${checkedBranchIds.length})` : ""}`} active={selectedParents.length > 0 && checkedBranchIds.length === 0} done={checkedBranchIds.length > 0} />
             <button
               type="button"
               disabled={availableBranches.length === 0 || triggering}
@@ -687,8 +687,8 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
             >
               <span className={`truncate ${checkedBranchIds.length ? "font-semibold text-zinc-800 dark:text-white" : "text-zinc-400 dark:text-zinc-500"}`}>
                 {selectedParents.length === 0 ? "Pilih Outlet dulu"
-                  : checkedBranchIds.length === availableBranches.length ? `Semua Cabang (${availableBranches.length})`
-                    : `${checkedBranchIds.length} dari ${availableBranches.length} Cabang`}
+                  : checkedBranchIds.length === availableBranches.length ? `Semua Listing (${availableBranches.length})`
+                    : `${checkedBranchIds.length} dari ${availableBranches.length} Listing`}
               </span>
               <svg className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${openBranchDropdown ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -708,7 +708,7 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                   <div className="max-h-60 space-y-0.5 overflow-y-auto pr-1">
                     {availableBranches.map((branch) => {
                       const checked = checkedBranchIds.includes(branch.id);
-                      const branchLabel = branch.brand || branch.nama_outlet || branch.merchant_name;
+                      const branchLabel = branch.nama_resto_final || branch.nama_listing || branch.brand || branch.nama_outlet || branch.merchant_name;
                       return (
                         <label key={branch.id} className={`flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2 transition-colors ${
                           checked ? "bg-red-50/60 dark:bg-zinc-900 text-red-700 dark:text-white font-bold" : "text-slate-700 hover:bg-slate-50 dark:text-white dark:hover:bg-zinc-900"
@@ -792,11 +792,11 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                       Combined C5: {combinedResult.outlet_name}
                     </h3>
                     <span className="rounded-full bg-red-100 dark:bg-red-950 px-2.5 py-0.5 text-[12px] font-bold text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800 shrink-0">
-                      {combinedResult.combined_count} Cabang Tergabung
+                      {combinedResult.combined_count} Listing Tergabung
                     </span>
                   </div>
                   <p className="text-[13px] leading-relaxed text-slate-600 dark:text-zinc-400">
-                    File C5 seluruh cabang outlet <strong>{combinedResult.outlet_name}</strong> telah digabungkan menjadi satu file.
+                    File C5 seluruh listing outlet <strong>{combinedResult.outlet_name}</strong> telah digabungkan menjadi satu file.
                   </p>
                 </div>
                 <div className="flex flex-col gap-2 shrink-0 sm:w-auto w-full">

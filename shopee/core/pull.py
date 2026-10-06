@@ -61,11 +61,15 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
     if not store_id or store_id == '-' or store_id.lower() == 'nan':
         store_id = None
         
-    m_name = store_metadata.get('merchant_name', '')
-    if not m_name or m_name.lower() == 'nan' or m_name == '-':
-        target_name = store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or ''
+    nama_portal = store_metadata.get('nama_portal')
+    if nama_portal and str(nama_portal).strip() and str(nama_portal).lower() not in ('nan', '-', 'none'):
+        target_name = str(nama_portal).strip()
     else:
-        target_name = m_name
+        m_name = store_metadata.get('merchant_name', '')
+        if not m_name or m_name.lower() == 'nan' or m_name == '-':
+            target_name = store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or ''
+        else:
+            target_name = m_name
         
     nama_panjang = store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or target_name
     nama_pendek = store_metadata.get('brand') or store_metadata.get('nama_pendek') or store_metadata.get('nama_outlet') or target_name

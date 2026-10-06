@@ -15,6 +15,9 @@ if str(AUTOMATION_DIR) not in sys.path:
 from core import browser
 
 def _resolve_target_merchant_name(username: str, merchant_name: str, store_metadata: dict) -> str:
+    nama_portal = store_metadata.get('nama_portal')
+    if nama_portal and str(nama_portal).strip() and str(nama_portal).lower() not in ('nan', '-', 'none'):
+        return str(nama_portal).strip()
     if merchant_name and merchant_name.lower() != 'nan' and merchant_name != '-':
         return merchant_name
     return store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or ''
