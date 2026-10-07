@@ -204,6 +204,7 @@ class OutletResponse(BaseModel):
     nama_resto_final: Optional[str]
     brand: Optional[str]
     nama_listing: Optional[str] = None
+    nama_portal: Optional[str] = None
     is_active: bool
     last_sync_at: Optional[datetime]
     created_at: datetime
@@ -497,8 +498,11 @@ def sync_sheets(db: Session = Depends(get_db)):
         nama_listing_raw = row.get("Nama Listing") if pd.notna(row.get("Nama Listing")) else row.get("Nama Resto Final")
         nama_resto_final = str(nama_listing_raw).strip() if pd.notna(nama_listing_raw) and str(nama_listing_raw).strip() not in ("-", "", "nan", "None") else None
 
-        outlet_raw = row.get("Outlet") if pd.notna(row.get("Outlet")) else row.get("Nama Outlet")
+        outlet_raw = row.get("Nama Outlet") if pd.notna(row.get("Nama Outlet")) else row.get("Outlet")
         nama_outlet = str(outlet_raw).strip() if pd.notna(outlet_raw) and str(outlet_raw).strip() not in ("-", "", "nan", "None") else (nama_resto_final or None)
+
+        portal_raw = row.get("Nama Portal") if pd.notna(row.get("Nama Portal")) else row.get("Portal")
+        nama_portal = str(portal_raw).strip() if pd.notna(portal_raw) and str(portal_raw).strip() not in ("-", "", "nan", "None") else None
 
         merchant_name = str(row.get("Outlet") or row.get("Merchant Name") or brand or nama_outlet or "").strip()
         cabang = brand or str(row.get("Cabang", "")).strip() or None
@@ -530,6 +534,7 @@ def sync_sheets(db: Session = Depends(get_db)):
                 cabang=cabang,
                 nama_resto_final=nama_resto_final,
                 brand=brand,
+                nama_portal=nama_portal,
                 is_active=True
             )
             db.add(db_outlet)
@@ -552,6 +557,7 @@ def sync_sheets(db: Session = Depends(get_db)):
                 db_outlet.cabang = cabang
             db_outlet.nama_resto_final = nama_resto_final
             db_outlet.brand = brand
+            db_outlet.nama_portal = nama_portal
             db_outlet.is_active = True
             db.flush()
             updated_outlets += 1
@@ -819,6 +825,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "cabang": outlet.cabang,
                 "nama_resto_final": outlet.nama_resto_final,
                 "brand": outlet.brand,
+                "nama_portal": outlet.nama_portal,
                 "username": master_user,
                 "password": master_pass,
                 "portal": account.portal
@@ -1082,7 +1089,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                 "password": account.password,
                 "merchant_name": outlet.merchant_name,
                 "nama_resto_final": outlet.nama_resto_final,
-                "nama_outlet": outlet.nama_outlet
+                "nama_outlet": outlet.nama_outlet,
+                "brand": outlet.brand,
+                "nama_portal": outlet.nama_portal
             }
 
             job.progress_pct = 30
@@ -2792,6 +2801,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                         "merchant_name": outlet.merchant_name or outlet.outlet_name,
                         "nama_resto_final": outlet.outlet_name,
                         "nama_outlet": outlet.outlet_name,
+                        "nama_portal": getattr(outlet, 'nama_portal', None),
                     }
                     results = push_c5_shopee_for_merchant(
                         store_metadata=store_meta,

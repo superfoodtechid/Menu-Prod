@@ -162,8 +162,9 @@ def get_outlets_for_applicator(applicator_choice: str):
         owner = get_valid('Nama Pemilik', 'Owner')
         brand = get_valid('Nama Brand', 'Brand')
         nama_listing = get_valid('Nama Listing', 'Nama Resto Final', 'Nama Tarikan', 'Outlet', 'Nama Outlet')
-        outlet_name = get_valid('Outlet', 'Nama Outlet', 'Nama Listing')
+        outlet_name = get_valid('Nama Outlet', 'Outlet', 'Nama Listing')
         merchant_name = get_valid('Outlet', 'Merchant Name', 'Nama Brand')
+        nama_portal = get_valid('Nama Portal', 'Portal')
             
         outlets.append({
             'store_id': store_id,
@@ -175,6 +176,7 @@ def get_outlets_for_applicator(applicator_choice: str):
             'outlet': outlet_name,
             'aplikasi': str(row.get(col_app, '')).strip(),
             'merchant_name': merchant_name,
+            'nama_portal': nama_portal,
             'brand': brand,
             'email': emails[0] if emails else '',
             'emails': emails,
