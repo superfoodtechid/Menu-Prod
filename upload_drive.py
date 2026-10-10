@@ -87,6 +87,62 @@ def upload_combined_to_drive(file_path: str, outlet_name: str, custom_filename: 
         print(f"❌ Exception saat upload: {e}")
         return None
 
+
+def find_latest_combined_c5_url(outlet_name: str) -> Optional[str]:
+    """Find the newest C5 workbook in the configured Drive owner folder."""
+    try:
+        env_vals = dotenv_values()
+        api_key = env_vals.get("GOOGLE_DRIVE_API_KEY") or os.getenv("GOOGLE_DRIVE_API_KEY")
+        parent_id = (
+            env_vals.get("GDRIVE_PARENT_FOLDER_ID")
+            or env_vals.get("GDRIVE_FOLDER_ID")
+            or os.getenv("GDRIVE_PARENT_FOLDER_ID")
+            or os.getenv("GDRIVE_FOLDER_ID")
+            or DEFAULT_FOLDER_ID
+        )
+        if not api_key or not parent_id or not outlet_name:
+            return None
+
+        clean_folder_name = "".join(c for c in outlet_name if c.isalnum() or c in (' ', '_', '-')).strip()
+        escaped_name = clean_folder_name.replace("\\", "\\\\").replace("'", "\\'")
+        base_url = "https://www.googleapis.com/drive/v3/files"
+        common_params = {"key": api_key, "pageSize": 1000}
+
+        folder_response = requests.get(base_url, params={
+            **common_params,
+            "q": f"'{parent_id}' in parents and name = '{escaped_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+            "fields": "files(id,name,mimeType)",
+        }, timeout=20)
+        folder_response.raise_for_status()
+        folders = folder_response.json().get("files", [])
+        folder = next((item for item in folders if item.get("name") == clean_folder_name), None)
+        if not folder:
+            return None
+
+        files_response = requests.get(base_url, params={
+            **common_params,
+            "q": f"'{folder['id']}' in parents and trashed = false",
+            "orderBy": "modifiedTime desc",
+            "fields": "files(id,name,mimeType,modifiedTime,webViewLink)",
+        }, timeout=20)
+        files_response.raise_for_status()
+        c5_files = [
+            item for item in files_response.json().get("files", [])
+            if str(item.get("name", "")).casefold().startswith("c5.")
+        ]
+        if not c5_files:
+            return None
+
+        latest = c5_files[0]
+        if latest.get("webViewLink"):
+            return latest["webViewLink"]
+        if latest.get("mimeType") == "application/vnd.google-apps.spreadsheet":
+            return f"https://docs.google.com/spreadsheets/d/{latest['id']}/edit"
+        return f"https://drive.google.com/file/d/{latest['id']}/view"
+    except Exception as exc:
+        print(f"Tidak dapat mencari C5 gabungan sebelumnya di Drive: {type(exc).__name__}")
+        return None
+
 if __name__ == "__main__":
     # Contoh penggunaan untuk pengetesan (jika dijalankan langsung)
     import sys

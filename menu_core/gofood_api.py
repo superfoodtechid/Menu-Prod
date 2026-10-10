@@ -509,20 +509,84 @@ def push_gofood_item_price_single(
     headers_direct = _get_auth_headers(token, passkey=passkey)
     patch_group_id = group_id or orig_item.get('menu_common_id') or cat_common_id
     v2_url = f"https://api.gojekapi.com/gofood/merchant/v2/menu_groups/{patch_group_id}/menu_items/{item_id}"
+    retry_delay_seconds = 1.0
 
-    def _send_patch_request(payload_data: dict, max_retries: int = 2) -> dict:
+    def _is_transient_gofood_response(result: dict) -> bool:
+        if not isinstance(result, dict):
+            return False
+        if result.get('status') in (408, 425, 429, 500, 502, 503, 504):
+            return True
+        body = result.get('body') or result.get('error') or ''
+        try:
+            parsed = json.loads(body) if isinstance(body, str) else body
+            if isinstance(parsed, dict) and (
+                parsed.get('success') is False
+                or parsed.get('ok') is False
+                or (parsed.get('errors') and parsed.get('success') is not True)
+            ):
+                result['ok'] = False
+        except (TypeError, ValueError):
+            pass
+        message = str(body).casefold()
+        busy = any(term in message for term in (
+            'server kami sedang sibuk', 'server busy', 'temporarily unavailable',
+            'service unavailable', 'coba lagi dalam', 'try again later'
+        ))
+        if busy:
+            result['ok'] = False
+        return busy
+
+    def _send_patch_request(payload_data: dict, max_retries: int = 3) -> dict:
+        nonlocal retry_delay_seconds
         for attempt in range(max_retries + 1):
             try:
                 resp = session.patch(v2_url, headers=headers_direct, json=payload_data, timeout=15)
                 code = resp.status_code
-                if code in (429, 403, 503, 504) and attempt < max_retries:
-                    backoff_sec = 6.0 * (attempt + 1)
-                    time.sleep(backoff_sec)
+                result = {'ok': 200 <= code < 300, 'status': code, 'body': resp.text}
+                is_transient = _is_transient_gofood_response(result)
+                if result['ok'] and not is_transient:
+                    retry_delay_seconds = max(0.75, retry_delay_seconds * 0.75)
+                    return result
+                if is_transient and attempt < max_retries:
+                    delay = min(5.0, retry_delay_seconds)
+                    time.sleep(delay)
+                    retry_delay_seconds = min(5.0, retry_delay_seconds * 2)
                     continue
-                return {'ok': 200 <= code < 300, 'status': code, 'body': resp.text}
+                return result
             except Exception as ex:
                 if attempt < max_retries:
-                    time.sleep(2.0)
+                    delay = min(5.0, retry_delay_seconds)
+                    time.sleep(delay)
+                    retry_delay_seconds = min(5.0, retry_delay_seconds * 2)
+                    continue
+                return {'ok': False, 'status': 0, 'error': str(ex)}
+        return {'ok': False, 'status': 0, 'error': 'Max retries exceeded'}
+
+    def _send_v1_price(payload_data: dict) -> dict:
+        nonlocal retry_delay_seconds
+        v1_item_id = orig_item.get('id') or orig_item.get('common_id') or item_id
+        if not v1_item_id or not rest_uuid:
+            return {'ok': False, 'status': 0, 'error': 'ID item/restoran untuk fallback V1 tidak tersedia.'}
+        v1_url = f"https://api.gojekapi.com/gofood/merchant/v1/restaurants/{rest_uuid}/menu_items/{v1_item_id}"
+        for attempt in range(3):
+            try:
+                resp = session.put(v1_url, headers=headers_direct, json=payload_data, timeout=15)
+                result = {'ok': 200 <= resp.status_code < 300, 'status': resp.status_code, 'body': resp.text}
+                is_transient = _is_transient_gofood_response(result)
+                if result['ok'] and not is_transient:
+                    retry_delay_seconds = max(0.75, retry_delay_seconds * 0.75)
+                    return result
+                if is_transient and attempt < 2:
+                    delay = min(5.0, retry_delay_seconds)
+                    time.sleep(delay)
+                    retry_delay_seconds = min(5.0, retry_delay_seconds * 2)
+                    continue
+                return result
+            except Exception as ex:
+                if attempt < 2:
+                    delay = min(5.0, retry_delay_seconds)
+                    time.sleep(delay)
+                    retry_delay_seconds = min(5.0, retry_delay_seconds * 2)
                     continue
                 return {'ok': False, 'status': 0, 'error': str(ex)}
         return {'ok': False, 'status': 0, 'error': 'Max retries exceeded'}
@@ -541,12 +605,8 @@ def push_gofood_item_price_single(
 
         res = _send_patch_request(v2_payload)
 
-        # Jika terkena 429, jeda tambahan
-        if res and res.get('status') == 429:
-            time.sleep(8.0)
-
         # Fallback 1: variant_category_common_ids
-        if (not res or not res.get('ok')) and res.get('status') != 429:
+        if (not res or not res.get('ok')) and not _is_transient_gofood_response(res):
             time.sleep(0.4)
             vars_ids = orig_item.get('variant_category_common_ids') or orig_item.get('variant_category_ids')
             if vars_ids and isinstance(vars_ids, list) and len(vars_ids) > 0:
@@ -557,23 +617,15 @@ def push_gofood_item_price_single(
                     res = res_var
 
         # Fallback 2: V1 PUT jika V2 gagal
-        if (not res or not res.get('ok')) and res.get('status') != 429:
-            time.sleep(0.4)
-            v1_item_id = orig_item.get('id') or orig_item.get('common_id') or item_id
-            if v1_item_id and rest_uuid:
-                v1_url = f"https://api.gojekapi.com/gofood/merchant/v1/restaurants/{rest_uuid}/menu_items/{v1_item_id}"
-                v1_payload = {
-                    "name": orig_item.get('name'),
-                    "price": int(step_p),
-                    "active": orig_item.get('active', True),
-                    "description": orig_item.get('description', ''),
-                    "image": orig_item.get('image_url', orig_item.get('image', ''))
-                }
-                try:
-                    v1_resp = session.put(v1_url, headers=headers_direct, json=v1_payload, timeout=15)
-                    res = {'ok': 200 <= v1_resp.status_code < 300, 'status': v1_resp.status_code, 'body': v1_resp.text}
-                except Exception as e:
-                    res = {'ok': False, 'status': 0, 'error': str(e)}
+        if (not res or not res.get('ok')) and not _is_transient_gofood_response(res):
+            v1_payload = {
+                "name": orig_item.get('name'),
+                "price": int(step_p),
+                "active": orig_item.get('active', True),
+                "description": orig_item.get('description', ''),
+                "image": orig_item.get('image_url', orig_item.get('image', ''))
+            }
+            res = _send_v1_price(v1_payload)
 
         if not (res and res.get('ok')):
             err_msg = res.get('body') or res.get('error') or "GoFood API error" if res else "Unknown error"
@@ -752,4 +804,3 @@ def push_gofood_price_batch(
         "skipped_count": skipped_count,
         "results": results
     }
-

@@ -798,6 +798,16 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                   <p className="text-[13px] leading-relaxed text-slate-600 dark:text-zinc-400">
                     File C5 seluruh listing outlet <strong>{combinedResult.outlet_name}</strong> telah digabungkan menjadi satu file.
                   </p>
+                  <p className="text-xs text-slate-500 dark:text-zinc-400">
+                    {combinedResult.offline_fields_restored > 0
+                      ? `${combinedResult.offline_fields_restored} nilai harga offline dipulihkan berdasarkan SID dan Item ID, atau nama item unik jika ID belum tersedia.`
+                      : "Tidak ditemukan nilai harga offline pada file gabungan sebelumnya."}
+                  </p>
+                  {combinedResult.preservation_warning && (
+                    <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
+                      {combinedResult.preservation_warning}
+                    </p>
+                  )}
                 </div>
                 <div className="flex flex-col gap-2 shrink-0 sm:w-auto w-full">
                   {combinedResult.gspread_url && (
