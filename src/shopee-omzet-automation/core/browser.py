@@ -1931,8 +1931,12 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
                 return texts.some(function(t) { return bodyText.includes(t); });
             """)
 
-            # URL-based check: if URL contains /otp, /verify, or authenticate/login/otp
-            is_otp_url = any(kw in current_url for kw in ["/otp", "login/otp", "/verify", "authenticate/login/otp", "authenticate/login"])
+            # URL-based check: only explicit OTP/verification routes count as OTP.
+            # Shopee's SSO confirmation page also uses `/authenticate/login`; it
+            # merely shows the already selected account and a "Lanjutkan" button.
+            # Treating that generic route as OTP caused a false WAITING_OTP request
+            # before the confirmation button could complete the session.
+            is_otp_url = any(kw in current_url for kw in ["/otp", "login/otp", "/verify", "authenticate/login/otp"])
 
             if otp_input or is_verification_page or is_otp_url:
                 if not interactive:
@@ -3279,4 +3283,3 @@ def refresh_tokens(driver, fallback_entity_id=None) -> dict:
     all_c = get_all_cookies_dict(driver)
     save_session(t, eid or "", extra_cookies=all_c)
     return {"shopee_tob_token": t, "shopee_tob_entity_id": eid or "", "extra_cookies": all_c}
-

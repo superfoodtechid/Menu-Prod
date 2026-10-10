@@ -53,6 +53,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("FoodMasterAPI")
 
+
+def norm_str(value):
+    """Normalize menu text consistently across C5 parsing and push execution."""
+    return re.sub(r'\s+', ' ', str(value or '').strip().lower())
+
 # Initialize database tables on startup
 app = FastAPI(
     title="FoodMaster Menu Portal API",
@@ -123,13 +128,14 @@ def startup_event():
             if src_d.is_dir():
                 for dst_dir in [shopee_auto_dir, shopee_core_dir]:
                     dst_prof = dst_dir / src_d.name
-                    if not dst_prof.exists():
-                        shutil.copytree(src_d, dst_prof, dirs_exist_ok=True)
+                    # Refresh an existing profile too. Archive restores can
+                    # preserve an old directory mtime, so comparing only the
+                    # top-level folder would incorrectly keep stale cookies.
+                    shutil.copytree(src_d, dst_prof, dirs_exist_ok=True)
                 # also mirror allvbadmin or fallback to standard chrome_profile name in shopee_core
                 if "allvbadmin" in src_d.name:
                     dst_shopee_prof = shopee_core_dir / "chrome_profile"
-                    if not dst_shopee_prof.exists():
-                        shutil.copytree(src_d, dst_shopee_prof, dirs_exist_ok=True)
+                    shutil.copytree(src_d, dst_shopee_prof, dirs_exist_ok=True)
         logger.info("✅ Persistent Shopee sessions & Chrome profiles synced from /app/data")
     except Exception as err:
         logger.warning(f"⚠️ Shopee session persistence sync warning: {err}")
@@ -273,7 +279,12 @@ class C5PushItemUpdate(BaseModel):
     category: Optional[str] = ""
     item_name: Optional[str] = ""
     item_name_new: Optional[str] = ""
+    baseline_name: Optional[str] = ""
+    baseline_category: Optional[str] = ""
+    baseline_photo: Optional[str] = ""
+    baseline_description: Optional[str] = ""
     photo_link: Optional[str] = ""
+    description: Optional[str] = ""
     current_fake_price: Optional[float] = None
     new_fake_price: Optional[float] = None
     current_real_price: Optional[float] = None
@@ -831,8 +842,10 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "portal": account.portal
             }
             
-            # Run shopee extraction (headless=True for stability on headless servers/Raspberry Pi)
-            is_headless = True
+            # Shopee runs with a visible browser when HEADLESS_SHOPEE=false.
+            # This is useful for the allvbadmin profile, which may require an
+            # interactive session or visual verification during a pull.
+            is_headless = (os.getenv("HEADLESS_SHOPEE", "false").strip().lower() in ("true", "1", "yes"))
             success, result = extract_shopee_menu(store_metadata, str(exports_dir), headless=is_headless)
             
             if not success:
@@ -1103,8 +1116,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                 job.progress_pct = int(30 + ((idx + 1) / total) * 60)
                 db.commit()
 
-            # Headless=True for stability on headless servers/Raspberry Pi
-            is_headless = True
+            is_headless = (os.getenv("HEADLESS_SHOPEE", "false").strip().lower() in ("true", "1", "yes"))
             results = push_price_update_batch(store_metadata, updates_list, headless=is_headless, on_item_progress=on_progress)
 
             for res in results:
@@ -1907,6 +1919,15 @@ def get_job_status(job_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Job not found")
     return job
 
+@app.get("/api/jobs/{job_id}/audit-trails", response_model=List[AuditTrailResponse])
+def get_job_audit_trails(job_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Return every item result for a push job, including large C5 batches."""
+    if not db.query(Job.id).filter(Job.id == job_id).first():
+        raise HTTPException(status_code=404, detail="Job not found")
+    return db.query(AuditTrail).filter(AuditTrail.job_id == job_id).order_by(
+        AuditTrail.created_at.asc(), AuditTrail.id.asc()
+    ).all()
+
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_job_endpoint(job_id: uuid.UUID, db: Session = Depends(get_db)):
     from menu_core.job_control import cancel_job
@@ -1987,7 +2008,7 @@ def download_job_file(job_id: uuid.UUID, db: Session = Depends(get_db)):
 @app.post("/api/jobs/combine-c5")
 def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)):
     from menu_core.c5_combiner import combine_c5
-    from upload_drive import upload_combined_to_drive
+    from upload_drive import upload_combined_to_drive, find_latest_combined_c5_url
     from datetime import datetime
 
     excel_paths = []
@@ -2032,8 +2053,33 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
     excel_filename = f"C5. {timestamp_version} {clean_owner_name}.xlsx"
     combined_path = str(combined_dir / excel_filename)
 
-    ok = combine_c5(excel_paths, combined_path)
-    if not ok:
+    previous_workbook = None
+    preservation_warning = None
+    automatic_previous_url = find_latest_combined_c5_url(clean_owner_name)
+    if automatic_previous_url:
+        try:
+            previous_workbook, _ = _download_gdrive_or_gsheet_bytes(automatic_previous_url)
+        except Exception as exc:
+            logger.warning("Tidak dapat membaca C5 terbaru yang ditemukan di Drive (%s).", type(exc).__name__)
+            preservation_warning = "C5 gabungan terbaru di Drive tidak dapat dibaca. Nilai harga offline mungkin hanya dipulihkan dari salinan lokal."
+
+    # Keep a local fallback for older runs and downloaded workbooks saved on the server.
+    if previous_workbook is None:
+        older_combined_files = sorted(
+            (path for path in combined_dir.glob("C5.*.xlsx") if str(path) != combined_path),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if older_combined_files:
+            previous_workbook = str(older_combined_files[0])
+
+    combine_result = combine_c5(
+        excel_paths,
+        combined_path,
+        previous_workbook=previous_workbook,
+        return_restore_count=True,
+    )
+    if not combine_result or not combine_result.get("success"):
         raise HTTPException(status_code=500, detail="Gagal menggabungkan file C5.")
 
     drive_filename = excel_filename
@@ -2047,6 +2093,8 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
         "excel_filename": excel_filename,
         "excel_path": combined_path,
         "gspread_url": gspread_url,
+        "preservation_warning": preservation_warning,
+        "offline_fields_restored": combine_result.get("offline_fields_restored", 0),
         "download_url": f"/api/jobs/download-file?path={quote(combined_path)}&filename={quote(excel_filename)}",
         "combined_count": len(excel_paths),
         "outlet_name": owner_name
@@ -2115,6 +2163,66 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
         merchant_id = "G" + merchant_id
 
     results = []
+    retry_delay_seconds = 1.0
+
+    def is_gofood_transient_error(response):
+        if not isinstance(response, dict):
+            return False
+        if response.get("status") in (408, 425, 429, 500, 502, 503, 504):
+            return True
+        body = response.get("body") or response.get("error") or ""
+        try:
+            parsed = json.loads(body) if isinstance(body, str) else body
+            if isinstance(parsed, dict) and (
+                parsed.get("success") is False
+                or parsed.get("ok") is False
+                or (parsed.get("errors") and parsed.get("success") is not True)
+            ):
+                response["ok"] = False
+        except (TypeError, ValueError):
+            pass
+        message = str(body).casefold()
+        is_busy_message = any(term in message for term in (
+            "server kami sedang sibuk", "server busy", "temporarily unavailable",
+            "service unavailable", "coba lagi dalam", "try again later",
+        ))
+        if is_busy_message:
+            response["ok"] = False
+        return response.get("status") in (408, 425, 429, 500, 502, 503, 504) or is_busy_message
+
+    def call_gofood_with_backoff(operation, action, max_attempts=4):
+        nonlocal retry_delay_seconds
+        response = None
+        for attempt in range(max_attempts):
+            response = operation()
+            if isinstance(response, dict) and response.get("ok"):
+                # Some GoFood responses use HTTP 200 with a business-level failure body.
+                is_gofood_transient_error(response)
+                if response.get("ok"):
+                    retry_delay_seconds = max(0.75, retry_delay_seconds * 0.75)
+                    return response
+            if not is_gofood_transient_error(response) or attempt == max_attempts - 1:
+                return response
+            delay = min(5.0, retry_delay_seconds)
+            logger.warning("GoFood %s sedang sibuk; mencoba ulang %s/%s setelah %.2f detik.", action, attempt + 1, max_attempts - 1, delay)
+            time.sleep(delay)
+            retry_delay_seconds = min(5.0, retry_delay_seconds * 2)
+        return response
+
+    def wait_before_next_item(index, total):
+        import random
+        delay = max(random.uniform(1.2, 2.5), min(5.0, retry_delay_seconds))
+        if (index + 1) % 20 == 0 and (index + 1) < total:
+            delay = max(delay, 3.0)
+        time.sleep(min(5.0, delay))
+
+    def report_item_result(update, status_str, error=None, applied=None):
+        if not item_result_cb:
+            return
+        try:
+            item_result_cb(update, status_str, error, applied=applied)
+        except Exception as callback_error:
+            logger.warning("Gagal merekam hasil item C5 GoFood (%s).", type(callback_error).__name__)
 
     with sync_playwright() as p:
         import re
@@ -2371,11 +2479,133 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 'Referer': 'https://portal.gofoodmerchant.co.id/',
             }
 
+            def upload_gofood_photo(source_url, item_name="menu-item"):
+                """Upload a remote image to GoFood cloud storage and return its CDN URL.
+
+                The menu PATCH endpoint does not upload remote URLs itself.  It treats
+                the last URL segment as an already-uploaded filename, which produces a
+                broken CDN image.  Always perform the cloud-storage handshake first.
+                """
+                if not source_url or not str(source_url).startswith(("http://", "https://")):
+                    return {"ok": False, "error": "URL gambar tidak valid."}
+                try:
+                    img_res = requests.get(source_url, timeout=30)
+                    if not img_res.ok or not img_res.content:
+                        return {"ok": False, "error": f"Gagal mengunduh gambar (HTTP {img_res.status_code})."}
+                    content_type = (img_res.headers.get("content-type") or "image/jpeg").split(";")[0].strip().lower()
+                    if not content_type.startswith("image/"):
+                        return {"ok": False, "error": f"URL tidak mengembalikan gambar ({content_type})."}
+                    # The GoFood cloud endpoint currently validates the filename and
+                    # accepts only .jpg/.jpeg, even when the source is PNG/WebP.
+                    # Keep the original bytes/content type; storage/CDN detects the
+                    # image payload while the required request filename stays JPG.
+                    ext = "jpg"
+                    cloud_api = "https://api.gojekapi.com/gofood/merchant/v1/images/cloud_storage_url"
+                    cloud_headers = {
+                        "Accept": "application/json, text/plain, */*",
+                        "Accept-Language": "id",
+                        "Authentication-Type": "go-id",
+                        "Authorization": token,
+                        "Content-Type": "application/json",
+                        "Gojek-Country-Code": "ID",
+                        "Origin": "https://portal.gofoodmerchant.co.id",
+                        "Referer": "https://portal.gofoodmerchant.co.id/",
+                    }
+                    req_payload = {"file_name": f"menu-item-image_{int(time.time() * 1000)}.{ext}"}
+                    cloud_res = requests.post(cloud_api, headers=cloud_headers, json=req_payload, timeout=20)
+                    if not cloud_res.ok:
+                        return {"ok": False, "error": f"Gagal meminta URL upload (HTTP {cloud_res.status_code})."}
+                    cloud_data = cloud_res.json()
+
+                    def decode_url(value):
+                        if not value:
+                            return None
+                        value = str(value)
+                        if value.startswith("http"):
+                            return value
+                        try:
+                            import base64
+                            decoded = base64.b64decode(value + "===").decode("utf-8")
+                            return decoded if decoded.startswith("http") else None
+                        except Exception:
+                            return None
+
+                    data = cloud_data.get("data") if isinstance(cloud_data.get("data"), dict) else {}
+                    put_url = (decode_url(cloud_data.get("image_upload_url")) or
+                               decode_url(data.get("image_upload_url")) or
+                               data.get("cloud_storage_url") or cloud_data.get("cloud_storage_url") or
+                               cloud_data.get("upload_url"))
+                    final_url = (decode_url(cloud_data.get("image_download_url")) or
+                                 decode_url(data.get("image_download_url")) or
+                                 data.get("image_url") or cloud_data.get("image_url") or cloud_data.get("url"))
+                    if not put_url:
+                        return {"ok": False, "error": "Respons GoFood tidak berisi URL upload."}
+                    put_res = requests.put(put_url, data=img_res.content, headers={
+                        "Content-Type": content_type,
+                        "Origin": "https://portal.gofoodmerchant.co.id",
+                        "Referer": "https://portal.gofoodmerchant.co.id/",
+                    }, timeout=60)
+                    if not put_res.ok:
+                        return {"ok": False, "error": f"Upload gambar gagal (HTTP {put_res.status_code})."}
+                    final_url = final_url or put_url.split("?")[0]
+                    return {"ok": True, "image_url": final_url}
+                except Exception as exc:
+                    logger.warning(f"Upload gambar GoFood gagal untuk '{item_name}': {exc}")
+                    return {"ok": False, "error": str(exc)}
+
             patch_group_id = group_id or api_headers.get('menu_group_id')
 
             # ── 1. Execute New Categories Creation & Category Renames (GoFood V2 API) ──
             created_cat_ids = {}
+            category_creation_errors = {}
             category_renames = {}
+
+            def find_category_common_id(payload, category_name):
+                """Return a category common_id from a GoFood response/tree.
+
+                GoFood's POST helper returns the response body as text. Category
+                creation responses can also wrap the menu object under `data`.
+                Never treat a menu-group `id` as the category common ID.
+                """
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except (TypeError, ValueError):
+                        return None
+
+                wanted = norm_str(category_name)
+                stack = [payload]
+                while stack:
+                    node = stack.pop()
+                    if isinstance(node, list):
+                        stack.extend(node)
+                        continue
+                    if not isinstance(node, dict):
+                        continue
+                    node_name = node.get('name') or node.get('menu_name') or node.get('category_name')
+                    if node_name and norm_str(node_name) == wanted:
+                        common_id = node.get('common_id') or node.get('menu_common_id')
+                        if common_id:
+                            return str(common_id)
+                    # A create response may contain the category object without
+                    # repeating its name; accept explicit common-ID fields only.
+                    common_id = node.get('common_id') or node.get('menu_common_id')
+                    if common_id and not node_name and len(stack) == 0:
+                        return str(common_id)
+                    stack.extend(value for value in node.values() if isinstance(value, (dict, list)))
+                return None
+
+            def lookup_category_common_id(category_name):
+                """Refresh GoFood categories and find an exact-name common_id."""
+                if not patch_group_id:
+                    return None
+                try:
+                    menus = go_api.fetch_menus_v2(page, token, patch_group_id, passkey=passkey)
+                    return find_category_common_id(menus, category_name)
+                except Exception as lookup_error:
+                    logger.warning("Gagal mencari ID kategori GoFood '%s': %s", category_name, lookup_error)
+                    return None
+
             for upd in updates:
                 cat_id = upd.get("category_id")
                 cat_name = upd.get("category")
@@ -2383,19 +2613,36 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 is_dict_changes = isinstance(upd.get("changes"), dict)
                 is_new_cat = ("NEW_CATEGORY" in change_types) or (is_dict_changes and upd["changes"].get("is_new_category"))
 
-                if cat_name and is_new_cat and norm_str(cat_name) not in created_cat_ids and patch_group_id:
+                if (cat_name and is_new_cat
+                        and norm_str(cat_name) not in created_cat_ids
+                        and norm_str(cat_name) not in category_creation_errors
+                        and patch_group_id):
                     try:
-                        logger.info(f"📂 Creating New Category '{cat_name}' on GoFood merchant...")
-                        cat_res = go_api.create_category(page, token, patch_group_id, {"name": cat_name, "active": True}, passkey=passkey)
-                        if cat_res and cat_res.get("ok"):
-                            res_data = cat_res.get("data") or cat_res
-                            new_c_id = res_data.get("id") or res_data.get("common_id") or res_data.get("menu_common_id")
-                            if new_c_id:
-                                created_cat_ids[norm_str(cat_name)] = new_c_id
-                            logger.info(f"✅ Category '{cat_name}' created successfully (ID: {new_c_id})")
+                        category_key = norm_str(cat_name)
+                        # Reuse a category created by an earlier partial run instead
+                        # of creating duplicates when the user retries the C5 job.
+                        new_c_id = lookup_category_common_id(cat_name)
+                        if new_c_id:
+                            created_cat_ids[category_key] = new_c_id
+                            logger.info("♻️ Reusing existing GoFood category '%s' (common ID: %s)", cat_name, new_c_id)
                         else:
-                            logger.warning(f"⚠️ Category creation warning for '{cat_name}': {cat_res}")
+                            logger.info(f"📂 Creating New Category '{cat_name}' on GoFood merchant...")
+                            cat_res = go_api.create_category(page, token, patch_group_id, {"name": cat_name, "active": True}, passkey=passkey)
+                            # The helper returns `body` as JSON text. Prefer an
+                            # explicit common_id and refresh categories if the POST
+                            # response omits it (or reports a duplicate after retry).
+                            new_c_id = find_category_common_id(cat_res.get("body") if cat_res else None, cat_name)
+                            if not new_c_id:
+                                new_c_id = lookup_category_common_id(cat_name)
+                            if new_c_id and str(new_c_id) != str(patch_group_id):
+                                created_cat_ids[category_key] = str(new_c_id)
+                                logger.info("✅ Category '%s' ready (common ID: %s)", cat_name, new_c_id)
+                            else:
+                                detail = (cat_res.get("body") or cat_res.get("error") or "ID common kategori tidak ditemukan") if cat_res else "Respons pembuatan kategori kosong"
+                                category_creation_errors[category_key] = str(detail)
+                                logger.error("❌ Kategori '%s' belum memiliki common_id yang valid; item terkait akan dilewati. Detail: %s", cat_name, detail)
                     except Exception as cat_ex:
+                        category_creation_errors[norm_str(cat_name)] = str(cat_ex)
                         logger.warning(f"⚠️ Exception creating category '{cat_name}': {cat_ex}")
 
                 if cat_id and cat_name and not is_new_cat:
@@ -2430,21 +2677,40 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 is_dict_changes = isinstance(upd.get("changes"), dict)
 
                 is_new_item = ("NEW_ITEM" in change_types) or (is_dict_changes and upd["changes"].get("is_new_item")) or (not item_id)
-                want_name = ("NAME_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("name_changed")) or bool(new_name)
-                want_price = ("PRICE_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("price_changed")) or (raw_price is not None)
-                want_photo = ("PHOTO_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("photo_changed")) or bool(new_photo and new_photo.startswith("http"))
-                want_desc = ("DESCRIPTION_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("description_changed")) or bool(new_desc)
+                has_change_metadata = is_dict_changes or bool(change_types)
+                allow_field_fallback = is_new_item or not has_change_metadata
+                want_name = ("NAME_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("name_changed")) or (allow_field_fallback and bool(new_name))
+                want_price = ("PRICE_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("price_changed")) or (allow_field_fallback and raw_price is not None)
+                want_photo = ("PHOTO_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("photo_changed")) or (allow_field_fallback and bool(new_photo and new_photo.startswith("http")))
+                want_desc = ("DESCRIPTION_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("description_changed")) or (allow_field_fallback and bool(new_desc))
 
                 if progress_cb:
                     progress_cb(idx, total, upd)
 
                 item_info = go_items_by_id.get(item_id)
                 orig_item = item_info["item"] if item_info else {}
-                cat_common_id = item_info["category_common_id"] if item_info else (created_cat_ids.get(norm_str(new_cat)) or patch_group_id)
+                cat_common_id = item_info["category_common_id"] if item_info else (
+                    created_cat_ids.get(norm_str(new_cat)) or upd.get("category_id")
+                )
 
                 final_name = new_name if (want_name and new_name) else (orig_item.get('name') or upd.get('item_name') or "Item Baru")
                 final_photo = new_photo if (want_photo and new_photo) else orig_item.get('image_url', orig_item.get('image', ''))
                 final_desc = new_desc if (want_desc and new_desc) else orig_item.get('description', '')
+
+                # A PHOTO_CHANGE must use GoFood's cloud upload flow. Sending a
+                # Drive URL directly makes the API store a non-existent CDN path.
+                if want_photo and new_photo:
+                    photo_upload = upload_gofood_photo(new_photo, final_name)
+                    if not photo_upload.get("ok"):
+                        photo_error = photo_upload.get("error") or "Upload gambar gagal."
+                        results.append({
+                            "item_id": item_id, "item_name": final_name,
+                            "new_photo": new_photo, "status": "FAILED",
+                            "error": photo_error,
+                        })
+                        report_item_result(upd, "FAILED", photo_error)
+                        continue
+                    final_photo = photo_upload["image_url"]
 
                 try:
                     final_price = int(float(raw_price)) if (want_price and raw_price is not None) else int(float(orig_item.get('price') or 0))
@@ -2454,23 +2720,56 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 is_deleted_item = ("DELETE_ITEM" in change_types) or (is_dict_changes and upd["changes"].get("is_deleted_item"))
                 if is_deleted_item and item_id and not item_id.startswith("NEW_"):
                     logger.info(f"🗑️ Deleting item on GoFood merchant: '{item_id}' ({upd.get('item_name')})...")
-                    del_res = go_api.delete_v2_menu_item(page, token, patch_group_id, item_id, passkey=passkey)
-                    if not (del_res and del_res.get("ok")):
-                        del_res = go_api.delete_menu_item(page, token, patch_group_id, item_id, passkey=passkey)
+                    del_res = call_gofood_with_backoff(
+                        lambda: go_api.delete_v2_menu_item(page, token, patch_group_id, item_id, passkey=passkey),
+                        "hapus item",
+                    )
+                    if not (del_res and del_res.get("ok")) and not is_gofood_transient_error(del_res):
+                        del_res = call_gofood_with_backoff(
+                            lambda: go_api.delete_menu_item(page, token, patch_group_id, item_id, passkey=passkey),
+                            "hapus item (endpoint cadangan)",
+                        )
                     if del_res and del_res.get("ok"):
                         logger.info(f"✅ Item '{item_id}' deleted successfully!")
                         results.append({
                             "item_id": item_id, "item_name": upd.get("item_name"),
                             "status": "SUCCESS", "error": None, "action": "DELETED"
                         })
+                        report_item_result(upd, "SUCCESS", applied={"action": "DELETED"})
+                        wait_before_next_item(idx, total)
                         continue
                     else:
                         logger.warning(f"⚠️ Failed deleting item '{item_id}': {del_res}")
+                        delete_error = (del_res.get("body") or del_res.get("error") or "Gagal menghapus item GoFood.") if del_res else "Gagal menghapus item GoFood."
+                        results.append({
+                            "item_id": item_id, "item_name": upd.get("item_name"),
+                            "status": "FAILED", "error": delete_error,
+                        })
+                        report_item_result(upd, "FAILED", delete_error)
+                        wait_before_next_item(idx, total)
+                        continue
 
                 # ── Handle New Item Creation (tambah_item) ──
                 if is_new_item:
+                    category_key = norm_str(new_cat)
+                    if not cat_common_id or str(cat_common_id) == str(patch_group_id):
+                        category_error = category_creation_errors.get(category_key)
+                        create_error = (
+                            f"ID kategori GoFood tidak tersedia untuk '{new_cat}'. "
+                            "Item baru dilewati agar tidak mengirim menu_group_id sebagai menu_common_id."
+                        )
+                        if category_error:
+                            create_error += f" Detail kategori: {category_error}"
+                        logger.error("❌ Tidak membuat item baru '%s': %s", final_name, create_error)
+                        results.append({
+                            "item_id": "NEW_ITEM", "item_name": final_name,
+                            "new_category": new_cat, "status": "FAILED", "error": create_error,
+                        })
+                        report_item_result(upd, "FAILED", create_error)
+                        continue
+
                     logger.info(f"✨ Adding New Item (tambah_item) to GoFood: '{final_name}'...")
-                    target_cat_id = cat_common_id or patch_group_id
+                    target_cat_id = cat_common_id
                     create_payload = {
                         "menu_common_id": target_cat_id,
                         "name": final_name,
@@ -2480,7 +2779,10 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         "active": True,
                         "signature": False
                     }
-                    create_res = go_api.create_menu_item(page, token, patch_group_id, create_payload, passkey=passkey)
+                    create_res = call_gofood_with_backoff(
+                        lambda: go_api.create_menu_item(page, token, patch_group_id, create_payload, passkey=passkey),
+                        "membuat item",
+                    )
                     if create_res and create_res.get("ok"):
                         logger.info(f"✅ New item '{final_name}' created successfully!")
                         results.append({
@@ -2489,6 +2791,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                             "new_photo": final_photo, "new_desc": final_desc,
                             "new_category": new_cat, "status": "SUCCESS", "error": None,
                         })
+                        report_item_result(upd, "SUCCESS", applied=results[-1])
                     else:
                         logger.warning(f"⚠️ Failed to create new item '{final_name}': {create_res}")
                         results.append({
@@ -2497,7 +2800,8 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                             "status": "FAILED",
                             "error": (create_res.get('body') or create_res.get('error') or "Gagal membuat item baru.") if create_res else "Gagal membuat item baru.",
                         })
-                    time.sleep(random.uniform(1.2, 2.5))
+                        report_item_result(upd, "FAILED", results[-1]["error"], applied=results[-1])
+                    wait_before_next_item(idx, total)
                     continue
 
                 if not item_info:
@@ -2506,6 +2810,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         "new_name": new_name or None, "new_price": raw_price,
                         "status": "FAILED", "error": "Item ID tidak ditemukan di menu GoFood.",
                     })
+                    report_item_result(upd, "FAILED", results[-1]["error"], applied=results[-1])
                     continue
 
                 try:
@@ -2554,6 +2859,24 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                     price_steps = calculate_price_steps(orig_price, final_price) if want_price and orig_price > 0 else [final_price]
                     promo_note = ""
 
+                v2_payload = {
+                    "name": final_name,
+                    "price": final_price,
+                    "active": orig_item.get("is_active", orig_item.get("active", True)),
+                    "description": final_desc,
+                    "image_url": final_photo,
+                    "menu_common_id": cat_common_id,
+                }
+
+                def send_patch_request(payload, max_retries=4):
+                    return call_gofood_with_backoff(
+                        lambda: go_api.update_v2_menu_item(
+                            page, token, patch_group_id, item_id, payload, passkey=passkey
+                        ),
+                        "mengubah harga/menu",
+                        max_attempts=max_retries,
+                    )
+
                 res = None
                 if len(price_steps) > 1:
                     logger.info(f"🔄 Step-push harga untuk '{final_name}' ({item_id}): Rp{orig_price:,.0f} -> Rp{final_price:,.0f} ({len(price_steps)} tahap: {price_steps})")
@@ -2562,12 +2885,8 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                     v2_payload["price"] = step_price
                     res = send_patch_request(v2_payload)
 
-                    if res and res.get('status') == 429:
-                        logger.warning("⚠️ GoFood API Rate Limited (HTTP 429). Cooldown 10s...")
-                        time.sleep(10.0)
-
                     # Fallback 1: include variant_category_common_ids if present
-                    if (not res or not res.get('ok')) and res.get('status') != 429:
+                    if (not res or not res.get('ok')) and not is_gofood_transient_error(res):
                         time.sleep(0.6)
                         vars_ids = orig_item.get('variant_category_common_ids') or orig_item.get('variant_category_ids')
                         if vars_ids and isinstance(vars_ids, list) and len(vars_ids) > 0:
@@ -2578,7 +2897,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                                 res = res_var
 
                     # Fallback 2: V1 PUT
-                    if (not res or not res.get('ok')) and res.get('status') != 429:
+                    if (not res or not res.get('ok')) and not is_gofood_transient_error(res):
                         status_code = res.get('status', '?') if res else '?'
                         body_err = (res.get('body') or '')[:300] if res else ''
                         logger.warning(f"GoFood V2 PATCH gagal (HTTP {status_code}): {body_err}. Fallback V1 PUT...")
@@ -2622,11 +2941,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         "status": "SUCCESS", "error": None,
                     }
                     results.append(res_entry)
-                    if item_result_cb:
-                        try:
-                            item_result_cb(upd, "SUCCESS", None, applied=res_entry)
-                        except Exception:
-                            pass
+                    report_item_result(upd, "SUCCESS", applied=res_entry)
                 else:
                     err_msg = (res.get('body') or res.get('error') or "GoFood API error.") if res else "GoFood API error."
                     res_entry = {
@@ -2636,17 +2951,10 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         "error": err_msg,
                     }
                     results.append(res_entry)
-                    if item_result_cb:
-                        try:
-                            item_result_cb(upd, "FAILED", err_msg, applied=res_entry)
-                        except Exception:
-                            pass
+                    report_item_result(upd, "FAILED", err_msg, applied=res_entry)
 
                 # Pacing + batch breather to respect GoFood rate limits
-                time.sleep(random.uniform(1.2, 2.5))
-                if (idx + 1) % 20 == 0 and (idx + 1) < total:
-                    logger.info(f"☕ Batch pause item {idx+1}/{total}: istirahat 3s...")
-                    time.sleep(3.0)
+                wait_before_next_item(idx, total)
         finally:
             proc_killed = False
             try:
@@ -2683,6 +2991,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
     lock = PLATFORM_LOCKS.get(platform)
     sem_acquired = False
     lock_acquired = False
+    discord_summary = None
 
     try:
         GLOBAL_BROWSER_SEMAPHORE.acquire()
@@ -2714,20 +3023,53 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
             updates_by_sid.setdefault(sid, []).append(upd)
 
         processed = 0
+        completed_update_ids = set()
+
+        def mark_update_processed(upd, message=None):
+            nonlocal processed
+            update_key = id(upd)
+            if update_key in completed_update_ids:
+                return
+            completed_update_ids.add(update_key)
+            processed += 1
+            completed_pct = int(15 + (min(processed, total_updates) / max(1, total_updates)) * 80)
+            job.progress_pct = min(95, completed_pct)
+            if message:
+                job.current_step = message
+            db.commit()
 
         def record_trail(upd, status_str, err_msg, applied=None):
-            change_str = ", ".join(upd.get("changes") or upd.get("change_types") or ["C5 Update"])
-            new_val = []
-            if applied and applied.get("new_name"):
-                new_val.append(f"Nama Item: {applied['new_name']}")
-            if applied and applied.get("new_price") is not None:
-                new_val.append(f"Harga Baru: Rp {applied['new_price']}")
-            if applied and applied.get("new_photo"):
-                new_val.append(f"Foto Link: {applied['new_photo']}")
-            if applied and applied.get("new_desc"):
-                new_val.append(f"Deskripsi: {applied['new_desc']}")
-            if applied and applied.get("new_category"):
-                new_val.append(f"Nama Kategori: {applied['new_category']}")
+            changes = upd.get("changes") or upd.get("change_types") or ["C5 Update"]
+            change_str = ", ".join(changes)
+            old_values, new_values = [], []
+            field_values = {
+                "NAME_CHANGE": ("Nama item", upd.get("baseline_name") or upd.get("item_name"), (applied or {}).get("new_name") or upd.get("item_name_new")),
+                "PRICE_CHANGE": ("Harga", upd.get("current_fake_price"), (applied or {}).get("new_price", upd.get("new_fake_price"))),
+                "CATEGORY_CHANGE": ("Kategori", upd.get("baseline_category"), (applied or {}).get("new_category") or upd.get("category")),
+                "PHOTO_CHANGE": ("Foto", upd.get("baseline_photo"), (applied or {}).get("new_photo") or upd.get("photo_link")),
+                "DESCRIPTION_CHANGE": ("Deskripsi", upd.get("baseline_description"), (applied or {}).get("new_desc") or upd.get("description")),
+            }
+            for change in changes:
+                if change in field_values:
+                    label, old_value, new_value = field_values[change]
+                    old_values.append(f"{label}: {old_value if old_value not in (None, '') else '(Kosong)'}")
+                    new_values.append(f"{label}: {new_value if new_value not in (None, '') else '(Kosong)'}")
+            if (applied or {}).get("action") == "DELETED" or "DELETE_ITEM" in changes:
+                old_values.append(f"Item: {upd.get('item_name') or '(Tanpa nama)'}")
+                new_values.append("Item dihapus")
+            if not old_values:
+                old_values.append(str(upd.get("item_name") or upd.get("current_fake_price") or ""))
+            if not new_values:
+                if applied and applied.get("new_name"):
+                    new_values.append(f"Nama Item: {applied['new_name']}")
+                if applied and applied.get("new_price") is not None:
+                    new_values.append(f"Harga Baru: Rp {applied['new_price']}")
+                if applied and applied.get("new_photo"):
+                    new_values.append(f"Foto Link: {applied['new_photo']}")
+                if applied and applied.get("new_desc"):
+                    new_values.append(f"Deskripsi: {applied['new_desc']}")
+                if applied and applied.get("new_category"):
+                    new_values.append(f"Nama Kategori: {applied['new_category']}")
             trail = AuditTrail(
                 job_id=job.id,
                 outlet_id=job.outlet_id or uuid.uuid4(),
@@ -2735,8 +3077,8 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                 item_name=str(upd.get("item_name", "")),
                 change_type=f"C5_PUSH_{platform.upper()}",
                 field_changed=change_str,
-                old_value=str(upd.get("item_name") or upd.get("current_fake_price") or ""),
-                new_value=" | ".join(new_val) if new_val else ("Updated" if status_str == "SUCCESS" else ""),
+                old_value=" | ".join(old_values),
+                new_value=" | ".join(new_values) if new_values else ("Updated" if status_str == "SUCCESS" else ""),
                 status=status_str,
                 error_message=err_msg,
             )
@@ -2759,8 +3101,8 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
             if not outlet or not account:
                 logger.warning(f"⚠️ Outlet/akun tidak ditemukan untuk SID {sid} ({platform}). Menandai {len(sid_updates)} item gagal.")
                 for upd in sid_updates:
-                    processed += 1
                     fail_count += 1
+                    mark_update_processed(upd, f"Store {sid}: item gagal diproses ({processed + 1}/{total_updates})")
                     record_trail(upd, "FAILED", f"Outlet atau akun {platform.title()} tidak ditemukan untuk Store ID {sid}.")
                 continue
 
@@ -2768,20 +3110,24 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
             db.commit()
 
             def progress_cb(idx, total, upd, _sid=sid):
-                job.current_step = f"Store {_sid} ({idx+1}/{total}): {upd.get('item_name')}..."
-                job.progress_pct = int(15 + (processed / max(1, total_updates)) * 80)
+                job.current_step = f"Store {_sid} ({min(processed + 1, total_updates)}/{total_updates}): memproses {upd.get('item_name')}..."
+                job.progress_pct = min(95, int(15 + (processed / max(1, total_updates)) * 80))
                 db.commit()
 
             def item_cb(upd, status_str, err_msg=None, applied=None):
+                if id(upd) in completed_update_ids:
+                    return
                 if status_str == "SUCCESS":
                     nonlocal success_count
                     success_count += 1
                 else:
                     nonlocal fail_count
                     fail_count += 1
+                mark_update_processed(upd, f"Selesai memproses {processed + 1}/{total_updates}: {upd.get('item_name') or 'item'}")
                 record_trail(upd, status_str, err_msg, applied=applied)
 
             try:
+                results = []
                 if platform == "grab":
                     from grab.core.push_c5 import push_c5_grab_for_merchant
                     results = push_c5_grab_for_merchant(
@@ -2807,6 +3153,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                         store_metadata=store_meta,
                         updates=sid_updates,
                         progress_cb=progress_cb,
+                        headless=(os.getenv("HEADLESS_SHOPEE", "false").strip().lower() in ("true", "1", "yes")),
                         item_result_cb=item_cb,
                     )
                 else:
@@ -2823,16 +3170,15 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                         ).result()
             except Exception as ex:
                 logger.error(f"❌ Gagal push {platform.title()} untuk SID {sid}: {ex}")
-                # Record trail only for remaining items not already recorded via item_result_cb
-                processed_in_results = {str(r.get("item_id")) for r in (results or [])}
+                # Record only items whose callback has not already reported a result.
                 for upd in sid_updates:
-                    if str(upd.get("item_id")) not in processed_in_results:
-                        processed += 1
+                    if id(upd) not in completed_update_ids:
                         fail_count += 1
+                        mark_update_processed(upd, f"Gagal memproses {processed + 1}/{total_updates}: {upd.get('item_name') or 'item'}")
                         record_trail(upd, "FAILED", str(ex))
                 continue
 
-            job.progress_pct = int(15 + (processed / max(1, total_updates)) * 80)
+            job.progress_pct = min(95, int(15 + (processed / max(1, total_updates)) * 80))
             db.commit()
 
         job.status = "SUCCESS" if success_count > 0 else "FAILED"
@@ -2861,6 +3207,38 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         job.current_step = f"Gagal: {str(ex)}"
         db.commit()
     finally:
+        try:
+            if job:
+                trails = db.query(AuditTrail).filter(AuditTrail.job_id == job.id).order_by(AuditTrail.created_at.asc()).all()
+                outlet_names = []
+                for sid in (selected_sids or []):
+                    outlet_record = db.query(Outlet).filter(Outlet.store_id == sid).first()
+                    if outlet_record:
+                        outlet_names.append(
+                            outlet_record.nama_resto_final
+                            or outlet_record.nama_outlet
+                            or outlet_record.merchant_name
+                            or sid
+                        )
+                discord_summary = {
+                    "platform": platform,
+                    "job_id": str(job.id),
+                    "selected_sids": list(selected_sids or []),
+                    "outlet_names": outlet_names,
+                    "job_status": str(job.status or "UNKNOWN"),
+                    "audit_entries": [
+                        {
+                            "item_id": trail.item_id,
+                            "item_name": trail.item_name,
+                            "field_changed": trail.field_changed,
+                            "status": trail.status,
+                            "error_message": trail.error_message,
+                        }
+                        for trail in trails
+                    ],
+                }
+        except Exception as summary_error:
+            logger.warning("Gagal menyiapkan ringkasan Discord C5 (%s).", type(summary_error).__name__)
         db.close()
         if lock_acquired and lock:
             try:
@@ -2874,6 +3252,15 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                 logger.info(f"🚦 C5 Job {job_id} ({platform}) released global browser slot.")
             except Exception:
                 pass
+        if discord_summary:
+            try:
+                from src.discord_notifier import send_discord_push_summary
+                sent = send_discord_push_summary(**discord_summary)
+                if sent:
+                    logger.info("🔔 Ringkasan push C5 berhasil dikirim ke Discord untuk job %s.", job_id)
+            except Exception as notify_error:
+                # Notifications must never change the already-recorded job outcome.
+                logger.warning("Gagal mengirim ringkasan Discord C5 (%s).", type(notify_error).__name__)
 
 
 
@@ -2957,6 +3344,70 @@ def _download_gdrive_or_gsheet_bytes(url: str) -> tuple[bytes, str]:
         raise HTTPException(status_code=400, detail=f"Terjadi kesalahan saat mengunduh Google Drive: {str(e)}")
 
 
+_DRIVE_FOLDER_IMAGE_INDEX: Dict[str, Dict[str, str]] = {}
+
+
+def _resolve_drive_folder_image(folder_url: str, item_name: str) -> Optional[str]:
+    """Find the first image in a recursively nested Drive item folder."""
+    import re
+    import requests
+
+    root_url = folder_url or os.getenv("MENU_FOTO_GDRIVE", "")
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", str(root_url))
+    wanted_name = re.sub(r"[^a-z0-9]+", " ", str(item_name or "").casefold()).strip()
+    if not match or not wanted_name:
+        return None
+    parent_id = match.group(1) or match.group(2)
+    api_url = "https://www.googleapis.com/drive/v3/files"
+    api_key = os.getenv("GOOGLE_DRIVE_API_KEY")
+
+    def list_children(parent):
+        params = {
+            "q": f"'{parent}' in parents and trashed = false",
+            "fields": "files(id,name,mimeType)",
+            "pageSize": 1000,
+            "orderBy": "name",
+        }
+        if api_key:
+            params["key"] = api_key
+        response = requests.get(api_url, params=params, timeout=20)
+        response.raise_for_status()
+        return response.json().get("files", [])
+
+    try:
+        if parent_id in _DRIVE_FOLDER_IMAGE_INDEX:
+            return _DRIVE_FOLDER_IMAGE_INDEX[parent_id].get(wanted_name)
+
+        image_index = {}
+        queue = [(parent_id, 0)]
+        visited = set()
+        while queue:
+            current_id, depth = queue.pop(0)
+            if current_id in visited or depth > 4:
+                continue
+            visited.add(current_id)
+            children = list_children(current_id)
+            for child in children:
+                if str(child.get("mimeType", "")).startswith("image/"):
+                    image_name = re.sub(r"[^a-z0-9]+", " ", str(child.get("name", "")).rsplit(".", 1)[0].casefold()).strip()
+                    image_index.setdefault(image_name, f"https://lh3.googleusercontent.com/d/{child['id']}=s500-c")
+                    continue
+                if child.get("mimeType") != "application/vnd.google-apps.folder":
+                    continue
+                child_name = re.sub(r"[^a-z0-9]+", " ", str(child.get("name", "")).casefold()).strip()
+                if child_name == wanted_name:
+                    images = [item for item in list_children(child["id"])
+                              if str(item.get("mimeType", "")).startswith("image/")]
+                    if images:
+                        image_index.setdefault(wanted_name, f"https://lh3.googleusercontent.com/d/{images[0]['id']}=s500-c")
+                queue.append((child["id"], depth + 1))
+        _DRIVE_FOLDER_IMAGE_INDEX[parent_id] = image_index
+        return image_index.get(wanted_name)
+    except Exception as exc:
+        logger.warning("Gagal resolve gambar Drive untuk '%s': %s", item_name, exc)
+        return None
+
+
 @app.post("/api/jobs/parse-c5")
 async def parse_c5_endpoint(
     file: Optional[UploadFile] = File(None),
@@ -2982,6 +3433,9 @@ async def parse_c5_endpoint(
         contents, filename = _download_gdrive_or_gsheet_bytes(drive_url.strip())
     else:
         raise HTTPException(status_code=400, detail="Harap unggah file Excel C5 (.xlsx) atau masukkan Link Google Drive / Sheets.")
+
+    # Refresh the Drive index once per C5 parse so recently added images are visible.
+    _DRIVE_FOLDER_IMAGE_INDEX.clear()
 
     try:
         wb_raw = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=False)
@@ -3011,17 +3465,28 @@ async def parse_c5_endpoint(
 
     headers = []
     data_row1 = rows[0]
+    explicit_header_names = {
+        str(value).strip()
+        for value in data_row1
+        if value is not None and str(value).strip()
+    }
     max_cols = max(len(data_row1), len(raw_row1))
     for c_idx in range(max_cols):
         d_val = data_row1[c_idx] if c_idx < len(data_row1) else None
         r_val = raw_row1[c_idx] if c_idx < len(raw_row1) else None
+        is_formula_header = hasattr(r_val, 'text') or (isinstance(r_val, str) and r_val.startswith('='))
         if d_val is not None and str(d_val).strip() != "":
-            headers.append(str(d_val).strip())
+            data_header = str(d_val).strip()
+            headers.append("" if is_formula_header and data_header in explicit_header_names else data_header)
         elif r_val is not None:
             txt = r_val.text if hasattr(r_val, 'text') else str(r_val)
             m = re.search(r'\"([^\"]+)\"', txt)
             if m:
-                headers.append(m.group(1).strip())
+                formula_header = m.group(1).strip()
+                # Array formulas can mention real C5 headers such as Item or
+                # Category in helper columns. Never let those duplicates
+                # overwrite the explicit header-to-column mapping below.
+                headers.append("" if formula_header in explicit_header_names else formula_header)
             else:
                 headers.append(str(txt).strip())
         else:
@@ -3056,6 +3521,7 @@ async def parse_c5_endpoint(
     avail_col = resolve_col(['Availability', 'Ketersediaan'])
     vis_col = resolve_col(['Visibility'])
     item_name_imp_col = resolve_col(['Item Name Improvement'])
+    platform_col = resolve_col(['OFD', 'Platform', 'Aplikator'])
     new_fake_col = resolve_col(['New Fake Price (Rp)', 'New Fake Price'])
     curr_fake_col = resolve_col(['Current Fake Price (Rp)', 'Current Fake Price', 'Harga Fake'])
     notes_col = resolve_col(['Notes', 'Catatan'])
@@ -3098,11 +3564,14 @@ async def parse_c5_endpoint(
     category_changes_count = 0
     photo_changes_count = 0
     description_changes_count = 0
+    offline_price_changes_count = 0
     other_changes_count = 0
     validation_errors_count = 0
 
     new_items_count = 0
     new_categories_count = 0
+    new_category_keys = set()
+    photo_resolution_errors_count = 0
 
     import re
 
@@ -3110,18 +3579,101 @@ async def parse_c5_endpoint(
         if val_str is None or str(val_str).strip() == "":
             return None
         try:
-            cleaned = re.sub(r'[^\d.]', '', str(val_str))
+            raw_price = str(val_str).strip()
+            is_negative = raw_price.startswith("-")
+            cleaned = re.sub(r'[^\d.]', '', raw_price)
             if cleaned:
-                return float(cleaned)
+                parsed = float(cleaned)
+                return -parsed if is_negative else parsed
         except Exception:
             pass
         return None
 
-    def norm_str(s):
-        return re.sub(r'\s+', ' ', str(s or '').strip().lower())
+    def is_same_photo(p1, p2):
+        s1 = str(p1 or "").strip()
+        s2 = str(p2 or "").strip()
+        if not s1 and not s2:
+            return True
+        if s1 == s2:
+            return True
+        h1 = s1.split("?")[0].rstrip("/").split("/")[-1].strip()
+        h2 = s2.split("?")[0].rstrip("/").split("/")[-1].strip()
+        return bool(h1 and h2 and h1 == h2)
 
     # ── Baseline PULL cache loader (Multi-platform: GoFood / Grab / Shopee) ──
     _baseline_cache = {}
+    _offline_baseline_cache = {}
+
+    def load_offline_baseline(sid):
+        """Read the latest combined C5 snapshot for locally saved offline prices."""
+        sid_key = str(sid or "").strip()
+        if sid_key in _offline_baseline_cache:
+            return _offline_baseline_cache[sid_key]
+
+        combined_dir = Path(__file__).parent / "data" / "exports" / "combined"
+        result = {"by_id": {}, "by_name": {}, "file": None}
+        if not combined_dir.exists():
+            _offline_baseline_cache[sid_key] = result
+            return result
+
+        for workbook_path in sorted(
+            combined_dir.rglob("*.xlsx"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        ):
+            workbook = None
+            try:
+                workbook = openpyxl.load_workbook(workbook_path, data_only=True, read_only=True)
+                if "Item" not in workbook.sheetnames:
+                    continue
+                worksheet = workbook["Item"]
+                rows_iter = worksheet.iter_rows(values_only=True)
+                headers = next(rows_iter, None)
+                if not headers:
+                    continue
+                header_indices = {
+                    str(value).strip(): index
+                    for index, value in enumerate(headers)
+                    if value is not None and str(value).strip()
+                }
+                sid_idx = header_indices.get("SID", header_indices.get("Store ID"))
+                item_id_idx = header_indices.get("Item ID")
+                item_name_idx = header_indices.get("Item", header_indices.get("Item Name"))
+                offline_idx = header_indices.get("Offline Price (Rp)")
+                if sid_idx is None or offline_idx is None:
+                    continue
+
+                found_sid = False
+                for row in rows_iter:
+                    if sid_idx >= len(row) or str(row[sid_idx] or "").strip().casefold() != sid_key.casefold():
+                        continue
+                    found_sid = True
+                    raw_value = row[offline_idx] if offline_idx < len(row) else None
+                    value = parse_price(raw_value)
+                    if item_id_idx is not None and item_id_idx < len(row):
+                        item_id_value = str(row[item_id_idx] or "").strip()
+                        if item_id_value:
+                            result["by_id"][item_id_value] = value
+                    if item_name_idx is not None and item_name_idx < len(row):
+                        item_name_value = norm_str(row[item_name_idx])
+                        if item_name_value:
+                            result["by_name"].setdefault(item_name_value, value)
+
+                if found_sid:
+                    result["file"] = workbook_path.name
+                    break
+            except Exception as offline_baseline_error:
+                logger.debug(
+                    "Tidak dapat membaca baseline harga offline dari %s (%s).",
+                    workbook_path.name,
+                    type(offline_baseline_error).__name__,
+                )
+            finally:
+                if workbook is not None:
+                    workbook.close()
+
+        _offline_baseline_cache[sid_key] = result
+        return result
 
     def _find_baseline_file(sid):
         sid_str = str(sid or "").strip()
@@ -3178,24 +3730,34 @@ async def parse_c5_endpoint(
                     pass
 
         return (None, None)
-    def _parse_json_baseline(path, sid, by_id, by_name, categories):
+    def _parse_json_baseline(path, sid, by_id, by_name, categories, category_ids):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if "items" in data and isinstance(data.get("items"), list):
                 for it in data["items"]:
-                    it_sid = str(it.get("Store ID") or "").strip()
+                    it_sid = str(it.get("Store ID") or it.get("store_id") or it.get("SID") or "").strip()
                     if it_sid and sid and it_sid.lower() != str(sid).strip().lower():
                         continue
-                    cat_name = it.get("Category") or it.get("Nama Kategori") or ""
+                    cat_name = it.get("Category") or it.get("Nama Kategori") or it.get("Nama kategori") or it.get("kategori") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
-                    price_val = parse_price(it.get("Current Fake Price (Rp)") or it.get("Harga Fake") or it.get("Current Real Price (Rp)") or it.get("Harga Real") or it.get("price"))
+                    cat_id = it.get("Category ID") or it.get("category_id") or it.get("category_common_id")
+                    if cat_id:
+                        category_ids.add(str(cat_id).strip())
+                    raw_price = (
+                        it.get("Current Fake Price (Rp)") or it.get("Harga Fake")
+                        or it.get("Harga item sebelum promo (harga coret)")
+                        or it.get("Harga item setelah promo (harga coret)")
+                        or it.get("Current Real Price (Rp)") or it.get("Harga Real")
+                        or it.get("price") or it.get("Harga") or it.get("harga")
+                    )
+                    price_val = parse_price(raw_price)
                     rec = {
-                        "name": it.get("Item") or it.get("Nama Item") or it.get("name") or "",
+                        "name": it.get("Item") or it.get("Nama Item") or it.get("Nama item") or it.get("name") or "",
                         "price": price_val,
-                        "image": it.get("Photo Link") or it.get("Link Foto") or it.get("image") or "",
+                        "image": it.get("Photo Link") or it.get("Link Foto") or it.get("Link foto") or it.get("image") or "",
                         "category": cat_name,
-                        "description": it.get("Description") or it.get("Deskripsi") or it.get("description") or "",
+                        "description": it.get("Description") or it.get("Deskripsi") or it.get("Deskripsi item") or it.get("description") or "",
                     }
                     iid = str(it.get("Item ID") or it.get("common_id") or it.get("id") or "").strip()
                     if iid:
@@ -3209,9 +3771,12 @@ async def parse_c5_endpoint(
                     cat_name = cat.get("name") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
+                    for cat_id in (cat.get("common_id"), cat.get("id")):
+                        if cat_id:
+                            category_ids.add(str(cat_id).strip())
                     for dish in cat.get("dishes", []):
-                        price_raw = dish.get("price", "0")
-                        price_val = float(price_raw) / 100000.0 if float(price_raw) > 1000 else float(price_raw)
+                        raw_price = dish.get("list_price") or dish.get("price") or "0"
+                        price_val = float(raw_price) / 100000.0 if float(raw_price) > 1000 else float(raw_price)
                         rec = {
                             "name": dish.get("name") or "",
                             "price": price_val,
@@ -3230,6 +3795,9 @@ async def parse_c5_endpoint(
                     cat_name = menu.get("name") or menu.get("category_name") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
+                    for cat_id in (menu.get("common_id"), menu.get("id")):
+                        if cat_id:
+                            category_ids.add(str(cat_id).strip())
                     for it in (menu.get("menu_items") or menu.get("items") or []):
                         rec = {
                             "name": it.get("name") or it.get("item_name") or "",
@@ -3246,7 +3814,7 @@ async def parse_c5_endpoint(
                             by_name[nn] = rec
         except Exception as ex:
             logger.warning(f"Gagal membaca baseline PULL JSON untuk SID {sid}: {ex}")
-    def _parse_xlsx_baseline(path, sid, by_id, by_name, categories):
+    def _parse_xlsx_baseline(path, sid, by_id, by_name, categories, category_ids):
         try:
             wb_exp = openpyxl.load_workbook(path, data_only=True, read_only=True)
             if "Item" in wb_exp.sheetnames:
@@ -3256,6 +3824,7 @@ async def parse_c5_endpoint(
                     exp_headers = [str(c).strip() if c is not None else "" for c in exp_rows[0]]
                     exp_hmap = {h: i for i, h in enumerate(exp_headers) if h}
                     exp_sid_idx = exp_hmap.get("SID") or exp_hmap.get("Store ID")
+                    cat_id_idx = exp_hmap.get("Category ID")
                     cat_idx = exp_hmap.get("Category") or exp_hmap.get("Nama Kategori")
                     iid_idx = exp_hmap.get("Item ID")
                     name_idx = exp_hmap.get("Item") or exp_hmap.get("Item Name")
@@ -3271,6 +3840,8 @@ async def parse_c5_endpoint(
                         cname = str(r[cat_idx]).strip() if cat_idx is not None and cat_idx < len(r) and r[cat_idx] is not None else ""
                         if cname:
                             categories.add(norm_str(cname))
+                        if cat_id_idx is not None and cat_id_idx < len(r) and r[cat_id_idx]:
+                            category_ids.add(str(r[cat_id_idx]).strip())
                         iname = str(r[name_idx]).strip() if name_idx is not None and name_idx < len(r) and r[name_idx] is not None else ""
                         iid = str(r[iid_idx]).strip() if iid_idx is not None and iid_idx < len(r) and r[iid_idx] is not None else ""
                         photo = str(r[photo_idx]).strip() if photo_idx is not None and photo_idx < len(r) and r[photo_idx] is not None else ""
@@ -3296,21 +3867,60 @@ async def parse_c5_endpoint(
         if sid in _baseline_cache:
             return _baseline_cache[sid]
 
-        by_id, by_name, categories = {}, {}, set()
+        by_id, by_name, categories, category_ids = {}, {}, set(), set()
         ftype, path = _find_baseline_file(sid)
 
-        if path and path.exists():
-            if ftype == "json":
-                _parse_json_baseline(path, sid, by_id, by_name, categories)
-            elif ftype == "xlsx":
-                _parse_xlsx_baseline(path, sid, by_id, by_name, categories)
+        baseline_file = None
+        baseline_pulled_at = None
+        baseline_platform = None
 
-        result = {"by_id": by_id, "by_name": by_name, "categories": categories, "found": bool(by_id or by_name)}
+        if path and path.exists():
+            baseline_file = path.name
+            try:
+                mtime = path.stat().st_mtime
+                dt = datetime.fromtimestamp(mtime)
+                baseline_pulled_at = dt.strftime("%d %b %Y, %H:%M WIB")
+            except Exception:
+                pass
+
+            p_str = str(path).lower()
+            if "gofood" in p_str:
+                baseline_platform = "GoFood"
+            elif "grab" in p_str:
+                baseline_platform = "GrabFood"
+            elif "shopee" in p_str:
+                baseline_platform = "ShopeeFood"
+            elif "exports" in p_str:
+                baseline_platform = "Excel Export"
+            else:
+                baseline_platform = ftype.upper() if ftype else None
+
+            if ftype == "json":
+                _parse_json_baseline(path, sid, by_id, by_name, categories, category_ids)
+            elif ftype == "xlsx":
+                _parse_xlsx_baseline(path, sid, by_id, by_name, categories, category_ids)
+
+        result = {
+            "by_id": by_id,
+            "by_name": by_name,
+            "categories": categories,
+            "category_ids": category_ids,
+            "found": bool(by_id or by_name),
+            "baseline_file": baseline_file,
+            "baseline_pulled_at": baseline_pulled_at,
+            "baseline_platform": baseline_platform,
+            "baseline_source_type": ftype,
+        }
         _baseline_cache[sid] = result
         return result
 
     c5_parsed_ids_by_sid = {}
     c5_parsed_names_by_sid = {}
+    drive_image_cache = {}
+
+    def is_drive_folder_link(value):
+        value = str(value or "").strip()
+        return "drive.google.com" in value.casefold() and bool(re.search(r"/folders/[a-zA-Z0-9_-]+", value))
 
     for r_idx, row in enumerate(rows[1:], start=2):
         if not row or all(v is None for v in row):
@@ -3324,12 +3934,16 @@ async def parse_c5_endpoint(
         item_name = get_val(row, item_col)
         photo_link_raw = get_val(row, photo_col)
         design_imp = get_val(row, resolve_col(['Design Improvement', 'Photo Improvement'])) if resolve_col(['Design Improvement', 'Photo Improvement']) else ""
-        
-        # Check if Design Improvement contains a new photo link / Google Drive URL
-        if design_imp and (design_imp.startswith("http://") or design_imp.startswith("https://") or "drive.google.com" in design_imp):
+        # Drive folder links are accepted only from Photo Link. Design
+        # Improvement remains available for its existing direct-image URL use.
+        drive_folder_link = photo_link_raw if is_drive_folder_link(photo_link_raw) else ""
+        drive_image_requested = bool(drive_folder_link)
+
+        # A folder URL is a search location, never an image URL for the push API.
+        if design_imp and not is_drive_folder_link(design_imp) and not drive_image_requested and design_imp.startswith(("http://", "https://")):
             photo_link = design_imp
         else:
-            photo_link = photo_link_raw
+            photo_link = "" if is_drive_folder_link(photo_link_raw) else photo_link_raw
 
         description = get_val(row, desc_col) if desc_col else ""
         availability = get_val(row, avail_col) if avail_col else ""
@@ -3371,7 +3985,22 @@ async def parse_c5_endpoint(
         base_img = base_rec["image"] if base_rec else ""
         base_desc = base_rec["description"] if base_rec else ""
 
-        new_fake_price = parse_price(new_fake_raw) or parse_price(curr_fake_raw)
+        # Resolve Drive images after baseline matching so rows with an empty
+        # C5 item-name cell can still use the baseline item name.
+        drive_root = os.getenv("MENU_FOTO_GDRIVE", "").strip()
+        resolver_name = (item_name or base_name or "").strip()
+        photo_resolution_error = None
+        if drive_image_requested:
+            resolver_root = drive_folder_link or drive_root
+            cache_key = (resolver_root, resolver_name.casefold())
+            if resolver_root and resolver_name and cache_key not in drive_image_cache:
+                drive_image_cache[cache_key] = _resolve_drive_folder_image(resolver_root, resolver_name)
+            if drive_image_cache.get(cache_key):
+                photo_link = drive_image_cache[cache_key]
+            else:
+                photo_link = base_img
+                photo_resolution_error = f"Gambar untuk '{resolver_name or item_name}' tidak ditemukan di folder Drive."
+                photo_resolution_errors_count += 1
 
         # ── Detect New Item (tambah_item) & New Category (new_categories) ──
         is_new_item = False
@@ -3380,7 +4009,19 @@ async def parse_c5_endpoint(
         if not item_id or (base_rec is None and norm_str(display_name) not in baseline["by_name"]):
             is_new_item = True
 
-        if cat_name and (not cat_id or norm_str(cat_name) not in baseline["categories"]):
+        # A new item must use an explicit target price from the C5 new-price
+        # column. Existing-item rows retain the historical current-price fallback.
+        new_fake_price = parse_price(new_fake_raw)
+        if new_fake_price is None and not is_new_item:
+            new_fake_price = parse_price(curr_fake_raw)
+
+        if cat_name and (
+            not cat_id
+            or (
+                norm_str(cat_name) not in baseline["categories"]
+                and str(cat_id).strip() not in baseline["category_ids"]
+            )
+        ):
             is_new_category = True
 
         if sid not in stores_dict:
@@ -3390,6 +4031,9 @@ async def parse_c5_endpoint(
                 "item_count": 0,
                 "changed_count": 0,
                 "baseline_found": baseline["found"],
+                "baseline_file": baseline.get("baseline_file"),
+                "baseline_pulled_at": baseline.get("baseline_pulled_at"),
+                "baseline_platform": baseline.get("baseline_platform"),
             }
         stores_dict[sid]["item_count"] += 1
 
@@ -3397,6 +4041,7 @@ async def parse_c5_endpoint(
         diff_details = []
         is_valid = True
         validation_error = None
+        invalid_new_item_price = False
 
         # Check Category ID consistency error for this row
         if (sid, cat_id) in inconsistent_cat_ids:
@@ -3407,6 +4052,25 @@ async def parse_c5_endpoint(
                 "column": "Category ID",
                 "old_val": "Konflik Nama Kategori",
                 "new_val": f"Gunakan nama yang sama untuk Category ID '{cat_id}'"
+            })
+
+        row_platform = get_val(row, platform_col) or baseline.get("baseline_platform") or ""
+        normalized_platform = re.sub(r"[^a-z]", "", str(row_platform).casefold())
+        invalid_new_item_price = (
+            is_new_item
+            and normalized_platform == "gofood"
+            and (new_fake_price is None or new_fake_price <= 0)
+        )
+        if invalid_new_item_price:
+            price_error = "Harga item baru belum diisi. Isi harga lebih dari Rp0 di C5."
+            is_valid = False
+            validation_errors_count += 1
+            validation_error_messages.append(f"{price_error} Item: '{display_name}' (Store ID: {sid}, baris {r_idx}).")
+            validation_error = f"{validation_error} {price_error}" if validation_error else price_error
+            diff_details.append({
+                "column": "Harga item baru",
+                "old_val": "(Belum ada)",
+                "new_val": new_fake_raw or "(Kosong)",
             })
 
         # 1. New Item & New Category Indications
@@ -3428,7 +4092,7 @@ async def parse_c5_endpoint(
                 diff_details.append({"column": "Category", "old_val": base_cat, "new_val": cat_name})
 
         # 3. Photo Link Change
-        photo_changed = bool(photo_link and photo_link != base_img and not (not base_img and not photo_link))
+        photo_changed = bool(photo_link and not is_same_photo(photo_link, base_img))
         if photo_changed:
             diff_details.append({"column": "Photo Link", "old_val": base_img or "(Kosong)", "new_val": photo_link})
 
@@ -3436,6 +4100,24 @@ async def parse_c5_endpoint(
         description_changed = bool(description and norm_str(description) != norm_str(base_desc))
         if description_changed:
             diff_details.append({"column": "Description", "old_val": base_desc or "(Kosong)", "new_val": description})
+
+        # Offline price is saved as C5 bookkeeping and never participates in
+        # the platform push plan. Track it separately so the preview can show
+        # a badge without inflating `is_changed` or the push item count.
+        offline_price = parse_price(get_val(row, "Offline Price (Rp)"))
+        offline_baseline = load_offline_baseline(sid)
+        if item_id and item_id in offline_baseline["by_id"]:
+            baseline_offline_price = offline_baseline["by_id"][item_id]
+        else:
+            baseline_offline_price = offline_baseline["by_name"].get(norm_str(item_name)) if item_name else None
+        offline_price_changed = offline_price != baseline_offline_price
+        if offline_price_changed:
+            offline_price_changes_count += 1
+            diff_details.append({
+                "column": "Harga Offline (disimpan di C5)",
+                "old_val": f"Rp {baseline_offline_price:,.0f}" if baseline_offline_price is not None else "(Kosong)",
+                "new_val": f"Rp {offline_price:,.0f}" if offline_price is not None else "(Dikosongkan)",
+            })
 
         # 5. Price Change
         price_changed = False
@@ -3465,10 +4147,17 @@ async def parse_c5_endpoint(
         for col_k, col_idx in header_map.items():
             if col_k in (sid_col, outlet_col, cat_id_col, cat_col, item_id_col, item_col, photo_col, desc_col, item_name_imp_col, new_fake_col, curr_fake_col):
                 continue
+            # These are local C5 bookkeeping fields. They must be retained in
+            # combined workbooks, but they do not represent merchant menu
+            # changes and must not make every row appear pushable.
+            if col_k in ('Offline Price (Rp)', 'Offline Adjustment (Rp)'):
+                continue
             if col_idx < len(row) and row[col_idx] is not None:
                 v_str = str(row[col_idx]).strip()
                 if v_str and v_str not in ("#N/A", "nan", "None"):
-                    if col_k in ('Design Improvement', 'Keyword', 'Notes', 'Offline Price (Rp)', 'Offline Adjustment (Rp)'):
+                    if col_k in ('Design Improvement', 'Keyword', 'Notes'):
+                        if col_k == 'Design Improvement' and (drive_image_requested or is_drive_folder_link(v_str)):
+                            continue
                         other_changed = True
                         diff_details.append({"column": col_k, "old_val": "", "new_val": v_str})
 
@@ -3476,13 +4165,19 @@ async def parse_c5_endpoint(
 
         change_types = []
         if not is_valid:
-            change_types.append("INVALID_CATEGORY_CONSISTENCY")
+            if (sid, cat_id) in inconsistent_cat_ids:
+                change_types.append("INVALID_CATEGORY_CONSISTENCY")
+            if invalid_new_item_price:
+                change_types.append("INVALID_NEW_ITEM_PRICE")
         if is_new_item:
             change_types.append("NEW_ITEM")
             new_items_count += 1
         if is_new_category:
             change_types.append("NEW_CATEGORY")
-            new_categories_count += 1
+            category_key = (sid, norm_str(cat_name))
+            if category_key not in new_category_keys:
+                new_category_keys.add(category_key)
+                new_categories_count += 1
         if name_changed:
             change_types.append("NAME_CHANGE")
             name_changes_count += 1
@@ -3514,11 +4209,12 @@ async def parse_c5_endpoint(
             "sid": sid,
             "outlet_name": outlet_name,
             "category_id": cat_id,
-            "category": cat_name,
+            "category": cat_name or base_cat,
             "item_id": item_id,
-            "item_name": item_name,
+            "item_name": item_name or base_name,
             "item_name_new": display_name if is_changed and display_name else item_name_imp,
             "photo_link": photo_link,
+            "photo_resolution_error": photo_resolution_error,
             "description": description,
             "availability": availability,
             "visibility": visibility,
@@ -3531,6 +4227,9 @@ async def parse_c5_endpoint(
             "current_fake_price": base_price,
             "new_fake_price": new_fake_price,
             "baseline_found": base_rec is not None,
+            "baseline_file": baseline.get("baseline_file"),
+            "baseline_pulled_at": baseline.get("baseline_pulled_at"),
+            "baseline_platform": baseline.get("baseline_platform"),
             "is_valid": is_valid,
             "validation_error": validation_error,
             "is_changed": is_changed,
@@ -3544,8 +4243,9 @@ async def parse_c5_endpoint(
                 "name_changed": name_changed,
                 "category_changed": category_changed,
                 "photo_changed": photo_changed,
-                "description_changed": description_changed,
-                "price_changed": price_changed,
+            "description_changed": description_changed,
+            "offline_price_changed": offline_price_changed,
+            "price_changed": price_changed,
                 "price_warning": price_warning,
                 "price_diff_percent": round(price_diff_percent, 2),
                 "other_changed": other_changed,
@@ -3590,6 +4290,9 @@ async def parse_c5_endpoint(
                     "current_fake_price": base_rec.get("price"),
                     "new_fake_price": None,
                     "baseline_found": True,
+                    "baseline_file": baseline.get("baseline_file"),
+                    "baseline_pulled_at": baseline.get("baseline_pulled_at"),
+                    "baseline_platform": baseline.get("baseline_platform"),
                     "is_valid": True,
                     "validation_error": None,
                     "is_changed": True,
@@ -3628,7 +4331,9 @@ async def parse_c5_endpoint(
             "name_changes": name_changes_count,
             "category_changes": category_changes_count,
             "photo_changes": photo_changes_count,
+            "photo_resolution_errors_count": photo_resolution_errors_count,
             "description_changes": description_changes_count,
+            "offline_price_changes": offline_price_changes_count,
             "price_changes": price_changes_count,
             "price_warning_count": price_warning_count,
             "other_changes": other_changes_count,
@@ -3636,6 +4341,9 @@ async def parse_c5_endpoint(
             "new_categories_count": new_categories_count,
             "deleted_items_count": deleted_items_count,
             "validation_errors_count": validation_errors_count,
+            "invalid_new_item_prices_count": sum(
+                1 for item in parsed_items if "INVALID_NEW_ITEM_PRICE" in item.get("change_types", [])
+            ),
             "has_validation_errors": len(validation_error_messages) > 0,
             "validation_error_messages": validation_error_messages,
         }
@@ -3646,6 +4354,25 @@ async def parse_c5_endpoint(
 def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Triggers background job to push C5 menu updates (GoFood or GrabFood) for selected Store IDs (SIDs)."""
     target_platform = (request.platform or "gofood").lower()
+    if target_platform == "gofood":
+        import math
+
+        invalid_new_items = []
+        for item in request.updates:
+            is_new_item = "NEW_ITEM" in (item.changes or []) or not str(item.item_id or "").strip()
+            if not is_new_item:
+                continue
+            price = item.new_fake_price
+            if price is None or not math.isfinite(price) or price <= 0:
+                invalid_new_items.append(f"{item.item_name_new or item.item_name or 'Item tanpa nama'} (SID: {item.sid or '-'})")
+        if invalid_new_items:
+            names = ", ".join(invalid_new_items[:10])
+            more = f" dan {len(invalid_new_items) - 10} item lainnya" if len(invalid_new_items) > 10 else ""
+            raise HTTPException(
+                status_code=422,
+                detail=f"Harga item baru belum diisi atau tidak valid (> Rp0): {names}{more}. Perbaiki harga di C5 sebelum push."
+            )
+
     outlet = None
     if request.selected_sids:
         target_sid = request.selected_sids[0]
