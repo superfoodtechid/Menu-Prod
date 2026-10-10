@@ -90,3 +90,20 @@ Sistem secara otomatis:
 1. **Platform Lock (`PLATFORM_LOCKS["gofood"]`)**: Memastikan hanya 1 job push GoFood yang berjalan bersamaan untuk mencegah konflik per Sesi.
 2. **Exponential Backoff & Rate Limit (HTTP 429)**: Mengurangi kecepatan request secara otomatis dan jeda *cooldown* jika GoFood API membatasi kuota request.
 3. **Session Auto-Refresh**: Jika token login GoFood kadaluarsa, runner otomatis memicu re-login via `login_gofood.py`.
+
+## 🖼️ 6. Resolver Foto dari Folder Google Drive
+
+Untuk menggunakan folder Drive sebagai sumber foto C5, set environment berikut pada backend:
+
+```env
+MENU_FOTO_GDRIVE=https://drive.google.com/drive/u/0/folders/<ROOT_FOLDER_ID>
+GOOGLE_DRIVE_API_KEY=<GOOGLE_DRIVE_API_KEY>
+```
+
+Resolver menelusuri struktur folder secara rekursif. Nama folder menu dicocokkan dengan nama item C5 setelah normalisasi kapitalisasi, spasi, dan tanda baca. File gambar pertama dengan MIME type `image/*` digunakan sebagai URL foto. Folder dan seluruh file gambar harus dapat dibaca oleh API key atau dibagikan sebagai `Anyone with the link`.
+
+## 🔔 7. Notifikasi Hasil Push ke Discord
+
+Set `WEBHOOK_URL` di environment backend ke Discord Incoming Webhook. Setelah job Menu Push C5 selesai, backend mengirim ringkasan per SID berdasarkan audit trail: item yang berubah, ditambahkan, dihapus, dan gagal diproses. Kegagalan webhook dicatat di log dan tidak mengubah status job push.
+
+Untuk membatasi penggantian gambar ke baris tertentu, isi kolom `Design Improvement` pada baris tersebut dengan `GDRIVE_IMAGE`. Resolver hanya memproses baris yang ditandai dan menyegarkan indeks saat setiap workbook diparse, sehingga gambar yang baru ditambahkan dapat langsung ditemukan.
