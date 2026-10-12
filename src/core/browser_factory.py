@@ -45,8 +45,14 @@ def cleanup_zombie_chromium():
     except Exception:
         pass
 
+STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+window.chrome = { runtime: {} };
+"""
+
 OPTIMIZED_CHROMIUM_ARGS = [
     "--no-sandbox",
+    "--disable-blink-features=AutomationControlled",
     "--disable-dev-shm-usage",
     "--disable-gpu",
     "--disable-extensions",
@@ -76,6 +82,7 @@ def launch_universal_playwright_browser(p, headless=True):
             "--disable-gpu",
             "--disable-dev-shm-usage",
             "--disable-gpu-sandbox",
+            "--disable-blink-features=AutomationControlled",
             "--dbus-stub",
             f"--remote-debugging-port={cdp_port}"
         ]
@@ -131,6 +138,7 @@ async def async_launch_universal_playwright_browser(p, headless=True):
             "--disable-gpu",
             "--disable-dev-shm-usage",
             "--disable-gpu-sandbox",
+            "--disable-blink-features=AutomationControlled",
             "--dbus-stub",
             f"--remote-debugging-port={cdp_port}"
         ]

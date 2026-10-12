@@ -9,7 +9,7 @@ from grab.core.grab_api_scraper import GrabAPI, perform_login, SESSION_DIR
 
 logger = logging.getLogger("GrabC5Push")
 
-async def _async_push_c5_grab(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None):
+async def _async_push_c5_grab(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None, price_guard_cb=None, store_name=None):
     """
     Internal async worker to log into Grab Merchant Portal and push C5 menu updates to Grab API.
     """
@@ -26,28 +26,24 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
         proc = None
         use_system_chromium = os.path.exists("/usr/lib/chromium/chromium") or os.path.exists("/usr/bin/chromium")
         if use_system_chromium:
-            import socket, subprocess
-            def get_free_port():
-                s = socket.socket()
-                s.bind(('', 0))
-                port = s.getsockname()[1]
-                s.close()
-                return port
-            cdp_port = get_free_port()
             chromium_bin = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else "/usr/bin/chromium"
-            proc = subprocess.Popen([
-                chromium_bin, "--no-sandbox", "--no-zygote", "--in-process-gpu", "--disable-gpu",
-                "--disable-dev-shm-usage", "--disable-gpu-sandbox", "--dbus-stub", f"--remote-debugging-port={cdp_port}", "--headless=new"
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            await asyncio.sleep(3.0)
-            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
+            browser = await p.chromium.launch(
+                executable_path=chromium_bin,
+                headless=False,
+                args=["--no-sandbox", "--no-zygote", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
         else:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=False,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+            )
 
         context = await browser.new_context(
             storage_state=storage_state,
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            viewport={"width": 1920, "height": 1080},
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
         )
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); window.chrome = { runtime: {} };")
         page = await context.new_page()
 
         try:
@@ -59,15 +55,45 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
             api = GrabAPI(page, username, password)
             group_id = await api.get_merchant_group_id()
 
-            if not group_id:
-                logger.info("Grab session expired/invalid. Running perform_login...")
-                if await perform_login(page, username, password):
-                    os.makedirs(SESSION_DIR, exist_ok=True)
-                    await context.storage_state(path=session_path)
-                    group_id = await api.get_merchant_group_id()
+            async def wait_for_merchant_group_id(timeout_seconds=45):
+                """Wait for the SSO handoff to expose the merchant selector."""
+                deadline = asyncio.get_running_loop().time() + timeout_seconds
+                while True:
+                    resolved_group_id = await api.get_merchant_group_id()
+                    if resolved_group_id:
+                        return resolved_group_id
+                    if asyncio.get_running_loop().time() >= deadline:
+                        return None
+                    await asyncio.sleep(2)
 
             if not group_id:
-                raise Exception("Gagal mendapatkan Merchant Group ID dari Grab. Cek username/password.")
+                logger.info("Grab session expired/invalid. Running perform_login...")
+                login_ok = False
+                try:
+                    login_ok = await perform_login(page, username, password)
+                except Exception as login_error:
+                    logger.warning("Grab login with configured password failed: %s", login_error)
+
+                if not login_ok and password != "Master@123":
+                    logger.info("Configured Grab login did not complete; trying the existing Master@123 fallback.")
+                    api = GrabAPI(page, username, "Master@123")
+                    try:
+                        login_ok = await perform_login(page, username, "Master@123")
+                    except Exception as login_error:
+                        logger.warning("Grab fallback login failed: %s", login_error)
+
+                if login_ok:
+                    logger.info("Grab login continued; waiting for merchant selector to finish SSO...")
+                    group_id = await wait_for_merchant_group_id()
+                    if group_id:
+                        os.makedirs(SESSION_DIR, exist_ok=True)
+                        await context.storage_state(path=session_path)
+
+            if not group_id:
+                raise Exception(
+                    "Login Grab belum selesai: Merchant Group ID tidak tersedia setelah menunggu SSO. "
+                    "Selesaikan verifikasi yang muncul di browser dan pastikan akun memiliki akses ke outlet."
+                )
 
             # Resolve target store / merchant IDs
             target_sid = store_id
@@ -79,17 +105,193 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
             if not target_sid:
                 raise Exception("Store ID Grab tidak valid atau tidak ditemukan.")
 
-            logger.info(f"🔑 Grab C5 Push initialized for Store ID: {target_sid}, Group ID: {group_id}")
+            async def resolve_target_group_id(fallback_group_id):
+                # Pull resolves the group from the selected outlet page's real
+                # API request. Reuse that mapping for C5 writes instead of
+                # assuming merchant-selector's first group belongs to SID.
+                intercepted = await api.get_merchant_ids_from_page_requests(target_store_id=target_sid)
+                sid_key = str(target_sid).strip().casefold()
+                for entry in intercepted:
+                    if str(entry.get("store_id") or "").strip().casefold() == sid_key:
+                        resolved = entry.get("group_id")
+                        if resolved:
+                            logger.info("Resolved Grab group from outlet page request for SID %s.", target_sid)
+                            return resolved
 
-            # Fetch current menu structure to map categories and existing items
-            current_menu, fetch_err = await api.fetch_menu(group_id, target_sid)
+                selector_stores = await api.get_all_merchants_and_stores()
+                exact_matches = [
+                    entry for entry in selector_stores
+                    if str(entry.get("store_id") or "").strip().casefold() == sid_key
+                ]
+                matching_group_ids = {
+                    str(entry.get("group_id") or "").strip()
+                    for entry in exact_matches
+                    if entry.get("group_id")
+                }
+                if len(matching_group_ids) == 1:
+                    resolved = matching_group_ids.pop()
+                    logger.info("Resolved Grab group from merchant selector for SID %s.", target_sid)
+                    return resolved
+
+                # A lone account group is a safe fallback when Grab's page
+                # does not emit the menu request during navigation.
+                all_group_ids = {
+                    str(entry.get("group_id") or "").strip()
+                    for entry in selector_stores
+                    if entry.get("group_id")
+                }
+                if not selector_stores or all_group_ids == {str(fallback_group_id)}:
+                    logger.warning(
+                        "Grab outlet request did not expose SID %s; using the only available account group.",
+                        target_sid,
+                    )
+                    return fallback_group_id
+                return None
+
+            resolved_group_id = await resolve_target_group_id(group_id)
+            if not resolved_group_id:
+                raise Exception(
+                    f"Tidak dapat mencocokkan SID Grab {target_sid} dengan Merchant Group yang benar. "
+                    "Push dihentikan sebelum ada perubahan dikirim."
+                )
+            group_id = resolved_group_id
+
+            logger.info(f"🔑 Grab C5 Push initialized for Store ID: {target_sid}, Group ID: {group_id}")
+            await api.get_csrf_token()
+
+            # A stale session can still return a merchant selector but be
+            # rejected by mutation endpoints. Refresh once, and retry only
+            # explicit authentication failures so ordinary errors never cause
+            # duplicate menu mutations.
+            auth_recovery_attempted = False
+
+            def is_auth_error(error):
+                text = str(error or "").casefold()
+                return (
+                    bool(re.search(r"\b(?:401|403)\b", text))
+                    or "unauthorized" in text
+                    or "token invalid" in text
+                    or "session expired" in text
+                    or "session invalid" in text
+                )
+
+            async def call_with_auth_recovery(action, action_name):
+                nonlocal auth_recovery_attempted, group_id
+                response = await action()
+                error = response[1] if isinstance(response, tuple) and len(response) > 1 else None
+                if not error or not is_auth_error(error) or auth_recovery_attempted:
+                    return response
+
+                auth_recovery_attempted = True
+                logger.warning("🔄 Grab rejected the %s request due to authentication; refreshing the session once.", action_name)
+                try:
+                    # A portal selector response alone is not proof that the
+                    # refreshed session can access this store. Start from the
+                    # login flow, then verify the exact target menu before
+                    # allowing the failed mutation to be retried.
+                    login_ok = await perform_login(page, username, password)
+                    if not login_ok:
+                        return (response[0], "Sesi Grab kedaluwarsa dan login ulang otomatis gagal. Login kembali ke portal Grab, lalu ulangi push.")
+                    refreshed_group_id = await wait_for_merchant_group_id()
+                    if not refreshed_group_id:
+                        return (response[0], "Login Grab berhasil tetapi sesi merchant belum pulih. Login kembali ke portal Grab, lalu ulangi push.")
+                    refreshed_group_id = await resolve_target_group_id(refreshed_group_id)
+                    if not refreshed_group_id:
+                        return (
+                            response[0],
+                            f"Login berhasil, tetapi konteks merchant untuk SID {target_sid} tidak ditemukan. "
+                            "Push dihentikan demi keamanan outlet.",
+                        )
+                    try:
+                        await page.goto(
+                            f"https://merchant.grab.com/food/menu/{target_sid}",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await page.wait_for_timeout(1500)
+                    except Exception as nav_error:
+                        logger.warning("Grab menu context navigation after login failed: %s", nav_error)
+
+                    verified_menu, verify_error = await api.fetch_menu(
+                        refreshed_group_id,
+                        target_sid,
+                        store_name=store_name,
+                        require_menu_group_match=True,
+                    )
+                    if verify_error or not verified_menu:
+                        logger.warning(
+                            "Grab login completed but target menu verification failed after %s: %s",
+                            action_name,
+                            verify_error or "empty menu response",
+                        )
+                        return (
+                            response[0],
+                            "Login Grab terdeteksi, tetapi akses ke menu outlet belum terverifikasi. "
+                            "Pastikan akun memiliki akses ke outlet yang dipilih dan login ulang di portal Grab.",
+                        )
+
+                    group_id = refreshed_group_id
+                    os.makedirs(SESSION_DIR, exist_ok=True)
+                    await context.storage_state(path=session_path)
+                    api.csrf_token = None
+                    await api.get_csrf_token()
+                    logger.info("✅ Grab session refreshed; retrying %s once.", action_name)
+                    return await action()
+                except Exception as refresh_error:
+                    logger.warning("Grab session refresh failed: %s", refresh_error)
+                    return (response[0], "Sesi Grab kedaluwarsa dan tidak berhasil diperbarui otomatis. Login kembali ke portal Grab, lalu ulangi push.")
+
+            # Validate that the session can read the target menu before any
+            # mutation. If auth expired, refresh once and retry this read; if
+            # the menu still cannot be verified, fail the job closed.
+            current_menu, fetch_err = await call_with_auth_recovery(
+                lambda: api.fetch_menu(
+                    group_id,
+                    target_sid,
+                    store_name=store_name,
+                    require_menu_group_match=True,
+                ),
+                "validate menu session",
+            )
             if fetch_err or not current_menu:
-                logger.warning(f"Warning: Fetch current menu return error: {fetch_err}. Proceeding with fallback.")
-                current_menu = {}
+                detail = fetch_err or "respons menu Grab kosong"
+                raise Exception(
+                    "Sesi atau menu Grab belum dapat diverifikasi. Tidak ada perubahan yang dikirim. "
+                    f"Detail: {detail}"
+                )
+
+            # Match the successful single-price edit flow: determine the
+            # Menu Group context from the fetched catalog and pass it
+            # explicitly to every item upsert. Do not rely on an incidental
+            # menuGroupID field surviving C5 payload shaping.
+            is_menu_group = bool(current_menu.get("is_menu_group"))
+            menu_group_id = current_menu.get("menuGroupID")
+            if not is_menu_group:
+                for category in current_menu.get("categories") or []:
+                    if category.get("menuGroupID"):
+                        is_menu_group = True
+                        menu_group_id = category.get("menuGroupID")
+                        break
+                    for menu_item in category.get("items") or category.get("menuItems") or []:
+                        if menu_item.get("menuGroupID"):
+                            is_menu_group = True
+                            menu_group_id = menu_item.get("menuGroupID")
+                            break
+                    if is_menu_group:
+                        break
+            logger.info(
+                "Grab C5 mutation context: SID=%s, menu_group=%s, menu_group_id=%s",
+                target_sid,
+                is_menu_group,
+                menu_group_id or "(store-level)",
+            )
 
             categories = current_menu.get("categories") or []
             cat_map = {}  # norm_name -> cat_id
             cat_obj_map = {} # cat_id -> cat_obj
+            category_creation_errors = {}
+            category_rename_errors = {}
+            renamed_category_ids = set()
             for c in categories:
                 cid = c.get("categoryID") or c.get("id")
                 cname = c.get("name", "").strip()
@@ -101,7 +303,9 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
             # Index existing items to check live campaign / promo status
             existing_items_map = {}
             for c in categories:
+                category_id = c.get("categoryID") or c.get("id")
                 for it in (c.get("items") or c.get("menuItems") or []):
+                    it.setdefault("_c5CategoryID", category_id)
                     iid = str(it.get("itemID") or it.get("id") or "")
                     if iid:
                         existing_items_map[iid] = it
@@ -118,6 +322,11 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                 new_cat_name = upd.get("category") or ""
                 photo_link = upd.get("photo_link") or ""
                 description = upd.get("description") or ""
+                changes = set(upd.get("changes") or [])
+                is_new_item = "NEW_ITEM" in changes or not item_id
+                is_new_category = "NEW_CATEGORY" in changes or bool(upd.get("is_new_category"))
+                is_deleted_item = "DELETE_ITEM" in changes or bool(upd.get("is_deleted_item"))
+                has_price_change = "PRICE_CHANGE" in changes or (not changes and new_price is not None)
 
                 if progress_cb:
                     progress_cb(idx, total, upd)
@@ -135,26 +344,13 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                 }
 
                 try:
-                    # 1. Handle NEW CATEGORY if needed
-                    if upd.get("is_new_category") and new_cat_name and new_cat_name.lower() not in cat_map:
-                        selling_time_id = ""
-                        if categories and isinstance(categories[0], dict):
-                            selling_time_id = categories[0].get("sellingTimeID") or ""
-
-                        cat_res, cat_err = await api.create_category(group_id, target_sid, new_cat_name, selling_time_id)
-                        if cat_err:
-                            logger.warning(f"Gagal buat kategori baru '{new_cat_name}': {cat_err}")
-                        elif cat_res:
-                            new_cid = cat_res.get("categoryID") or cat_res.get("id")
-                            if new_cid:
-                                cat_map[new_cat_name.lower()] = new_cid
-
-                    target_cat_id = upd.get("category_id") or cat_map.get((new_cat_name or "").lower()) or (categories[0].get("categoryID") if categories else "")
-
-                    # 2. Handle DELETE ITEM
-                    if upd.get("is_deleted_item"):
+                    # 1. Handle DELETE ITEM from the same change_types list sent by the UI.
+                    if is_deleted_item:
                         if item_id:
-                            ok_del, err_del = await api.delete_item(group_id, target_sid, item_id)
+                            ok_del, err_del = await call_with_auth_recovery(
+                                lambda: api.delete_item(group_id, target_sid, item_id),
+                                "delete item",
+                            )
                             if not ok_del:
                                 res_item["status"] = "FAILED"
                                 res_item["error"] = f"Gagal hapus item: {err_del}"
@@ -162,30 +358,150 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                             res_item["status"] = "FAILED"
                             res_item["error"] = "Item ID tidak ada untuk penghapusan."
                         results.append(res_item)
+                        if item_result_cb:
+                            item_result_cb(upd, res_item["status"], res_item.get("error"), applied=res_item)
                         continue
 
-                    # 3. Handle Active Promo Check for Grab C5 Push
+                    # Validate existing item and price before any category API
+                    # mutation so a blocked price cannot leave partial changes.
+                    # 3. Validate price mutations before sending them to Grab.
                     existing_it = existing_items_map.get(item_id) or existing_items_map.get(item_name.strip().lower())
-                    target_price_val = int(float(new_price)) if new_price is not None else 0
+                    if not is_new_item and not existing_it:
+                        raise ValueError(f"Item '{item_name}' tidak ditemukan pada menu Grab yang baru ditarik. Pull ulang sebelum push.")
+                    if existing_it:
+                        res_item["item_id"] = str(existing_it.get("itemID") or existing_it.get("id") or item_id)
+                    if is_new_item and (new_price is None or float(new_price) <= 0):
+                        raise ValueError("Harga item baru harus lebih dari Rp0.")
+                    old_price_minor = int(float((existing_it or {}).get("priceInMin") or 0))
+                    old_price = old_price_minor / 100.0
+                    if has_price_change and not is_new_item:
+                        if new_price is None or old_price <= 0:
+                            raise ValueError("Harga saat ini atau harga baru tidak tersedia; perubahan harga dihentikan agar batas Grab tidak terlewati.")
+                        increase_pct = ((float(new_price) - old_price) / old_price) * 100.0
+                        if increase_pct > 15.0:
+                            raise ValueError(f"Kenaikan harga {increase_pct:.1f}% melebihi batas Grab 15% untuk satu perubahan. Pecah perubahan menjadi beberapa push terpisah.")
+                        if price_guard_cb:
+                            guard_error = price_guard_cb(upd, str((existing_it or {}).get("itemID") or item_id), old_price, float(new_price))
+                            if guard_error:
+                                raise ValueError(guard_error)
+
+                    # priceInMin uses minor units (Rp × 100) in Grab's menu API.
+                    if has_price_change or is_new_item:
+                        target_price_val = int(round(float(new_price) * 100)) if new_price is not None else 0
+                    else:
+                        target_price_val = old_price_minor
+
+                    # 2. Create a new category once per SID/name. Never fall back
+                    # to the first existing category when category creation fails.
+                    category_key = (new_cat_name or "").strip().casefold()
+                    if is_new_category and category_key and category_key not in cat_map:
+                        if category_key in category_creation_errors:
+                            raise ValueError(category_creation_errors[category_key])
+                        selling_time_id = (categories[0].get("sellingTimeID") or "") if categories else ""
+                        if not selling_time_id:
+                            raise ValueError(f"Jadwal penjualan Grab tidak tersedia; kategori '{new_cat_name}' tidak dibuat agar tidak meninggalkan kategori yang tidak dapat dipakai.")
+                        cat_res, cat_err = await call_with_auth_recovery(
+                            lambda: api.create_category(group_id, target_sid, new_cat_name, selling_time_id),
+                            "create category",
+                        )
+                        new_cid = (cat_res or {}).get("categoryID") or (cat_res or {}).get("id")
+                        if cat_err or not new_cid:
+                            error_text = f"Kategori Grab '{new_cat_name}' gagal dibuat; item terkait tidak dikirim. {cat_err or 'ID kategori tidak diberikan oleh Grab.'}"
+                            category_creation_errors[category_key] = error_text
+                            raise ValueError(error_text)
+                        cat_map[category_key] = new_cid
+                        created_category = dict(cat_res)
+                        created_category.setdefault("sellingTimeID", selling_time_id)
+                        cat_obj_map[new_cid] = created_category
+
+                    target_cat_id = (
+                        upd.get("category_id")
+                        or cat_map.get(category_key)
+                        or (existing_items_map.get(item_id) or {}).get("_c5CategoryID")
+                    )
+                    if not target_cat_id:
+                        raise ValueError(f"Kategori target '{new_cat_name or '(kosong)'}' tidak ditemukan. Item tidak dikirim agar tidak masuk ke kategori yang salah.")
+
+                    # Rename the existing category once when C5 keeps the same
+                    # category ID and changes its name. A category move only
+                    # changes the item's target category below.
+                    existing_for_category = existing_items_map.get(item_id) or existing_items_map.get(item_name.strip().lower())
+                    old_category_id = (existing_for_category or {}).get("_c5CategoryID")
+                    if (
+                        "CATEGORY_CHANGE" in changes
+                        and not is_new_category
+                        and old_category_id
+                        and str(target_cat_id) == str(old_category_id)
+                        and str(old_category_id) not in renamed_category_ids
+                    ):
+                        if str(old_category_id) in category_rename_errors:
+                            raise ValueError(category_rename_errors[str(old_category_id)])
+                        category_obj = cat_obj_map.get(old_category_id) or {}
+                        _, cat_err = await call_with_auth_recovery(
+                            lambda: api.edit_category(
+                                group_id,
+                                target_sid,
+                                old_category_id,
+                                new_cat_name,
+                                category_obj.get("sellingTimeID") or "",
+                            ),
+                            "edit category",
+                        )
+                        if cat_err:
+                            error_text = f"Kategori Grab '{new_cat_name}' gagal diubah: {cat_err}"
+                            category_rename_errors[str(old_category_id)] = error_text
+                            raise ValueError(error_text)
+                        renamed_category_ids.add(str(old_category_id))
+                        cat_map[category_key] = old_category_id
+
+                    # 4. Handle Active Promo Check for Grab C5 Push
                     if existing_it:
                         has_campaign = bool(existing_it.get("itemCampaignInfo"))
-                        orig_grab_p = int(existing_it.get("priceInMin") or 0)
-                        if has_campaign and target_price_val != orig_grab_p and target_price_val > 0:
+                        if has_campaign and has_price_change and target_price_val != old_price_minor and target_price_val > 0:
                             logger.info(f"🔒 [Grab C5 Push] Item '{new_name or item_name}' sedang dalam promo/campaign aktif. Menahan harga asli dan melanjutkan pembaruan non-harga.")
-                            target_price_val = orig_grab_p
+                            target_price_val = old_price_minor
                             res_item["note"] = "Harga dipertahankan karena campaign aktif"
 
-                    # 4. Handle UPSERT ITEM (Price, Name, Photo, Description)
-                    item_payload = {
-                        "name": new_name or item_name,
+                    # Preserve fields absent from this C5 change. Sending blank
+                    # photo/description on a price-only edit can erase merchant data.
+                    item_payload = dict(existing_it or {})
+                    item_payload.update({
+                        "itemName": (new_name or item_name) if (is_new_item or "NAME_CHANGE" in changes) else ((existing_it or {}).get("itemName") or (existing_it or {}).get("name") or item_name),
                         "priceInMin": target_price_val,
-                        "description": description,
-                        "photoURL": photo_link,
-                    }
+                        "description": description if (is_new_item or "DESCRIPTION_CHANGE" in changes) else ((existing_it or {}).get("description") or ""),
+                    })
+                    if is_new_item or "PHOTO_CHANGE" in changes:
+                        item_payload["imageURL"] = photo_link
+                        item_payload["imageURLs"] = [photo_link] if photo_link else []
+                    else:
+                        item_payload["imageURL"] = (
+                            (existing_it or {}).get("imageURL")
+                            or next(iter((existing_it or {}).get("imageURLs") or []), "")
+                        )
+                    item_payload.pop("name", None)
+                    item_payload.pop("photoURL", None)
+                    if is_new_item:
+                        target_category = cat_obj_map.get(target_cat_id) or {}
+                        selling_time_id = target_category.get("sellingTimeID") or ""
+                        if not selling_time_id:
+                            raise ValueError(f"Jadwal penjualan untuk kategori '{new_cat_name}' tidak tersedia; item baru tidak dikirim.")
+                        item_payload["sellingTimeID"] = selling_time_id
+                        item_payload["categoryName"] = new_cat_name
+                    item_payload.pop("_c5CategoryID", None)
                     if item_id:
                         item_payload["itemID"] = item_id
 
-                    upsert_res, upsert_err = await api.upsert_item(group_id, target_sid, target_cat_id, item_payload)
+                    upsert_res, upsert_err = await call_with_auth_recovery(
+                        lambda: api.upsert_item(
+                            group_id,
+                            target_sid,
+                            target_cat_id,
+                            item_payload,
+                            is_menu_group=is_menu_group,
+                            menu_group_id=menu_group_id,
+                        ),
+                        "upsert item",
+                    )
 
                     if upsert_err:
                         res_item["status"] = "FAILED"
@@ -228,14 +544,14 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
 
         return results
 
-def push_c5_grab_for_merchant(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None):
+def push_c5_grab_for_merchant(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None, price_guard_cb=None, store_name=None):
     """
     Synchronous wrapper to run async Grab C5 push in a clean event loop.
     """
     new_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(new_loop)
     try:
-        return new_loop.run_until_complete(_async_push_c5_grab(username, password, store_id, updates, progress_cb, item_result_cb))
+        return new_loop.run_until_complete(_async_push_c5_grab(username, password, store_id, updates, progress_cb, item_result_cb, price_guard_cb, store_name))
     finally:
         try:
             new_loop.close()

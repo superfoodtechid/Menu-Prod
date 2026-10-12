@@ -14,6 +14,7 @@ const CHANGE_LABELS = {
   DESCRIPTION_CHANGE: "Deskripsi",
   OTHER_CHANGE: "Atribut lain",
   INVALID_NEW_ITEM_PRICE: "Harga item baru tidak valid",
+  GRAB_PRICE_LIMIT_EXCEEDED: "Kenaikan Grab melebihi 15%",
 };
 
 function friendlyPushError(rawMessage) {
@@ -49,6 +50,9 @@ function friendlyPushError(rawMessage) {
   }
   if (detail.includes("promo") || detail.includes("promotion")) {
     return "Item sedang mengikuti promo sehingga perubahan ini belum dapat diterapkan.";
+  }
+  if (detail.includes("sesi atau menu grab") || (detail.includes("sesi grab") && (detail.includes("login ulang") || detail.includes("diperbarui") || detail.includes("dipulihkan")))) {
+    return "Sesi Grab kedaluwarsa dan belum berhasil dipulihkan otomatis. Login kembali ke portal Grab, lalu ulangi push.";
   }
   if (detail.includes("401") || detail.includes("403") || detail.includes("unauthorized") || detail.includes("token invalid")) {
     return "Sesi akun merchant perlu diperbarui. Login kembali, lalu ulangi push.";
@@ -708,7 +712,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                   <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Update Harga</p>
                   <p className="mt-1 text-lg font-bold text-slate-900 dark:text-white">{s.price_changes || 0}</p>
                   <p className="text-[11px] text-slate-400">
-                    {s.price_warning_count > 0 ? `${s.price_warning_count} step push` : "Perubahan harga"}
+                    {s.price_warning_count > 0 ? `${s.price_warning_count} peringatan >15%` : "Perubahan harga"}
                   </p>
                 </div>
 
@@ -946,7 +950,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                   ["new_item", `Item Baru (${parseResult?.summary?.new_items_count || 0})`],
                   ["new_category", `Kategori Baru (${parseResult?.summary?.new_categories_count || 0})`],
                   ["delete_item", `Hapus Item (${parseResult?.summary?.deleted_items_count || 0})`],
-                  ["step_push", `Step Push >15% (${parseResult?.summary?.price_warning_count || 0})`],
+                  ["step_push", `Peringatan Harga >15% (${parseResult?.summary?.price_warning_count || 0})`],
                   ["invalid", `Tidak Valid (${parseResult?.summary?.validation_errors_count || 0})`],
                 ].map(([mode, label]) => {
                   const isActive = changeTypeFilter === mode;
@@ -1200,8 +1204,8 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                                 </span>
                               )}
                               {item.price_warning && (
-                                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300" title="Kenaikan >15%">
-                                  Step Push
+                                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300" title={item.grab_price_limit_exceeded ? "Kenaikan Grab melebihi batas 15% per perubahan" : "Perubahan harga lebih dari 15%"}>
+                                  {item.grab_price_limit_exceeded ? "Batas Grab" : "Step Push"}
                                 </span>
                               )}
                               {item.changes?.name_changed && !item.is_new_item && (
@@ -1712,7 +1716,9 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                             }`}
                           >
                             {diffModalItem.price_diff_percent > 0 ? `+${diffModalItem.price_diff_percent}%` : `${diffModalItem.price_diff_percent}%`}
-                            {diffModalItem.price_warning ? " (Step Push)" : ""}
+                            {diffModalItem.grab_price_limit_exceeded
+                              ? " (Melebihi batas Grab 15%)"
+                              : diffModalItem.price_warning ? " (Step Push)" : ""}
                           </span>
                         )}
                       </div>
@@ -1790,11 +1796,15 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
               )}
 
               {/* Catatan Khusus Peringatan Step Push */}
-              {diffModalItem.price_warning && (
+              {diffModalItem.grab_price_limit_exceeded ? (
+                <div className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+                  Push harga item ini diblokir. Kenaikan {diffModalItem.price_diff_percent}% melampaui batas Grab 15% untuk satu perubahan. Turunkan target maksimal 15% dari harga saat ini.
+                </div>
+              ) : diffModalItem.price_warning ? (
                 <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
                   Peringatan Step Push: Kenaikan harga hidangan ini sebesar {diffModalItem.price_diff_percent}% (&gt;15%). Sistem otomasi FoodMaster akan memecah kenaikan ini menjadi beberapa tahapan bertahap saat di-push ke merchant portal.
                 </div>
-              )}
+              ) : null}
             </div>
 
             {/* Modal Actions */}

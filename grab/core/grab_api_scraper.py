@@ -84,6 +84,31 @@ class GrabAPI:
         self.username = username
         self.password = password
         self.base_url = "https://merchant.grab.com"
+        self.api_base_url = "https://api.grab.com"
+        self.csrf_token = None
+
+    async def get_csrf_token(self):
+        """Ambil token CSRF (jti dari cookie mexusers_authn_token_jti)"""
+        if getattr(self, "csrf_token", None):
+            return self.csrf_token
+        try:
+            if hasattr(self.page, "context"):
+                cookies = await self.page.context.cookies()
+                for c in cookies:
+                    if c.get("name") == "mexusers_authn_token_jti" and c.get("value"):
+                        self.csrf_token = c.get("value")
+                        return self.csrf_token
+            if not self.page.is_closed():
+                dom_cookie = await self.page.evaluate("() => document.cookie")
+                if "mexusers_authn_token_jti=" in dom_cookie:
+                    for part in dom_cookie.split(";"):
+                        part = part.strip()
+                        if part.startswith("mexusers_authn_token_jti="):
+                            self.csrf_token = part.split("=", 1)[1]
+                            return self.csrf_token
+        except Exception as e:
+            logger.debug(f"Gagal mengambil token CSRF Grab: {e}")
+        return getattr(self, "csrf_token", None)
 
     async def call_api(self, url, method="GET", params=None, headers=None, body=None):
         """Call Grab API from within the page context to reuse session/headers"""
@@ -92,7 +117,15 @@ class GrabAPI:
             query = "&".join([f"{k}={v}" for k, v in params.items()])
             full_url = f"{url}?{query}" if "?" not in url else f"{url}&{query}"
         
-        headers_js = json.dumps(headers or {})
+        req_headers = dict(headers or {})
+        if method.upper() in ("POST", "PUT", "DELETE", "PATCH"):
+            has_csrf = any(k.lower() == "x-csrf-token" for k in req_headers)
+            if not has_csrf:
+                csrf = await self.get_csrf_token()
+                if csrf:
+                    req_headers["x-csrf-token"] = csrf
+
+        headers_js = json.dumps(req_headers)
         body_js = json.dumps(body) if body is not None else "null"
         
         js_code = f"""
@@ -103,6 +136,13 @@ class GrabAPI:
                 
                 const extraHeaders = {headers_js};
                 const bodyObj = {body_js};
+                
+                if (!extraHeaders["x-csrf-token"] && !extraHeaders["X-CSRF-TOKEN"]) {{
+                    const m = document.cookie.match(/(?:^|;\\s*)mexusers_authn_token_jti=([^;]*)/);
+                    if (m && m[1]) {{
+                        extraHeaders["x-csrf-token"] = decodeURIComponent(m[1]);
+                    }}
+                }}
                 
                 const fetchOptions = {{
                     method: "{method}",
@@ -330,7 +370,7 @@ class GrabAPI:
                     })
         return results
 
-    async def get_merchant_ids_from_page_requests(self):
+    async def get_merchant_ids_from_page_requests(self, target_store_id=None):
         """
         Navigasi ke /food/menu dan intercept request halaman ke
         api.grab.com/food/merchant/v2/menu untuk mendapatkan merchantId/merchantgroupid.
@@ -351,9 +391,13 @@ class GrabAPI:
 
         self.page.on("request", on_request)
         try:
-            # Navigasi pertama
+            menu_url = "https://merchant.grab.com/food/menu"
+            if target_store_id:
+                menu_url = f"https://merchant.grab.com/food/menu/{target_store_id}"
+
+            # Navigasi to the selected outlet when a target SID is provided.
             await self.page.goto(
-                "https://merchant.grab.com/food/menu",
+                menu_url,
                 wait_until="networkidle",
                 timeout=30000
             )
@@ -367,7 +411,7 @@ class GrabAPI:
 
             # Fallback: cek URL apakah mengandung store ID
             # (beberapa versi portal redirect ke /food/menu/{storeId})
-            if not captured:
+            if not captured and not target_store_id:
                 current_url = self.page.url
                 if "/food/menu/" in current_url:
                     sid = current_url.split("/food/menu/")[-1].split("?")[0].split("/")[0]
@@ -383,10 +427,22 @@ class GrabAPI:
         return captured
 
 
-    async def fetch_menu(self, group_id, store_id, store_name=None, is_menu_group=False):
+    async def fetch_menu(self, group_id, store_id, store_name=None, is_menu_group=False, require_menu_group_match=False):
         """GET /food/merchant/v2/menu — dipanggil dari konteks halaman /food/menu.
         Mendukung deteksi otomatis Menu Groups untuk multi-cabang (seperti AGSA).
         """
+        def auth_error_from_response(response):
+            if not isinstance(response, dict):
+                return None
+            status = response.get("status")
+            detail = response.get("data") or response.get("error") or ""
+            detail_text = json.dumps(detail, ensure_ascii=False).casefold() if isinstance(detail, (dict, list)) else str(detail).casefold()
+            if status in (401, 403):
+                return f"Status {status}: {detail}"
+            if any(marker in detail_text for marker in ("unauthorized", "token invalid", "session expired", "session invalid")):
+                return f"Status {status or 'unknown'}: {detail}"
+            return None
+
         if is_menu_group:
             logger.info(f"  [MenuGroups] Direct group menu fetch for store_id/groupID: {store_id}")
             group_menu_url = f"https://api.grab.com/food/merchant/v2/menu-groups/menu?menuGroupID={store_id}"
@@ -418,6 +474,9 @@ class GrabAPI:
             for attempt in range(3):
                 try:
                     res = await self.page.evaluate(js_group_menu)
+                    auth_error = auth_error_from_response(res)
+                    if auth_error:
+                        return None, auth_error
                     if res and res.get("status") == 200:
                         data = res.get("data", {})
                         if isinstance(data, dict):
@@ -467,6 +526,9 @@ class GrabAPI:
         
         try:
             mg_res = await self.page.evaluate(js_menu_groups)
+            auth_error = auth_error_from_response(mg_res)
+            if auth_error:
+                return None, auth_error
             if mg_res and mg_res.get("status") == 200:
                 mg_data = mg_res.get("data", {})
                 menu_groups = mg_data.get("menuGroups") or mg_data.get("groups") or []
@@ -475,17 +537,34 @@ class GrabAPI:
                     
                     # Cari group yang cocok dengan store_name
                     matched_group = None
-                    if store_name:
+                    # A C5 mutation must never use an arbitrary first group:
+                    # its ID becomes merchantid/menuGroupID on the write call.
+                    # Match the selected SID against group metadata before
+                    # falling back to the outlet name.
+                    if require_menu_group_match:
+                        target_sid = str(store_id).strip().casefold()
+                        for g in menu_groups:
+                            candidate_ids = (
+                                g.get("merchantID"), g.get("merchantId"),
+                                g.get("storeID"), g.get("storeId"),
+                                g.get("store_id"), g.get("outletID"),
+                                g.get("outletId"), g.get("menuGroupID"), g.get("id"),
+                            )
+                            if any(str(candidate).strip().casefold() == target_sid for candidate in candidate_ids if candidate):
+                                matched_group = g
+                                break
+
+                    if not matched_group and store_name:
                         def clean_str(s):
                             return "".join(c for c in str(s).lower() if c.isalnum())
-                        
+
                         target_clean = clean_str(store_name)
                         for g in menu_groups:
                             g_name = g.get("name") or g.get("groupName") or g.get("menuGroupName") or ""
                             if clean_str(g_name) == target_clean:
                                 matched_group = g
                                 break
-                        if not matched_group:
+                        if not matched_group and not require_menu_group_match:
                             # Substring match
                             for g in menu_groups:
                                 g_name = g.get("name") or g.get("groupName") or g.get("menuGroupName") or ""
@@ -495,6 +574,8 @@ class GrabAPI:
                                     break
                     
                     if not matched_group:
+                        if require_menu_group_match:
+                            return None, f"Menu Group Grab tidak cocok dengan SID/outlet '{store_name or store_id}'. Push dihentikan agar tidak mengubah menu outlet lain."
                         matched_group = menu_groups[0]
                         logger.warning(f"  [MenuGroups] Tidak ditemukan kecocokan persis untuk '{store_name}'. Menggunakan group pertama: '{matched_group.get('name')}'")
                     
@@ -531,6 +612,9 @@ class GrabAPI:
                         for attempt in range(3):
                             try:
                                 res = await self.page.evaluate(js_group_menu)
+                                auth_error = auth_error_from_response(res)
+                                if auth_error:
+                                    return None, auth_error
                                 if res and res.get("status") == 200:
                                     data = res.get("data", {})
                                     if isinstance(data, dict):
@@ -586,6 +670,9 @@ class GrabAPI:
             """
             try:
                 res = await self.page.evaluate(js_code)
+                auth_error = auth_error_from_response(res)
+                if auth_error:
+                    return None, auth_error
                 if res and res.get("status") == 200:
                     return res.get("data", {}), None
                 err = res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
@@ -599,7 +686,7 @@ class GrabAPI:
 
     async def create_category(self, group_id, store_id, name, selling_time_id):
         """POST /food/merchant/v2/categories"""
-        url = f"{self.base_url}/food/merchant/v2/categories"
+        url = f"{self.api_base_url}/food/merchant/v2/categories"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -620,7 +707,7 @@ class GrabAPI:
 
     async def edit_category(self, group_id, store_id, category_id, name, selling_time_id):
         """PUT /food/merchant/v3/categories/{category_id}"""
-        url = f"{self.base_url}/food/merchant/v3/categories/{category_id}"
+        url = f"{self.api_base_url}/food/merchant/v3/categories/{category_id}"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -641,7 +728,7 @@ class GrabAPI:
 
     async def delete_category(self, group_id, store_id, category_id):
         """DELETE /food/merchant/v2/categories/{category_id}"""
-        url = f"{self.base_url}/food/merchant/v2/categories/{category_id}"
+        url = f"{self.api_base_url}/food/merchant/v2/categories/{category_id}"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -660,7 +747,7 @@ class GrabAPI:
 
     async def sort_categories(self, group_id, store_id, sorted_category_ids):
         """PUT /food/merchant/categories-sort"""
-        url = f"{self.base_url}/food/merchant/categories-sort"
+        url = f"{self.api_base_url}/food/merchant/categories-sort"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -699,19 +786,18 @@ class GrabAPI:
             use_mg_ep = bool(is_menu_group or mg_id)
 
         if use_mg_ep:
-            url = f"{self.base_url}/food/merchant/v2/menu-groups/item-validation"
+            url = f"{self.api_base_url}/food/merchant/v2/menu-groups/item-validation"
         else:
-            url = f"{self.base_url}/food/merchant/v2/item-validation"
+            url = f"{self.api_base_url}/food/merchant/v2/item-validation"
 
         headers = {
             "merchantgroupid": group_id,
             "merchantid": mg_id or store_id,
             "requestsource": "troyPortal",
             "x-client-id": "GrabMerchant-Portal",
-            "x-grabkit-clientid": "grabmerchant-portal"
+            "x-grabkit-clientid": "grabmerchant-portal",
+            "x-api-source": "food-max-api"
         }
-        if use_mg_ep:
-            headers["x-api-source"] = "food-max-api"
 
         item_copy = dict(item_data)
         item_copy["categoryID"] = category_id
@@ -732,6 +818,14 @@ class GrabAPI:
             item_copy["purchasability"] = {}
         if "prediction" not in item_copy or item_copy["prediction"] is None:
             item_copy["prediction"] = {}
+
+        for rk in (
+            "m41MetaData", "serviceTypePriceRange", "priceDisplay", "priceRange",
+            "bcrsInfo", "itemCampaignInfo", "suggestFields", "menuScanError",
+            "menuScanTaskMeta", "failedPhotos", "itemStock", "stockPrediction",
+            "eligibleSellingStatus", "aiGeneratedFields"
+        ):
+            item_copy.pop(rk, None)
 
         body = {
             "categoryID": category_id,
@@ -786,19 +880,18 @@ class GrabAPI:
             use_mg_ep = bool(is_menu_group or mg_id)
 
         if use_mg_ep:
-            url = f"{self.base_url}/food/merchant/v2/menu-groups/upsert-item"
+            url = f"{self.api_base_url}/food/merchant/v2/menu-groups/upsert-item"
         else:
-            url = f"{self.base_url}/food/merchant/v2/upsert-item"
+            url = f"{self.api_base_url}/food/merchant/v2/upsert-item"
 
         headers = {
             "merchantgroupid": group_id,
             "merchantid": mg_id or store_id,
             "requestsource": "troyPortal",
             "x-client-id": "GrabMerchant-Portal",
-            "x-grabkit-clientid": "grabmerchant-portal"
+            "x-grabkit-clientid": "grabmerchant-portal",
+            "x-api-source": "food-max-api"
         }
-        if use_mg_ep:
-            headers["x-api-source"] = "food-max-api"
         item_copy = dict(item_data)
         item_copy["categoryID"] = category_id
         if "categoryName" not in item_copy:
@@ -818,6 +911,14 @@ class GrabAPI:
             item_copy["purchasability"] = {}
         if "prediction" not in item_copy or item_copy["prediction"] is None:
             item_copy["prediction"] = {}
+
+        for rk in (
+            "m41MetaData", "serviceTypePriceRange", "priceDisplay", "priceRange",
+            "bcrsInfo", "itemCampaignInfo", "suggestFields", "menuScanError",
+            "menuScanTaskMeta", "failedPhotos", "itemStock", "stockPrediction",
+            "eligibleSellingStatus", "aiGeneratedFields"
+        ):
+            item_copy.pop(rk, None)
 
         body = {
             "categoryID": category_id,
@@ -867,7 +968,7 @@ class GrabAPI:
 
     async def delete_item(self, group_id, store_id, item_id):
         """DELETE /food/merchant/v2/items/{item_id}"""
-        url = f"{self.base_url}/food/merchant/v2/items/{item_id}"
+        url = f"{self.api_base_url}/food/merchant/v2/items/{item_id}"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -1297,6 +1398,7 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                     headless=headless_env,
                     args=[
                         "--no-sandbox",
+                        "--disable-blink-features=AutomationControlled",
                         "--disable-dev-shm-usage",
                         "--disable-gpu",
                         "--disable-extensions",
@@ -1315,8 +1417,10 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
             storage_state = session_path if os.path.exists(session_path) and run_attempt == 0 else None
             context = await browser.new_context(
                 storage_state=storage_state,
-                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
             )
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); window.chrome = { runtime: {} };")
             page = await context.new_page()
             try:
                 from src.core.browser_factory import setup_resource_blocking
