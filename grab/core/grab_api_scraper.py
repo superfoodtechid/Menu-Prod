@@ -135,24 +135,33 @@ class GrabAPI:
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
                 
-                const extraHeaders = {headers_js};
+                const rawHeaders = {headers_js};
                 const bodyObj = {body_js};
                 
-                if (!extraHeaders["x-csrf-token"] && !extraHeaders["X-CSRF-TOKEN"]) {{
+                // Normalisasi semua key header ke lowercase
+                const extraHeaders = {{}};
+                for (const [k, v] of Object.entries(rawHeaders)) {{
+                    extraHeaders[k.toLowerCase()] = v;
+                }}
+                
+                if (!extraHeaders["x-csrf-token"]) {{
                     const m = document.cookie.match(/(?:^|;\\s*)mexusers_authn_token_jti=([^;]*)/);
                     if (m && m[1]) {{
                         extraHeaders["x-csrf-token"] = decodeURIComponent(m[1]);
                     }}
                 }}
                 
+                if (!extraHeaders["accept"]) {{
+                    extraHeaders["accept"] = "application/json";
+                }}
+                if (bodyObj !== null && !extraHeaders["content-type"]) {{
+                    extraHeaders["content-type"] = "application/json";
+                }}
+                
                 const fetchOptions = {{
                     method: "{method}",
                     signal: controller.signal,
-                    headers: {{
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        ...extraHeaders
-                    }},
+                    headers: extraHeaders,
                     credentials: "include"
                 }};
                 
@@ -1014,11 +1023,24 @@ class GrabAPI:
         except Exception:
             pass
 
-        # 2. Try navigating to /marketing and inspect redirected URL
+        # 3. Navigate to /marketing and listen to internal requests
+        captured_id = []
+
+        def _on_req(req):
+            url = req.url
+            m = re.search(r'advertiserID=(\d+)', url) or re.search(r'/advertisers/(\d+)', url)
+            if m:
+                captured_id.append(m.group(1))
+
+        self.page.on("request", _on_req)
         try:
             logger.info("Resolving Grab advertiser ID via https://merchant.grab.com/marketing ...")
             await self.page.goto("https://merchant.grab.com/marketing", wait_until="domcontentloaded", timeout=25000)
-            for _ in range(5):
+            for _ in range(8):
+                if captured_id:
+                    self.advertiser_id = captured_id[0]
+                    logger.info(f"  🎯 Intercepted advertiser ID via network: {self.advertiser_id}")
+                    break
                 m = re.search(r'/advertisers/(\d+)', self.page.url)
                 if m:
                     self.advertiser_id = m.group(1)
@@ -1026,6 +1048,11 @@ class GrabAPI:
                 await self.page.wait_for_timeout(1000)
         except Exception as e:
             logger.warning(f"Could not resolve advertiser ID via navigation: {e}")
+        finally:
+            try:
+                self.page.remove_listener("request", _on_req)
+            except Exception:
+                pass
 
         return getattr(self, "advertiser_id", None)
 
@@ -1040,7 +1067,7 @@ class GrabAPI:
         }
         body = {
             "advertiserID": str(advertiser_id),
-            "size": 50,
+            "size": 10,
             "page": 0,
             "sortBy": {"field": "UNKNOWN_SORT_COLUMNS", "order": "DESC"},
             "filters": [
@@ -1051,7 +1078,9 @@ class GrabAPI:
                 }
             ]
         }
+        logger.debug(f"  🔍 [Grab Promo] Calling get_active_campaigns: advertiser_id={advertiser_id}, URL={url}")
         res = await self.call_api(url, method="POST", headers=headers, body=body)
+        logger.debug(f"  🔍 [Grab Promo] get_active_campaigns result status={res.get('status')}")
         if res.get("status") == 200:
             data = res.get("data") or {}
             configs = data.get("configs") or []
@@ -1141,6 +1170,109 @@ class GrabAPI:
                     canceled.append(c_id)
 
         return canceled, None
+
+    async def fetch_grab_campaign_promotions(self, target_store_id: str = None) -> dict:
+        """
+        Fetches active Grab promotion campaigns for the merchant and returns a mapping:
+        item_id -> promo_info and lower(item_name) -> promo_info.
+        """
+        adv_id = await self.get_advertiser_id()
+        if not adv_id:
+            logger.warning("  ⚠️ [Grab Promo] Tidak dapat menemukan Advertiser ID untuk penarikan promo.")
+            return {}
+
+        campaigns, err = await self.get_active_campaigns(adv_id)
+        if err or not campaigns:
+            if err:
+                logger.warning(f"  ⚠️ [Grab Promo] Gagal mengambil daftar promo aktif: {err}")
+            return {}
+
+        sid_str = str(target_store_id or "").strip()
+        relevant = [c for c in campaigns if sid_str in str(c.get("id", "")) or sid_str in str(c.get("name", ""))]
+        if not relevant:
+            relevant = campaigns
+
+        promo_map = {}
+        for camp in relevant:
+            c_id = camp.get("id")
+            if not c_id:
+                continue
+
+            status = str(camp.get("status") or "").lower()
+            if status not in ("ongoing", "upcoming"):
+                continue
+
+            detail, det_err = await self.get_campaign_detail(c_id)
+            if not detail:
+                continue
+
+            info = detail.get("info") or {}
+            camp_store_id = info.get("storeID") or (info.get("selectedStores") or [None])[0]
+            if sid_str and camp_store_id and sid_str != str(camp_store_id).strip():
+                continue
+
+            camp_name = camp.get("name") or info.get("name") or ""
+            discount_info = info.get("discount") or {}
+            disc_type = str(discount_info.get("type") or "").lower()
+            disc_val = discount_info.get("discountValue") or 0
+            disc_disp = str(discount_info.get("discountValueDisplay") or "").strip()
+
+            soc_ranges = info.get("itemSOCTypePriceRanges") or []
+            soc_map = {}
+            for soc_item in soc_ranges:
+                it_id = str(soc_item.get("itemID") or "").strip()
+                delivery_val = (soc_item.get("socTypePriceRanges") or {}).get("Delivery")
+                if it_id and delivery_val:
+                    soc_map[it_id] = parse_numeric_price(delivery_val)
+
+            scope = info.get("scope") or {}
+            items_in_camp = scope.get("items") or []
+            for it_obj in items_in_camp:
+                it_id = str(it_obj.get("itemID") or "").strip()
+                it_name = str(it_obj.get("itemName") or "").strip()
+
+                orig_price = 0.0
+                if "priceInMin" in it_obj and it_obj["priceInMin"] is not None:
+                    orig_price = float(it_obj["priceInMin"]) / 100.0
+                elif it_obj.get("priceDisplay"):
+                    orig_price = parse_numeric_price(it_obj.get("priceDisplay"))
+
+                disc_price = soc_map.get(it_id)
+                if not disc_price or disc_price <= 0:
+                    if "percentage" in disc_type and disc_val:
+                        disc_price = round(orig_price * (1.0 - (float(disc_val) / 100.0)))
+                    elif disc_val:
+                        disc_price = max(0.0, orig_price - float(disc_val))
+                    else:
+                        disc_price = orig_price
+
+                diff = orig_price - disc_price
+                if diff > 0 and orig_price > 0:
+                    pct_calc = round((diff / orig_price) * 100)
+                    slash_pct = f"{pct_calc}%"
+                elif disc_disp and "%" in disc_disp:
+                    slash_pct = disc_disp
+                else:
+                    slash_pct = "0%"
+
+                slash_rp = int(diff) if diff > 0 else 0
+
+                p_entry = {
+                    "campaign_id": c_id,
+                    "campaign_name": camp_name,
+                    "discount_type": disc_type,
+                    "original_price": orig_price,
+                    "discounted_price": disc_price,
+                    "slash_pct": slash_pct,
+                    "slash_rp": slash_rp,
+                    "store_id": camp_store_id or sid_str
+                }
+                if it_id:
+                    promo_map[it_id] = p_entry
+                if it_name:
+                    promo_map[it_name.lower()] = p_entry
+
+        return promo_map
 
 async def perform_login(page, user, pwd):
     """Robust login steps: clears cookies on mismatch and handles sticky 'Welcome back' pages."""
@@ -1322,7 +1454,7 @@ def parse_numeric_price(val):
     except ValueError:
         return 0.0
 
-def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
+def parse_menu(menu_data, store_id, outlet_name, shopee_short_name, campaign_promos_map=None):
     items_list = []
     modifiers_list = []
     
@@ -1397,6 +1529,10 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
             
             # Cek campaign / promo
             campaign = item.get("itemCampaignInfo")
+            promo_lookup = None
+            if campaign_promos_map:
+                promo_lookup = campaign_promos_map.get(str(item_id).strip()) or campaign_promos_map.get(str(item_name).strip().lower())
+
             if campaign and isinstance(campaign, dict):
                 promo_price = campaign.get("campaignPrice") or campaign.get("discountedPrice") or campaign.get("price")
                 if promo_price is not None:
@@ -1412,6 +1548,16 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
                         if discount_amount_val > 1000000 and discounted_price < 100000:
                             discount_amount_val = discount_amount_val / 100.0
                         original_price = discounted_price + discount_amount_val
+            elif promo_lookup and isinstance(promo_lookup, dict):
+                p_orig = promo_lookup.get("original_price")
+                p_disc = promo_lookup.get("discounted_price")
+                if p_orig and p_orig > 0:
+                    original_price = float(p_orig)
+                elif discounted_price > 0:
+                    original_price = discounted_price
+
+                if p_disc and p_disc > 0:
+                    discounted_price = float(p_disc)
             
             promo_val = original_price - discounted_price
             if promo_val < 0:
@@ -1484,7 +1630,15 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
             
             sold_qty = item.get("soldQuantity") or item.get("soldQty") or item.get("sold_qty") or 0
             
-            is_in_promo = (item.get("itemCampaignInfo") is not None) or (item.get("advancedPricing") is not None) or (original_price > discounted_price and original_price > 0)
+            is_in_promo = bool(
+                (item.get("itemCampaignInfo") is not None)
+                or promo_lookup
+                or (item.get("advancedPricing") is not None)
+                or (original_price > discounted_price and original_price > 0)
+            )
+
+            slash_pct_val = (promo_lookup or {}).get("slash_pct")
+            slash_rp_val = (promo_lookup or {}).get("slash_rp") if promo_lookup else promo_val
 
             items_list.append({
                 "Link outlet": f"https://food.grab.com/id/en/restaurant/{store_id}",
@@ -1500,7 +1654,8 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
                 "Deskripsi item": item_desc,
                 "Harga item sebelum promo (harga coret)": original_price,
                 "Harga item setelah promo (harga coret)": discounted_price,
-                "Nominal atau persentase promo (harga coret)": promo_val,
+                "Nominal atau persentase promo (harga coret)": slash_rp_val or promo_val,
+                "Persentase promo": slash_pct_val,
                 "Ketersediaan item": availability,
                 "Sedang promo": "Ya" if is_in_promo else "Tidak",
                 "Link foto": photo_url
@@ -1721,7 +1876,16 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                 logger.info(f"  [Fetch] Fetching menu API for {store_name} ({store_id})...")
                 menu_data, err = await api.fetch_menu(group_id, store_id, store_name, is_mg)
                 if menu_data:
-                    items, modifiers = parse_menu(menu_data, store_id, store_name, "")
+                    # Ambil pemetaan promo aktif dari Grab Campaign API jika ada
+                    campaign_promos_map = {}
+                    try:
+                        campaign_promos_map = await api.fetch_grab_campaign_promotions(target_store_id=store_id)
+                        if campaign_promos_map:
+                            logger.info(f"  🎯 Memuat {len(campaign_promos_map)} pemetaan promo campaign aktif untuk {store_name} ({store_id})")
+                    except Exception as camp_err:
+                        logger.warning(f"  ⚠️ Gagal mengambil campaign promos untuk {store_id}: {camp_err}")
+
+                    items, modifiers = parse_menu(menu_data, store_id, store_name, "", campaign_promos_map=campaign_promos_map)
                     all_items.extend(items)
                     all_modifiers.extend(modifiers)
                     logger.info(f"  ✓ {store_name}: {len(items)} items, {len(modifiers)} modifiers")

@@ -354,6 +354,15 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     if iname:
                         existing_items_map[iname] = it
 
+            # Pre-fetch active campaign promos mapping to detect items in promotion
+            active_camp_promos = {}
+            try:
+                active_camp_promos = await api.fetch_grab_campaign_promotions(target_store_id=target_sid)
+                if active_camp_promos:
+                    logger.info(f"🔍 [Grab C5 Push] Memuat {len(active_camp_promos)} promo aktif di outlet {target_sid}")
+            except Exception as e_promos:
+                logger.warning(f"⚠️ [Grab C5 Push] Gagal memeriksa promo aktif sebelum push: {e_promos}")
+
             # Process each item update
             for idx, upd in enumerate(updates):
                 item_id = str(upd.get("item_id") or "").strip()
@@ -504,6 +513,10 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     # 4. Handle Active Promo Check & Detachment for Grab C5 Push
                     if existing_it:
                         has_campaign = bool(existing_it.get("itemCampaignInfo"))
+                        if not has_campaign and active_camp_promos:
+                            it_check_id = str((existing_it or {}).get("itemID") or item_id).strip()
+                            it_check_name = (new_name or item_name).strip().lower()
+                            has_campaign = bool(it_check_id in active_camp_promos or it_check_name in active_camp_promos)
                         if has_campaign and has_price_change and target_price_val != old_price_minor and target_price_val > 0:
                             logger.info(f"🔍 [Grab C5 Push] Item '{new_name or item_name}' terdeteksi dalam promo/campaign aktif. Mencoba mencopot promo sebelum push harga...")
                             try:

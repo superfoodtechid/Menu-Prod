@@ -223,10 +223,14 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
             fake_price = item.get('Harga item sebelum promo (harga coret)', 0.0)
             real_price = item.get('Harga item setelah promo (harga coret)', 0.0)
             slash_rp = item.get('Nominal atau persentase promo (harga coret)', 0.0)
+            slash_pct_custom = item.get('Persentase promo')
             
             if fake_price > real_price and fake_price > 0:
-                pct = round(((fake_price - real_price) / fake_price) * 100.0, 2)
-                slash_pct = f"{int(pct)}%" if pct.is_integer() else f"{pct}%"
+                if slash_pct_custom:
+                    slash_pct = str(slash_pct_custom).strip()
+                else:
+                    pct = round(((fake_price - real_price) / fake_price) * 100.0, 2)
+                    slash_pct = f"{int(pct)}%" if pct.is_integer() else f"{pct}%"
             else:
                 slash_pct = "0%"
                 slash_rp = 0
