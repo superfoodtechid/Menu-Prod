@@ -86,6 +86,7 @@ class GrabAPI:
         self.base_url = "https://merchant.grab.com"
         self.api_base_url = "https://api.grab.com"
         self.csrf_token = None
+        self.advertiser_id = None
 
     async def get_csrf_token(self):
         """Ambil token CSRF (jti dari cookie mexusers_authn_token_jti)"""
@@ -985,8 +986,164 @@ class GrabAPI:
             return True, None
         return False, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
 
+    async def get_advertiser_id(self):
+        """Resolves advertiser ID for the active merchant from the portal context."""
+        if getattr(self, "advertiser_id", None):
+            return self.advertiser_id
+
+        # 0. Check current page URL
+        try:
+            m = re.search(r'/advertisers/(\d+)', getattr(self.page, "url", "") or "")
+            if m:
+                self.advertiser_id = m.group(1)
+                return self.advertiser_id
+        except Exception:
+            pass
+
+        # 1. Try to find link in existing DOM
+        try:
+            adv_link = await self.page.evaluate('''() => {
+                const a = document.querySelector('a[href*="/marketing/advertisers/"]');
+                return a ? a.href : null;
+            }''')
+            if adv_link:
+                m = re.search(r'/advertisers/(\d+)', adv_link)
+                if m:
+                    self.advertiser_id = m.group(1)
+                    return self.advertiser_id
+        except Exception:
+            pass
+
+        # 2. Try navigating to /marketing and inspect redirected URL
+        try:
+            logger.info("Resolving Grab advertiser ID via https://merchant.grab.com/marketing ...")
+            await self.page.goto("https://merchant.grab.com/marketing", wait_until="domcontentloaded", timeout=25000)
+            for _ in range(5):
+                m = re.search(r'/advertisers/(\d+)', self.page.url)
+                if m:
+                    self.advertiser_id = m.group(1)
+                    break
+                await self.page.wait_for_timeout(1000)
+        except Exception as e:
+            logger.warning(f"Could not resolve advertiser ID via navigation: {e}")
+
+        return getattr(self, "advertiser_id", None)
+
+    async def get_active_campaigns(self, advertiser_id: str):
+        """Fetches active/ongoing self-serve promo campaigns for the given advertiser."""
+        url = f"{self.api_base_url}/mex-app/troy/unifieddemandgen/v1/advertisers/{advertiser_id}/self-serve-promo/list"
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "requestsource": "troyPortal",
+            "lang": "EN",
+        }
+        body = {
+            "advertiserID": str(advertiser_id),
+            "size": 50,
+            "page": 0,
+            "sortBy": {"field": "UNKNOWN_SORT_COLUMNS", "order": "DESC"},
+            "filters": [
+                {
+                    "filed": "FIELD_STATUS",
+                    "operator": "OPERATOR_IN",
+                    "values": ["ongoing", "upcoming"]
+                }
+            ]
+        }
+        res = await self.call_api(url, method="POST", headers=headers, body=body)
+        if res.get("status") == 200:
+            data = res.get("data") or {}
+            configs = data.get("configs") or []
+            return [c for c in configs if c.get("status") in ("ongoing", "upcoming")], None
+        err = res.get("error") or res.get("data") or f"HTTP {res.get('status')}"
+        return [], err
+
+    async def get_campaign_detail(self, campaign_id: str):
+        """Fetches detailed scope and items list for a specific campaign."""
+        url = f"{self.api_base_url}/mex-app/troy/merchantcampaign/v1/campaigns/{campaign_id}"
+        headers = {
+            "accept": "application/json",
+            "requestsource": "troyPortal",
+            "lang": "EN",
+        }
+        res = await self.call_api(url, method="GET", headers=headers)
+        if res.get("status") == 200:
+            return res.get("data") or {}, None
+        err = res.get("error") or res.get("data") or f"HTTP {res.get('status')}"
+        return None, err
+
+    async def delete_campaign(self, campaign_id: str):
+        """Deletes / terminates an active promo campaign on Grab."""
+        url = f"{self.api_base_url}/mex-app/troy/merchantcampaign/v1/campaigns/{campaign_id}"
+        headers = {
+            "accept": "application/json",
+            "requestsource": "troyPortal",
+            "lang": "EN",
+        }
+        res = await self.call_api(url, method="DELETE", headers=headers)
+        if res.get("status") in (200, 204):
+            return res.get("data") or True, None
+        err = res.get("error") or res.get("data") or f"HTTP {res.get('status')}"
+        return None, err
+
+    async def cancel_promos_for_item(self, store_id: str, item_id: str, item_name: str = ""):
+        """
+        Finds and deletes any active campaign on Grab that includes the target item.
+        Returns (canceled_campaigns: list[str], error: str|None).
+        """
+        adv_id = await self.get_advertiser_id()
+        if not adv_id:
+            return [], "Tidak dapat menemukan Advertiser ID di portal Grab."
+
+        campaigns, err = await self.get_active_campaigns(adv_id)
+        if err:
+            return [], f"Gagal mengambil daftar promo aktif: {err}"
+
+        sid_str = str(store_id or "").strip()
+        relevant = [c for c in campaigns if sid_str in str(c.get("id", "")) or sid_str in str(c.get("name", ""))]
+        if not relevant:
+            relevant = campaigns
+
+        canceled = []
+        clean_item_id = str(item_id or "").strip()
+        clean_name = str(item_name or "").strip().lower()
+
+        for camp in relevant:
+            c_id = camp.get("id")
+            if not c_id:
+                continue
+
+            camp_name = camp.get("name", "")
+            contains_item = False
+
+            if clean_name and clean_name in camp_name.lower():
+                contains_item = True
+            else:
+                detail, det_err = await self.get_campaign_detail(c_id)
+                if detail:
+                    scope = (detail.get("info") or {}).get("scope") or {}
+                    items_in_camp = scope.get("items") or scope.get("objects") or []
+                    for it_obj in items_in_camp:
+                        it_obj_id = str(it_obj.get("itemID") or it_obj.get("objectID") or "").strip()
+                        it_obj_name = str(it_obj.get("itemName") or it_obj.get("objectName") or "").strip().lower()
+                        if (clean_item_id and it_obj_id == clean_item_id) or (clean_name and it_obj_name == clean_name):
+                            contains_item = True
+                            break
+
+            if contains_item:
+                logger.info(f"🗑️ [Grab Promo] Menghapus promo aktif '{camp_name}' (ID: {c_id}) untuk item '{item_name or item_id}'...")
+                del_res, del_err = await self.delete_campaign(c_id)
+                if del_err:
+                    logger.warning(f"⚠️ [Grab Promo] Gagal menghapus promo '{c_id}': {del_err}")
+                else:
+                    logger.info(f"✅ [Grab Promo] Berhasil mencopot promo '{camp_name}' (ID: {c_id})")
+                    canceled.append(c_id)
+
+        return canceled, None
+
 async def perform_login(page, user, pwd):
-    """Robust login steps — clears cookies on mismatch and handles sticky 'Welcome back' pages."""
+    """Robust login steps: clears cookies on mismatch and handles sticky 'Welcome back' pages."""
     CLEAN_LOGIN_URL = (
         "https://weblogin.grab.com/merchant/login"
         "?service_id=MEXUSERS&redirect=https%3A%2F%2Fmerchant.grab.com%2Fportal"

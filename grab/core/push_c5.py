@@ -501,14 +501,34 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         renamed_category_ids.add(str(old_category_id))
                         cat_map[category_key] = old_category_id
 
-                    # 4. Handle Active Promo Check for Grab C5 Push
+                    # 4. Handle Active Promo Check & Detachment for Grab C5 Push
                     if existing_it:
                         has_campaign = bool(existing_it.get("itemCampaignInfo"))
                         if has_campaign and has_price_change and target_price_val != old_price_minor and target_price_val > 0:
-                            logger.info(f"🔒 [Grab C5 Push] Item '{new_name or item_name}' sedang dalam promo/campaign aktif. Menahan harga asli dan melanjutkan pembaruan non-harga.")
-                            target_price_val = old_price_minor
-                            res_item["note"] = "Harga dipertahankan karena campaign aktif"
-                            price_steps = [old_price]
+                            logger.info(f"🔍 [Grab C5 Push] Item '{new_name or item_name}' terdeteksi dalam promo/campaign aktif. Mencoba mencopot promo sebelum push harga...")
+                            try:
+                                canceled_camps, camp_err = await api.cancel_promos_for_item(
+                                    store_id=target_sid,
+                                    item_id=str((existing_it or {}).get("itemID") or item_id),
+                                    item_name=(new_name or item_name)
+                                )
+                                if canceled_camps:
+                                    logger.info(f"🔓 [Grab C5 Push] Berhasil mencopot {len(canceled_camps)} promo aktif untuk '{new_name or item_name}': {canceled_camps}")
+                                    res_item["note"] = f"Promo aktif dicopot ({', '.join(canceled_camps)})"
+                                    # Jeda 2 detik agar status promo di server Grab tersinkron
+                                    await asyncio.sleep(2.0)
+                                elif camp_err:
+                                    logger.warning(f"⚠️ [Grab C5 Push] Tidak dapat mencopot promo otomatis ({camp_err}). Menahan harga asli demi keamanan.")
+                                    target_price_val = old_price_minor
+                                    res_item["note"] = f"Harga dipertahankan karena gagal mencopot promo: {camp_err}"
+                                    price_steps = [old_price]
+                                else:
+                                    logger.info(f"ℹ️ [Grab C5 Push] Tidak ditemukan kampanye aktif yang cocok untuk '{new_name or item_name}'. Melanjutkan push harga.")
+                            except Exception as e_camp:
+                                logger.warning(f"⚠️ [Grab C5 Push] Error saat mencopot promo: {e_camp}. Menahan harga asli.")
+                                target_price_val = old_price_minor
+                                res_item["note"] = f"Harga dipertahankan: {e_camp}"
+                                price_steps = [old_price]
 
                     # If multiple price steps are needed, push intermediate price steps first
                     if has_price_change and not is_new_item and len(price_steps) > 1:
