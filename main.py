@@ -3193,7 +3193,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                 if platform == "grab":
                     from grab.core.push_c5 import push_c5_grab_for_merchant
 
-                    def grab_price_guard_cb(upd, real_item_id, old_price, new_price):
+                    def grab_price_guard_cb(upd, real_item_id, old_price, new_price, needed_steps=1):
                         """Recheck Grab's app-known per-item limits immediately before each price mutation."""
                         now = datetime.utcnow()
                         daily_count = db.query(AuditTrail).filter(
@@ -3210,11 +3210,28 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                             AuditTrail.status.ilike("SUCCESS"),
                             AuditTrail.created_at >= now - timedelta(days=30),
                         ).count()
-                        if daily_count >= 10:
-                            return f"Item ini sudah mencapai batas 10 perubahan harga dalam 24 jam terakhir ({daily_count}/10)."
-                        if monthly_count >= 15:
-                            return f"Item ini sudah mencapai batas 15 perubahan harga dalam 30 hari terakhir ({monthly_count}/15)."
+                        if daily_count + needed_steps > 10:
+                            return f"Item ini sudah mencapai batas 10 perubahan harga dalam 24 jam terakhir ({daily_count}/10, butuh {needed_steps} tahap)."
+                        if monthly_count + needed_steps > 15:
+                            return f"Item ini sudah mencapai batas 15 perubahan harga dalam 30 hari terakhir ({monthly_count}/15, butuh {needed_steps} tahap)."
                         return None
+
+                    def grab_step_cb(upd, step_idx, total_steps, prev_p, step_p):
+                        job.current_step = f"Store {sid}: {upd.get('item_name')} (tahap {step_idx}/{total_steps}: Rp {step_p:,.0f})..."
+                        db.commit()
+                        trail = AuditTrail(
+                            job_id=job.id,
+                            outlet_id=outlet.id,
+                            item_id=str(upd.get("item_id", "")),
+                            item_name=str(upd.get("item_name", "")),
+                            change_type=f"C5_PUSH_{platform.upper()}",
+                            field_changed=f"Harga (Tahap {step_idx}/{total_steps})",
+                            old_value=f"Harga: Rp {prev_p:,.0f}",
+                            new_value=f"Harga: Rp {step_p:,.0f}",
+                            status="SUCCESS",
+                        )
+                        db.add(trail)
+                        db.commit()
 
                     results = push_c5_grab_for_merchant(
                         username=account.username,
@@ -3225,6 +3242,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                         item_result_cb=item_cb,
                         price_guard_cb=grab_price_guard_cb,
                         store_name=outlet.nama_resto_final or outlet.nama_outlet or outlet.merchant_name,
+                        step_cb=grab_step_cb,
                     )
                 elif platform == "shopee":
                     from shopee.core.push_c5 import push_c5_shopee_for_merchant
@@ -4213,25 +4231,26 @@ async def parse_c5_endpoint(
         price_warning = False
         grab_price_limit_exceeded = False
         price_diff_percent = 0.0
+        price_steps_count = 1
         if new_fake_price is not None:
             if base_price is not None and float(base_price) > 0:
                 price_changed = float(new_fake_price) != float(base_price)
                 price_diff_percent = (abs(float(new_fake_price) - float(base_price)) / float(base_price)) * 100.0
                 if price_changed and price_diff_percent > 15.0:
-                    grab_price_limit_exceeded = (
-                        is_grab_platform
-                        and float(new_fake_price) > float(base_price) * 1.15
-                    )
-                    price_warning = grab_price_limit_exceeded if is_grab_platform else True
+                    price_warning = True
+                    steps = calculate_price_steps(float(base_price), float(new_fake_price), max_step_pct=0.15)
+                    price_steps_count = len(steps)
+                    if is_grab_platform and price_steps_count > 10:
+                        grab_price_limit_exceeded = True
             else:
                 price_changed = True
 
         if price_changed:
             if price_warning:
                 if grab_price_limit_exceeded:
-                    price_note = f"(⚠️ Kenaikan {price_diff_percent:.1f}% melebihi batas Grab 15% per perubahan)"
-                elif is_grab_platform:
-                    price_note = f"(Perubahan turun {price_diff_percent:.1f}%; batas kenaikan Grab tidak terlampaui)"
+                    price_note = f"(⚠️ Kenaikan {price_diff_percent:.1f}% butuh {price_steps_count} tahap, melebihi kuota 10 perubahan per 24 jam)"
+                elif price_steps_count > 1:
+                    price_note = f"(⚠️ Perubahan {price_diff_percent:.1f}% >15% - Push Bertahap {price_steps_count} tahap)"
                 else:
                     price_note = f"(⚠️ Perubahan {price_diff_percent:.1f}% >15% - Push Bertahap)"
                 diff_details.append({
@@ -4272,7 +4291,7 @@ async def parse_c5_endpoint(
         if grab_price_limit_exceeded:
             is_valid = False
             validation_errors_count += 1
-            limit_error = f"Kenaikan harga Grab maksimal 15% per perubahan. Turunkan target harga atau lakukan beberapa push terpisah. Item: '{display_name}' (Store ID: {sid}, baris {r_idx})."
+            limit_error = f"Kenaikan harga Grab ({price_diff_percent:.1f}%) membutuhkan {price_steps_count} tahapan bertahap, melebihi kuota maksimal 10 perubahan per 24 jam. Item: '{display_name}' (Store ID: {sid}, baris {r_idx})."
             validation_error_messages.append(limit_error)
             validation_error = f"{validation_error} {limit_error}" if validation_error else limit_error
             change_types.append("GRAB_PRICE_LIMIT_EXCEEDED")
@@ -4300,9 +4319,8 @@ async def parse_c5_endpoint(
         if price_changed:
             change_types.append("PRICE_CHANGE")
             price_changes_count += 1
-            if price_warning:
-                if not is_grab_platform:
-                    change_types.append("PRICE_WARNING_STEP_PUSH")
+            if price_warning and not grab_price_limit_exceeded:
+                change_types.append("PRICE_WARNING_STEP_PUSH")
                 price_warning_count += 1
         if other_changed:
             change_types.append("OTHER_CHANGE")
@@ -4605,9 +4623,13 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
             if new_price is None or not math.isfinite(new_price) or new_price <= 0:
                 price_errors.append(f"{label}: harga baru harus lebih dari Rp0.")
                 continue
-            increase_pct = ((new_price - old_price) / old_price) * 100.0
-            if increase_pct > 15.0:
-                price_errors.append(f"{label}: kenaikan {increase_pct:.1f}% melebihi batas Grab 15% per perubahan.")
+            price_steps = calculate_price_steps(old_price, new_price, max_step_pct=0.15) if old_price > 0 else [int(round(new_price))]
+            needed_mutations = len(price_steps)
+            diff_pct = ((new_price - old_price) / old_price) * 100.0
+            if needed_mutations > 10:
+                price_errors.append(
+                    f"{label}: perubahan {diff_pct:+.1f}% membutuhkan {needed_mutations} tahap, melebihi kuota 10 perubahan harga dalam 24 jam."
+                )
                 continue
 
             item_sid = (item.sid or (request.selected_sids[0] if request.selected_sids else "")).strip()
@@ -4652,13 +4674,19 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
             # inadvertently reset its 24h/30d change limits.
             daily_count = daily_query.count()
             monthly_count = monthly_query.count()
-            if daily_count + planned_daily >= 10:
-                price_errors.append(f"{label}: batas 10 perubahan harga dalam 24 jam tercapai.")
+            if daily_count + planned_daily + needed_mutations > 10:
+                price_errors.append(
+                    f"{label}: batas 10 perubahan harga dalam 24 jam tercapai "
+                    f"(sudah {daily_count + planned_daily}, butuh {needed_mutations} tahap)."
+                )
                 continue
-            if monthly_count + planned_monthly >= 15:
-                price_errors.append(f"{label}: batas 15 perubahan harga dalam 30 hari tercapai.")
+            if monthly_count + planned_monthly + needed_mutations > 15:
+                price_errors.append(
+                    f"{label}: batas 15 perubahan harga dalam 30 hari tercapai "
+                    f"(sudah {monthly_count + planned_monthly}, butuh {needed_mutations} tahap)."
+                )
                 continue
-            planned_counts[quota_key] = (planned_daily + 1, planned_monthly + 1)
+            planned_counts[quota_key] = (planned_daily + needed_mutations, planned_monthly + needed_mutations)
 
         if price_errors:
             raise HTTPException(

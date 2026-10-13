@@ -9,7 +9,48 @@ from grab.core.grab_api_scraper import GrabAPI, perform_login, SESSION_DIR
 
 logger = logging.getLogger("GrabC5Push")
 
-async def _async_push_c5_grab(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None, price_guard_cb=None, store_name=None):
+def calculate_price_steps(current_price: float, target_price: float, max_step_pct: float = 0.15) -> list[int]:
+    """Calculates intermediate prices to reach target_price without any single step exceeding max_step_pct change."""
+    import math
+    curr = float(current_price)
+    target = float(target_price)
+    if curr <= 0 or curr == target:
+        return [int(round(target))]
+
+    steps = []
+    if target > curr:
+        while curr < target:
+            next_p = curr * (1.0 + max_step_pct)
+            if next_p >= target:
+                steps.append(int(round(target)))
+                break
+            else:
+                next_p_rounded = int(math.floor(next_p / 100.0) * 100)
+                if next_p_rounded <= curr:
+                    next_p_rounded = int(curr) + 100
+                if next_p_rounded >= target:
+                    steps.append(int(round(target)))
+                    break
+                steps.append(next_p_rounded)
+                curr = float(next_p_rounded)
+    else:
+        while curr > target:
+            next_p = curr * (1.0 - max_step_pct)
+            if next_p <= target:
+                steps.append(int(round(target)))
+                break
+            else:
+                next_p_rounded = int(math.ceil(next_p / 100.0) * 100)
+                if next_p_rounded >= curr:
+                    next_p_rounded = int(curr) - 100
+                if next_p_rounded <= target:
+                    steps.append(int(round(target)))
+                    break
+                steps.append(next_p_rounded)
+                curr = float(next_p_rounded)
+    return steps
+
+async def _async_push_c5_grab(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None, price_guard_cb=None, store_name=None, step_cb=None):
     """
     Internal async worker to log into Grab Merchant Portal and push C5 menu updates to Grab API.
     """
@@ -374,14 +415,20 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         raise ValueError("Harga item baru harus lebih dari Rp0.")
                     old_price_minor = int(float((existing_it or {}).get("priceInMin") or 0))
                     old_price = old_price_minor / 100.0
+                    price_steps = [float(new_price)] if new_price is not None else []
                     if has_price_change and not is_new_item:
                         if new_price is None or old_price <= 0:
                             raise ValueError("Harga saat ini atau harga baru tidak tersedia; perubahan harga dihentikan agar batas Grab tidak terlewati.")
                         increase_pct = ((float(new_price) - old_price) / old_price) * 100.0
-                        if increase_pct > 15.0:
-                            raise ValueError(f"Kenaikan harga {increase_pct:.1f}% melebihi batas Grab 15% untuk satu perubahan. Pecah perubahan menjadi beberapa push terpisah.")
+                        if increase_pct > 15.0 or increase_pct < -15.0:
+                            price_steps = calculate_price_steps(old_price, float(new_price), max_step_pct=0.15)
+                            if len(price_steps) > 10:
+                                raise ValueError(f"Perubahan harga {increase_pct:+.1f}% memerlukan {len(price_steps)} tahapan bertahap, melebihi kuota maksimal Grab 10 perubahan per 24 jam.")
+                            logger.info(f"📊 [Grab C5 Push] Push Bertahap (>15%) untuk '{item_name}': Rp {old_price:,.0f} -> Rp {float(new_price):,.0f} via {len(price_steps)} tahapan: {price_steps}")
+                        else:
+                            price_steps = [float(new_price)]
                         if price_guard_cb:
-                            guard_error = price_guard_cb(upd, str((existing_it or {}).get("itemID") or item_id), old_price, float(new_price))
+                            guard_error = price_guard_cb(upd, str((existing_it or {}).get("itemID") or item_id), old_price, float(new_price), len(price_steps))
                             if guard_error:
                                 raise ValueError(guard_error)
 
@@ -461,6 +508,47 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                             logger.info(f"🔒 [Grab C5 Push] Item '{new_name or item_name}' sedang dalam promo/campaign aktif. Menahan harga asli dan melanjutkan pembaruan non-harga.")
                             target_price_val = old_price_minor
                             res_item["note"] = "Harga dipertahankan karena campaign aktif"
+                            price_steps = [old_price]
+
+                    # If multiple price steps are needed, push intermediate price steps first
+                    if has_price_change and not is_new_item and len(price_steps) > 1:
+                        prev_step_price = old_price
+                        for s_idx, s_price in enumerate(price_steps[:-1]):
+                            step_target_minor = int(round(s_price * 100))
+                            step_payload = dict(existing_it or {})
+                            step_payload.update({
+                                "itemName": ((existing_it or {}).get("itemName") or (existing_it or {}).get("name") or item_name),
+                                "priceInMin": step_target_minor,
+                                "description": (existing_it or {}).get("description") or "",
+                            })
+                            step_payload.pop("name", None)
+                            step_payload.pop("photoURL", None)
+                            step_payload.pop("_c5CategoryID", None)
+                            if item_id:
+                                step_payload["itemID"] = item_id
+
+                            upsert_res, upsert_err = await call_with_auth_recovery(
+                                lambda: api.upsert_item(
+                                    group_id,
+                                    target_sid,
+                                    target_cat_id,
+                                    step_payload,
+                                    is_menu_group=is_menu_group,
+                                    menu_group_id=menu_group_id,
+                                ),
+                                f"upsert item intermediate step {s_idx + 1}/{len(price_steps)}",
+                            )
+                            if upsert_err:
+                                raise ValueError(f"Tahap {s_idx + 1}/{len(price_steps)} (Rp {s_price:,.0f}) gagal: {upsert_err}")
+
+                            logger.info(f"   [Grab C5 Push Tahap {s_idx + 1}/{len(price_steps)}] Berhasil PUSH harga intermediate: Rp {s_price:,.0f} untuk '{item_name}'")
+                            if step_cb:
+                                try:
+                                    step_cb(upd, s_idx + 1, len(price_steps), prev_step_price, s_price)
+                                except Exception as e_cb:
+                                    logger.warning(f"Error in step_cb: {e_cb}")
+                            prev_step_price = s_price
+                            await asyncio.sleep(1.5)
 
                     # Preserve fields absent from this C5 change. Sending blank
                     # photo/description on a price-only edit can erase merchant data.
@@ -507,7 +595,10 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         res_item["status"] = "FAILED"
                         res_item["error"] = upsert_err
                     else:
-                        logger.info(f"✅ [Grab C5 Push] Successfully updated item '{new_name or item_name}' (SID: {target_sid})")
+                        if len(price_steps) > 1:
+                            logger.info(f"✅ [Grab C5 Push] Successfully updated item '{new_name or item_name}' (SID: {target_sid}) via {len(price_steps)} price steps")
+                        else:
+                            logger.info(f"✅ [Grab C5 Push] Successfully updated item '{new_name or item_name}' (SID: {target_sid})")
 
                 except Exception as ex_item:
                     logger.error(f"❌ Error processing Grab C5 item '{item_name}': {ex_item}")
@@ -544,14 +635,14 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
 
         return results
 
-def push_c5_grab_for_merchant(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None, price_guard_cb=None, store_name=None):
+def push_c5_grab_for_merchant(username: str, password: str, store_id: str, updates: list, progress_cb=None, item_result_cb=None, price_guard_cb=None, store_name=None, step_cb=None):
     """
     Synchronous wrapper to run async Grab C5 push in a clean event loop.
     """
     new_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(new_loop)
     try:
-        return new_loop.run_until_complete(_async_push_c5_grab(username, password, store_id, updates, progress_cb, item_result_cb, price_guard_cb, store_name))
+        return new_loop.run_until_complete(_async_push_c5_grab(username, password, store_id, updates, progress_cb, item_result_cb, price_guard_cb, store_name, step_cb=step_cb))
     finally:
         try:
             new_loop.close()
