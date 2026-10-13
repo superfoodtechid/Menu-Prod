@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from dotenv import load_dotenv
@@ -3090,6 +3091,13 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                     Outlet.store_id == trail_sid,
                     Outlet.platform == platform,
                 ).first()
+                if not trail_outlet:
+                    trail_outlet = db.query(Outlet).join(Account).filter(
+                        Outlet.store_id == trail_sid,
+                        func.lower(Account.platform) == platform.lower(),
+                    ).first()
+                if not trail_outlet:
+                    trail_outlet = db.query(Outlet).filter(Outlet.store_id == trail_sid).first()
             old_values, new_values = [], []
             field_values = {
                 "NAME_CHANGE": ("Nama item", upd.get("baseline_name") or upd.get("item_name"), (applied or {}).get("new_name") or upd.get("item_name_new")),
@@ -3137,6 +3145,11 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         for sid, sid_updates in updates_by_sid.items():
             # Resolve the outlet + account credentials for this Store ID & platform.
             outlet = db.query(Outlet).filter(Outlet.store_id == sid, Outlet.platform == platform).first()
+            if not outlet:
+                outlet = db.query(Outlet).join(Account).filter(
+                    Outlet.store_id == sid,
+                    func.lower(Account.platform) == platform.lower(),
+                ).first()
             if not outlet:
                 outlet = db.query(Outlet).filter(Outlet.store_id == sid).first()
             if not outlet and sid:
@@ -4446,10 +4459,106 @@ async def parse_c5_endpoint(
     }
 
 
+def _provision_grab_outlet_from_master(db: Session, sid: str):
+    """Restore a missing Grab outlet mapping from the configured master source.
+
+    This is deliberately scoped to one requested SID. The regular sheet sync
+    reconciles every outlet and removes stale rows, so it is too broad to run
+    implicitly while scheduling a push.
+    """
+    try:
+        from menu_core.sheets import get_outlets_for_applicator
+
+        source = next(
+            (row for row in get_outlets_for_applicator("grab") if str(row.get("store_id") or "").strip() == sid),
+            None,
+        )
+    except Exception as exc:
+        logger.warning("Could not resolve missing Grab outlet mapping for SID %s: %s", sid, exc)
+        return None
+
+    if not source or not source.get("username") or not source.get("password"):
+        return None
+
+    # Never reassign a globally unique SID that is already registered under a
+    # different platform/account.
+    existing = db.query(Outlet).filter(Outlet.store_id == sid).first()
+    if existing:
+        return existing if existing.platform == "grab" else None
+
+    account = db.query(Account).filter(
+        Account.username == source["username"],
+        Account.platform == "grab",
+    ).first()
+    if not account:
+        account = Account(
+            platform="grab",
+            username=source["username"],
+            password=source["password"],
+            portal="merchant_portal",
+        )
+        db.add(account)
+        db.flush()
+    elif account.password != source["password"]:
+        # Match the normal master-sheet sync behavior for this account.
+        account.password = source["password"]
+        db.flush()
+
+    listing = source.get("nama_resto_final") or source.get("nama_outlet") or source.get("merchant_name") or sid
+    outlet = Outlet(
+        account_id=account.id,
+        store_id=sid,
+        merchant_name=source.get("merchant_name") or source.get("brand") or listing,
+        owner=source.get("owner") or None,
+        nama_outlet=source.get("nama_outlet") or listing,
+        cabang=source.get("brand") or source.get("outlet") or listing,
+        nama_resto_final=source.get("nama_resto_final") or listing,
+        brand=source.get("brand") or None,
+        nama_portal=source.get("nama_portal") or None,
+        is_active=True,
+    )
+    db.add(outlet)
+    try:
+        db.commit()
+        db.refresh(outlet)
+    except Exception:
+        db.rollback()
+        # Another request may have restored the same SID concurrently.
+        existing = db.query(Outlet).filter(Outlet.store_id == sid).first()
+        return existing if existing and existing.platform == "grab" else None
+
+    logger.info("Restored missing Grab outlet mapping from master source for SID %s", sid)
+    return outlet
+
+
 @app.post("/api/jobs/push-c5", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
 def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Triggers background job to push C5 menu updates (GoFood or GrabFood) for selected Store IDs (SIDs)."""
     target_platform = (request.platform or "gofood").lower()
+    provisioned_grab_sids = set()
+    if target_platform == "grab":
+        # Resolve only the selected SID. The general sheet sync also prunes
+        # stale outlets and their audit history, which must not happen here.
+        for raw_sid in request.selected_sids or []:
+            sid = str(raw_sid or "").strip()
+            if not sid:
+                continue
+            existing_grab = db.query(Outlet).filter(
+                Outlet.store_id == sid,
+                Outlet.platform == "grab",
+            ).first()
+            if not existing_grab:
+                existing_grab = db.query(Outlet).join(Account).filter(
+                    Outlet.store_id == sid,
+                    func.lower(Account.platform) == "grab",
+                ).first()
+            if not existing_grab:
+                existing_grab = db.query(Outlet).filter(Outlet.store_id == sid).first()
+            if existing_grab:
+                continue
+            if _provision_grab_outlet_from_master(db, sid):
+                provisioned_grab_sids.add(sid)
+
     if target_platform == "gofood":
         import math
 
@@ -4507,26 +4616,42 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
                 Outlet.platform == "grab",
             ).first()
             if not item_outlet:
-                price_errors.append(f"{label}: outlet Grab untuk SID {item_sid or '-'} tidak ditemukan.")
+                item_outlet = db.query(Outlet).join(Account).filter(
+                    Outlet.store_id == item_sid,
+                    func.lower(Account.platform) == "grab",
+                ).first()
+            if not item_outlet:
+                item_outlet = db.query(Outlet).filter(Outlet.store_id == item_sid).first()
+            if not item_outlet:
+                price_errors.append(
+                    f"{label}: outlet Grab untuk SID {item_sid or '-'} tidak ditemukan di konfigurasi aplikasi. "
+                    "Pastikan SID aktif di master merchant dan sinkronkan daftar outlet."
+                )
                 continue
 
             quota_key = (str(item_outlet.id), str(item.item_id))
             planned_daily, planned_monthly = planned_counts.get(quota_key, (0, 0))
             now = datetime.utcnow()
-            daily_count = db.query(AuditTrail).filter(
-                AuditTrail.outlet_id == item_outlet.id,
+            daily_query = db.query(AuditTrail).filter(
                 AuditTrail.item_id == str(item.item_id),
                 AuditTrail.field_changed.ilike("%price%"),
                 AuditTrail.status.ilike("SUCCESS"),
                 AuditTrail.created_at >= now - timedelta(days=1),
-            ).count()
-            monthly_count = db.query(AuditTrail).filter(
-                AuditTrail.outlet_id == item_outlet.id,
+            )
+            monthly_query = db.query(AuditTrail).filter(
                 AuditTrail.item_id == str(item.item_id),
                 AuditTrail.field_changed.ilike("%price%"),
                 AuditTrail.status.ilike("SUCCESS"),
                 AuditTrail.created_at >= now - timedelta(days=30),
-            ).count()
+            )
+            if item_sid not in provisioned_grab_sids:
+                daily_query = daily_query.filter(AuditTrail.outlet_id == item_outlet.id)
+                monthly_query = monthly_query.filter(AuditTrail.outlet_id == item_outlet.id)
+            # A restored outlet has no reliable outlet_id history. Count all
+            # successful price audits for this item so mapping recovery cannot
+            # inadvertently reset its 24h/30d change limits.
+            daily_count = daily_query.count()
+            monthly_count = monthly_query.count()
             if daily_count + planned_daily >= 10:
                 price_errors.append(f"{label}: batas 10 perubahan harga dalam 24 jam tercapai.")
                 continue
@@ -4545,6 +4670,11 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
     if request.selected_sids:
         target_sid = request.selected_sids[0]
         outlet = db.query(Outlet).filter(Outlet.store_id == target_sid, Outlet.platform == target_platform).first()
+        if not outlet:
+            outlet = db.query(Outlet).join(Account).filter(
+                Outlet.store_id == target_sid,
+                func.lower(Account.platform) == target_platform.lower(),
+            ).first()
         if not outlet:
             outlet = db.query(Outlet).filter(Outlet.store_id == target_sid).first()
 
