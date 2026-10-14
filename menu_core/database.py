@@ -2,10 +2,11 @@ import os
 import uuid
 from datetime import datetime
 from sqlalchemy import (
-    create_engine, Column, String, Boolean, DateTime, Integer, Text, ForeignKey, UniqueConstraint, JSON, inspect, text, event, Engine
+    create_engine, Column, String, Boolean, DateTime, Integer, Text, ForeignKey, UniqueConstraint, JSON, inspect, text, event, Engine, select, func
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB as PG_JSONB
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.ext.hybrid import hybrid_property
 
 from sqlalchemy.types import TypeDecorator, CHAR
 
@@ -136,9 +137,13 @@ class Outlet(Base):
     jobs = relationship("Job", back_populates="outlet", cascade="all, delete-orphan")
     audit_trails = relationship("AuditTrail", back_populates="outlet", cascade="all, delete-orphan")
 
-    @property
+    @hybrid_property
     def platform(self):
-        return self.account.platform if self.account else None
+        return self.account.platform.strip().lower() if self.account and self.account.platform else None
+
+    @platform.expression
+    def platform(cls):
+        return select(func.lower(func.trim(Account.platform))).where(Account.id == cls.account_id).scalar_subquery()
 
     @property
     def nama_listing(self):

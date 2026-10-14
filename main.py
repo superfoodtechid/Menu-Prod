@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from dotenv import load_dotenv
@@ -1169,6 +1170,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     session_path = os.path.join(SESSION_DIR, f"{username}.json")
                     storage_state = session_path if os.path.exists(session_path) else None
                     
+                    proc = None
                     use_system_chromium = os.path.exists("/usr/lib/chromium/chromium") or os.path.exists("/usr/bin/chromium")
                     if use_system_chromium:
                         import socket, subprocess
@@ -1182,16 +1184,27 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                         chromium_bin = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else "/usr/bin/chromium"
                         proc = subprocess.Popen([
                             chromium_bin, "--no-sandbox", "--no-zygote", "--in-process-gpu", "--disable-gpu",
-                            "--disable-dev-shm-usage", "--disable-gpu-sandbox", "--dbus-stub", f"--remote-debugging-port={cdp_port}", "--headless=new"
+                            "--disable-dev-shm-usage", "--disable-gpu-sandbox", "--disable-blink-features=AutomationControlled",
+                            "--dbus-stub", f"--remote-debugging-port={cdp_port}", "--headless=new"
                         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         await asyncio.sleep(3.0)
                         browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
                     else:
-                        browser = await p.chromium.launch(headless=True)
+                        browser = await p.chromium.launch(
+                            headless=True,
+                            args=[
+                                "--no-sandbox",
+                                "--disable-blink-features=AutomationControlled",
+                                "--disable-dev-shm-usage",
+                                "--disable-gpu"
+                            ]
+                        )
                     context = await browser.new_context(
                         storage_state=storage_state,
-                        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                        viewport={"width": 1920, "height": 1080},
+                        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
                     )
+                    await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); window.chrome = { runtime: {} };")
                     page = await context.new_page()
 
                     try:
@@ -1226,23 +1239,34 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                 await context.storage_state(path=session_path)
                             else:
                                 await browser.close()
+                                if proc:
+                                    proc.terminate()
                                 return "Failed to retrieve Grab merchant group ID after login."
                         else:
                             await browser.close()
+                            if proc:
+                                proc.terminate()
                             return "Grab login failed."
 
                     # Navigasi ke store-specific menu page untuk mengaktifkan konteks sesi store di Grab
                     try:
                         menu_tab_url = f"https://merchant.grab.com/food/menu/{store_id}"
                         logger.info(f"Navigating to Grab store menu page: {menu_tab_url}")
-                        await page.goto(menu_tab_url, wait_until="domcontentloaded", timeout=30000)
+                        await page.goto(menu_tab_url, wait_until="networkidle", timeout=30000)
                         await page.wait_for_timeout(3000)
+                        skip_btn = page.locator('button:has-text("Skip"), button:has-text("Lewati")')
+                        if await skip_btn.count() > 0:
+                            await skip_btn.first.click()
                     except Exception as e:
                         logger.warning(f"Grab store menu page navigate warning: {e}")
+
+                    await api.get_csrf_token()
 
                     menu_data, err = await api.fetch_menu(mgid, store_id, is_menu_group=False)
                     if err or not menu_data:
                         await browser.close()
+                        if proc:
+                            proc.terminate()
                         return f"Failed to fetch Grab menu: {err}"
 
                     # Detect if menu_data is from a Menu Group V2
@@ -1361,7 +1385,7 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             monthly_count = thread_db.query(AuditTrail).filter(
                                 AuditTrail.outlet_id == outlet.id,
                                 AuditTrail.item_id == real_item_id,
-                                AuditTrail.field_changed.ilike("price"),
+                                AuditTrail.field_changed.ilike("%price%"),
                                 AuditTrail.status.ilike("SUCCESS"),
                                 AuditTrail.created_at >= thirty_days_ago
                             ).count()
@@ -1401,11 +1425,25 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             if len(steps) > 1:
                                 logger.info(f"📊 Grab Push Bertahap (>15%) untuk {orig_item.get('itemName')}: Rp {old_p:,.0f} -> Rp {new_price:,.0f} via {len(steps)} tahapan: {steps}")
 
-                            item_data = dict(orig_item)
-                            if category_id and "categoryID" not in item_data:
-                                item_data["categoryID"] = category_id
-                            if selling_time_id and "sellingTimeID" not in item_data:
-                                item_data["sellingTimeID"] = selling_time_id
+                            item_data = {
+                                "itemID": real_item_id,
+                                "itemName": orig_item.get("itemName", ""),
+                                "description": orig_item.get("description", ""),
+                                "categoryID": category_id or orig_item.get("categoryID", ""),
+                                "sellingTimeID": selling_time_id or orig_item.get("sellingTimeID", ""),
+                                "availableStatus": orig_item.get("availableStatus", 1),
+                                "sortOrder": orig_item.get("sortOrder", 0),
+                                "imageURL": orig_item.get("imageURL", ""),
+                                "imageURLs": orig_item.get("imageURLs", []),
+                                "linkedModifierGroupIDs": orig_item.get("linkedModifierGroupIDs") or [],
+                                "specialItemType": orig_item.get("specialItemType", ""),
+                                "soldByWeight": orig_item.get("soldByWeight", False),
+                                "skuID": orig_item.get("skuID", ""),
+                                "weight": orig_item.get("weight"),
+                                "itemAttributeValues": orig_item.get("itemAttributeValues", [])
+                            }
+                            if orig_item.get("menuGroupID"):
+                                item_data["menuGroupID"] = orig_item.get("menuGroupID")
 
                             status_str = "SUCCESS"
                             err_msg = None
@@ -1514,6 +1552,11 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                         thread_db.close()
 
                     await browser.close()
+                    if proc:
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
                     return None
 
             import threading
@@ -3041,6 +3084,20 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         def record_trail(upd, status_str, err_msg, applied=None):
             changes = upd.get("changes") or upd.get("change_types") or ["C5 Update"]
             change_str = ", ".join(changes)
+            trail_sid = str(upd.get("sid") or "").strip()
+            trail_outlet = None
+            if trail_sid:
+                trail_outlet = db.query(Outlet).filter(
+                    Outlet.store_id == trail_sid,
+                    Outlet.platform == platform,
+                ).first()
+                if not trail_outlet:
+                    trail_outlet = db.query(Outlet).join(Account).filter(
+                        Outlet.store_id == trail_sid,
+                        func.lower(Account.platform) == platform.lower(),
+                    ).first()
+                if not trail_outlet:
+                    trail_outlet = db.query(Outlet).filter(Outlet.store_id == trail_sid).first()
             old_values, new_values = [], []
             field_values = {
                 "NAME_CHANGE": ("Nama item", upd.get("baseline_name") or upd.get("item_name"), (applied or {}).get("new_name") or upd.get("item_name_new")),
@@ -3072,8 +3129,8 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                     new_values.append(f"Nama Kategori: {applied['new_category']}")
             trail = AuditTrail(
                 job_id=job.id,
-                outlet_id=job.outlet_id or uuid.uuid4(),
-                item_id=str(upd.get("item_id", "")),
+                outlet_id=(trail_outlet.id if trail_outlet else job.outlet_id) or uuid.uuid4(),
+                item_id=str((applied or {}).get("item_id") or upd.get("item_id", "")),
                 item_name=str(upd.get("item_name", "")),
                 change_type=f"C5_PUSH_{platform.upper()}",
                 field_changed=change_str,
@@ -3088,6 +3145,11 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
         for sid, sid_updates in updates_by_sid.items():
             # Resolve the outlet + account credentials for this Store ID & platform.
             outlet = db.query(Outlet).filter(Outlet.store_id == sid, Outlet.platform == platform).first()
+            if not outlet:
+                outlet = db.query(Outlet).join(Account).filter(
+                    Outlet.store_id == sid,
+                    func.lower(Account.platform) == platform.lower(),
+                ).first()
             if not outlet:
                 outlet = db.query(Outlet).filter(Outlet.store_id == sid).first()
             if not outlet and sid:
@@ -3130,6 +3192,47 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                 results = []
                 if platform == "grab":
                     from grab.core.push_c5 import push_c5_grab_for_merchant
+
+                    def grab_price_guard_cb(upd, real_item_id, old_price, new_price, needed_steps=1):
+                        """Recheck Grab's app-known per-item limits immediately before each price mutation."""
+                        now = datetime.utcnow()
+                        daily_count = db.query(AuditTrail).filter(
+                            AuditTrail.outlet_id == outlet.id,
+                            AuditTrail.item_id == real_item_id,
+                            AuditTrail.field_changed.ilike("%price%"),
+                            AuditTrail.status.ilike("SUCCESS"),
+                            AuditTrail.created_at >= now - timedelta(days=1),
+                        ).count()
+                        monthly_count = db.query(AuditTrail).filter(
+                            AuditTrail.outlet_id == outlet.id,
+                            AuditTrail.item_id == real_item_id,
+                            AuditTrail.field_changed.ilike("%price%"),
+                            AuditTrail.status.ilike("SUCCESS"),
+                            AuditTrail.created_at >= now - timedelta(days=30),
+                        ).count()
+                        if daily_count + needed_steps > 10:
+                            return f"Item ini sudah mencapai batas 10 perubahan harga dalam 24 jam terakhir ({daily_count}/10, butuh {needed_steps} tahap)."
+                        if monthly_count + needed_steps > 15:
+                            return f"Item ini sudah mencapai batas 15 perubahan harga dalam 30 hari terakhir ({monthly_count}/15, butuh {needed_steps} tahap)."
+                        return None
+
+                    def grab_step_cb(upd, step_idx, total_steps, prev_p, step_p):
+                        job.current_step = f"Store {sid}: {upd.get('item_name')} (tahap {step_idx}/{total_steps}: Rp {step_p:,.0f})..."
+                        db.commit()
+                        trail = AuditTrail(
+                            job_id=job.id,
+                            outlet_id=outlet.id,
+                            item_id=str(upd.get("item_id", "")),
+                            item_name=str(upd.get("item_name", "")),
+                            change_type=f"C5_PUSH_{platform.upper()}",
+                            field_changed=f"Harga (Tahap {step_idx}/{total_steps})",
+                            old_value=f"Harga: Rp {prev_p:,.0f}",
+                            new_value=f"Harga: Rp {step_p:,.0f}",
+                            status="SUCCESS",
+                        )
+                        db.add(trail)
+                        db.commit()
+
                     results = push_c5_grab_for_merchant(
                         username=account.username,
                         password=account.password,
@@ -3137,6 +3240,9 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                         updates=sid_updates,
                         progress_cb=progress_cb,
                         item_result_cb=item_cb,
+                        price_guard_cb=grab_price_guard_cb,
+                        store_name=outlet.nama_resto_final or outlet.nama_outlet or outlet.merchant_name,
+                        step_cb=grab_step_cb,
                     )
                 elif platform == "shopee":
                     from shopee.core.push_c5 import push_c5_shopee_for_merchant
@@ -4056,9 +4162,10 @@ async def parse_c5_endpoint(
 
         row_platform = get_val(row, platform_col) or baseline.get("baseline_platform") or ""
         normalized_platform = re.sub(r"[^a-z]", "", str(row_platform).casefold())
+        is_grab_platform = normalized_platform in {"grab", "grabfood"}
         invalid_new_item_price = (
             is_new_item
-            and normalized_platform == "gofood"
+            and normalized_platform in {"gofood", "grab", "grabfood"}
             and (new_fake_price is None or new_fake_price <= 0)
         )
         if invalid_new_item_price:
@@ -4122,22 +4229,34 @@ async def parse_c5_endpoint(
         # 5. Price Change
         price_changed = False
         price_warning = False
+        grab_price_limit_exceeded = False
         price_diff_percent = 0.0
+        price_steps_count = 1
         if new_fake_price is not None:
             if base_price is not None and float(base_price) > 0:
                 price_changed = float(new_fake_price) != float(base_price)
                 price_diff_percent = (abs(float(new_fake_price) - float(base_price)) / float(base_price)) * 100.0
                 if price_changed and price_diff_percent > 15.0:
                     price_warning = True
+                    steps = calculate_price_steps(float(base_price), float(new_fake_price), max_step_pct=0.15)
+                    price_steps_count = len(steps)
+                    if is_grab_platform and price_steps_count > 10:
+                        grab_price_limit_exceeded = True
             else:
                 price_changed = True
 
         if price_changed:
             if price_warning:
+                if grab_price_limit_exceeded:
+                    price_note = f"(⚠️ Kenaikan {price_diff_percent:.1f}% butuh {price_steps_count} tahap, melebihi kuota 10 perubahan per 24 jam)"
+                elif price_steps_count > 1:
+                    price_note = f"(⚠️ Perubahan {price_diff_percent:.1f}% >15% - Push Bertahap {price_steps_count} tahap)"
+                else:
+                    price_note = f"(⚠️ Perubahan {price_diff_percent:.1f}% >15% - Push Bertahap)"
                 diff_details.append({
                     "column": "Price",
                     "old_val": f"Rp {float(base_price):,.0f}",
-                    "new_val": f"Rp {float(new_fake_price):,.0f} (⚠️ Perubahan {price_diff_percent:.1f}% >15% - Push Bertahap)"
+                    "new_val": f"Rp {float(new_fake_price):,.0f} {price_note}"
                 })
             else:
                 diff_details.append({"column": "Price", "old_val": base_price, "new_val": new_fake_price})
@@ -4169,6 +4288,13 @@ async def parse_c5_endpoint(
                 change_types.append("INVALID_CATEGORY_CONSISTENCY")
             if invalid_new_item_price:
                 change_types.append("INVALID_NEW_ITEM_PRICE")
+        if grab_price_limit_exceeded:
+            is_valid = False
+            validation_errors_count += 1
+            limit_error = f"Kenaikan harga Grab ({price_diff_percent:.1f}%) membutuhkan {price_steps_count} tahapan bertahap, melebihi kuota maksimal 10 perubahan per 24 jam. Item: '{display_name}' (Store ID: {sid}, baris {r_idx})."
+            validation_error_messages.append(limit_error)
+            validation_error = f"{validation_error} {limit_error}" if validation_error else limit_error
+            change_types.append("GRAB_PRICE_LIMIT_EXCEEDED")
         if is_new_item:
             change_types.append("NEW_ITEM")
             new_items_count += 1
@@ -4193,7 +4319,7 @@ async def parse_c5_endpoint(
         if price_changed:
             change_types.append("PRICE_CHANGE")
             price_changes_count += 1
-            if price_warning:
+            if price_warning and not grab_price_limit_exceeded:
                 change_types.append("PRICE_WARNING_STEP_PUSH")
                 price_warning_count += 1
         if other_changed:
@@ -4236,6 +4362,7 @@ async def parse_c5_endpoint(
             "is_new_item": is_new_item,
             "is_new_category": is_new_category,
             "price_warning": price_warning,
+            "grab_price_limit_exceeded": grab_price_limit_exceeded,
             "price_diff_percent": round(price_diff_percent, 2),
             "change_types": change_types,
             "diff_details": diff_details,
@@ -4350,10 +4477,106 @@ async def parse_c5_endpoint(
     }
 
 
+def _provision_grab_outlet_from_master(db: Session, sid: str):
+    """Restore a missing Grab outlet mapping from the configured master source.
+
+    This is deliberately scoped to one requested SID. The regular sheet sync
+    reconciles every outlet and removes stale rows, so it is too broad to run
+    implicitly while scheduling a push.
+    """
+    try:
+        from menu_core.sheets import get_outlets_for_applicator
+
+        source = next(
+            (row for row in get_outlets_for_applicator("grab") if str(row.get("store_id") or "").strip() == sid),
+            None,
+        )
+    except Exception as exc:
+        logger.warning("Could not resolve missing Grab outlet mapping for SID %s: %s", sid, exc)
+        return None
+
+    if not source or not source.get("username") or not source.get("password"):
+        return None
+
+    # Never reassign a globally unique SID that is already registered under a
+    # different platform/account.
+    existing = db.query(Outlet).filter(Outlet.store_id == sid).first()
+    if existing:
+        return existing if existing.platform == "grab" else None
+
+    account = db.query(Account).filter(
+        Account.username == source["username"],
+        Account.platform == "grab",
+    ).first()
+    if not account:
+        account = Account(
+            platform="grab",
+            username=source["username"],
+            password=source["password"],
+            portal="merchant_portal",
+        )
+        db.add(account)
+        db.flush()
+    elif account.password != source["password"]:
+        # Match the normal master-sheet sync behavior for this account.
+        account.password = source["password"]
+        db.flush()
+
+    listing = source.get("nama_resto_final") or source.get("nama_outlet") or source.get("merchant_name") or sid
+    outlet = Outlet(
+        account_id=account.id,
+        store_id=sid,
+        merchant_name=source.get("merchant_name") or source.get("brand") or listing,
+        owner=source.get("owner") or None,
+        nama_outlet=source.get("nama_outlet") or listing,
+        cabang=source.get("brand") or source.get("outlet") or listing,
+        nama_resto_final=source.get("nama_resto_final") or listing,
+        brand=source.get("brand") or None,
+        nama_portal=source.get("nama_portal") or None,
+        is_active=True,
+    )
+    db.add(outlet)
+    try:
+        db.commit()
+        db.refresh(outlet)
+    except Exception:
+        db.rollback()
+        # Another request may have restored the same SID concurrently.
+        existing = db.query(Outlet).filter(Outlet.store_id == sid).first()
+        return existing if existing and existing.platform == "grab" else None
+
+    logger.info("Restored missing Grab outlet mapping from master source for SID %s", sid)
+    return outlet
+
+
 @app.post("/api/jobs/push-c5", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
 def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Triggers background job to push C5 menu updates (GoFood or GrabFood) for selected Store IDs (SIDs)."""
     target_platform = (request.platform or "gofood").lower()
+    provisioned_grab_sids = set()
+    if target_platform == "grab":
+        # Resolve only the selected SID. The general sheet sync also prunes
+        # stale outlets and their audit history, which must not happen here.
+        for raw_sid in request.selected_sids or []:
+            sid = str(raw_sid or "").strip()
+            if not sid:
+                continue
+            existing_grab = db.query(Outlet).filter(
+                Outlet.store_id == sid,
+                Outlet.platform == "grab",
+            ).first()
+            if not existing_grab:
+                existing_grab = db.query(Outlet).join(Account).filter(
+                    Outlet.store_id == sid,
+                    func.lower(Account.platform) == "grab",
+                ).first()
+            if not existing_grab:
+                existing_grab = db.query(Outlet).filter(Outlet.store_id == sid).first()
+            if existing_grab:
+                continue
+            if _provision_grab_outlet_from_master(db, sid):
+                provisioned_grab_sids.add(sid)
+
     if target_platform == "gofood":
         import math
 
@@ -4372,11 +4595,114 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
                 status_code=422,
                 detail=f"Harga item baru belum diisi atau tidak valid (> Rp0): {names}{more}. Perbaiki harga di C5 sebelum push."
             )
+    elif target_platform == "grab":
+        # C5 Grab sends one price mutation per existing item. Enforce the
+        # per-change increase and app-known daily/monthly limits before a job
+        # is created; the worker repeats the quota check against the live item.
+        import math
+
+        planned_counts = {}
+        price_errors = []
+        for item in request.updates:
+            changes = set(item.changes or [])
+            is_new_item = "NEW_ITEM" in changes or not str(item.item_id or "").strip()
+            if is_new_item:
+                price = item.new_fake_price
+                if price is None or not math.isfinite(price) or price <= 0:
+                    price_errors.append(f"{item.item_name_new or item.item_name or 'Item baru'}: harga item baru harus lebih dari Rp0.")
+                continue
+            if "PRICE_CHANGE" not in changes:
+                continue
+
+            label = item.item_name_new or item.item_name or item.item_id
+            old_price = item.current_fake_price
+            new_price = item.new_fake_price
+            if old_price is None or not math.isfinite(old_price) or old_price <= 0:
+                price_errors.append(f"{label}: harga baseline tidak tersedia; pull ulang menu Grab.")
+                continue
+            if new_price is None or not math.isfinite(new_price) or new_price <= 0:
+                price_errors.append(f"{label}: harga baru harus lebih dari Rp0.")
+                continue
+            price_steps = calculate_price_steps(old_price, new_price, max_step_pct=0.15) if old_price > 0 else [int(round(new_price))]
+            needed_mutations = len(price_steps)
+            diff_pct = ((new_price - old_price) / old_price) * 100.0
+            if needed_mutations > 10:
+                price_errors.append(
+                    f"{label}: perubahan {diff_pct:+.1f}% membutuhkan {needed_mutations} tahap, melebihi kuota 10 perubahan harga dalam 24 jam."
+                )
+                continue
+
+            item_sid = (item.sid or (request.selected_sids[0] if request.selected_sids else "")).strip()
+            item_outlet = db.query(Outlet).filter(
+                Outlet.store_id == item_sid,
+                Outlet.platform == "grab",
+            ).first()
+            if not item_outlet:
+                item_outlet = db.query(Outlet).join(Account).filter(
+                    Outlet.store_id == item_sid,
+                    func.lower(Account.platform) == "grab",
+                ).first()
+            if not item_outlet:
+                item_outlet = db.query(Outlet).filter(Outlet.store_id == item_sid).first()
+            if not item_outlet:
+                price_errors.append(
+                    f"{label}: outlet Grab untuk SID {item_sid or '-'} tidak ditemukan di konfigurasi aplikasi. "
+                    "Pastikan SID aktif di master merchant dan sinkronkan daftar outlet."
+                )
+                continue
+
+            quota_key = (str(item_outlet.id), str(item.item_id))
+            planned_daily, planned_monthly = planned_counts.get(quota_key, (0, 0))
+            now = datetime.utcnow()
+            daily_query = db.query(AuditTrail).filter(
+                AuditTrail.item_id == str(item.item_id),
+                AuditTrail.field_changed.ilike("%price%"),
+                AuditTrail.status.ilike("SUCCESS"),
+                AuditTrail.created_at >= now - timedelta(days=1),
+            )
+            monthly_query = db.query(AuditTrail).filter(
+                AuditTrail.item_id == str(item.item_id),
+                AuditTrail.field_changed.ilike("%price%"),
+                AuditTrail.status.ilike("SUCCESS"),
+                AuditTrail.created_at >= now - timedelta(days=30),
+            )
+            if item_sid not in provisioned_grab_sids:
+                daily_query = daily_query.filter(AuditTrail.outlet_id == item_outlet.id)
+                monthly_query = monthly_query.filter(AuditTrail.outlet_id == item_outlet.id)
+            # A restored outlet has no reliable outlet_id history. Count all
+            # successful price audits for this item so mapping recovery cannot
+            # inadvertently reset its 24h/30d change limits.
+            daily_count = daily_query.count()
+            monthly_count = monthly_query.count()
+            if daily_count + planned_daily + needed_mutations > 10:
+                price_errors.append(
+                    f"{label}: batas 10 perubahan harga dalam 24 jam tercapai "
+                    f"(sudah {daily_count + planned_daily}, butuh {needed_mutations} tahap)."
+                )
+                continue
+            if monthly_count + planned_monthly + needed_mutations > 15:
+                price_errors.append(
+                    f"{label}: batas 15 perubahan harga dalam 30 hari tercapai "
+                    f"(sudah {monthly_count + planned_monthly}, butuh {needed_mutations} tahap)."
+                )
+                continue
+            planned_counts[quota_key] = (planned_daily + needed_mutations, planned_monthly + needed_mutations)
+
+        if price_errors:
+            raise HTTPException(
+                status_code=422,
+                detail="Push harga Grab diblokir: " + " ".join(price_errors[:10]),
+            )
 
     outlet = None
     if request.selected_sids:
         target_sid = request.selected_sids[0]
         outlet = db.query(Outlet).filter(Outlet.store_id == target_sid, Outlet.platform == target_platform).first()
+        if not outlet:
+            outlet = db.query(Outlet).join(Account).filter(
+                Outlet.store_id == target_sid,
+                func.lower(Account.platform) == target_platform.lower(),
+            ).first()
         if not outlet:
             outlet = db.query(Outlet).filter(Outlet.store_id == target_sid).first()
 
@@ -4432,7 +4758,7 @@ def get_pricing_quota(outlet_id: uuid.UUID, item_id: str, db: Session = Depends(
     daily_count = db.query(AuditTrail).filter(
         AuditTrail.outlet_id == outlet_id,
         AuditTrail.item_id == item_id,
-        AuditTrail.field_changed.ilike("price"),
+        AuditTrail.field_changed.ilike("%price%"),
         AuditTrail.status.ilike("SUCCESS"),
         AuditTrail.created_at >= one_day_ago
     ).count()
@@ -4441,7 +4767,7 @@ def get_pricing_quota(outlet_id: uuid.UUID, item_id: str, db: Session = Depends(
     monthly_count = db.query(AuditTrail).filter(
         AuditTrail.outlet_id == outlet_id,
         AuditTrail.item_id == item_id,
-        AuditTrail.field_changed.ilike("price"),
+        AuditTrail.field_changed.ilike("%price%"),
         AuditTrail.status.ilike("SUCCESS"),
         AuditTrail.created_at >= thirty_days_ago
     ).count()

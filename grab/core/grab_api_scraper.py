@@ -84,6 +84,32 @@ class GrabAPI:
         self.username = username
         self.password = password
         self.base_url = "https://merchant.grab.com"
+        self.api_base_url = "https://api.grab.com"
+        self.csrf_token = None
+        self.advertiser_id = None
+
+    async def get_csrf_token(self):
+        """Ambil token CSRF (jti dari cookie mexusers_authn_token_jti)"""
+        if getattr(self, "csrf_token", None):
+            return self.csrf_token
+        try:
+            if hasattr(self.page, "context"):
+                cookies = await self.page.context.cookies()
+                for c in cookies:
+                    if c.get("name") == "mexusers_authn_token_jti" and c.get("value"):
+                        self.csrf_token = c.get("value")
+                        return self.csrf_token
+            if not self.page.is_closed():
+                dom_cookie = await self.page.evaluate("() => document.cookie")
+                if "mexusers_authn_token_jti=" in dom_cookie:
+                    for part in dom_cookie.split(";"):
+                        part = part.strip()
+                        if part.startswith("mexusers_authn_token_jti="):
+                            self.csrf_token = part.split("=", 1)[1]
+                            return self.csrf_token
+        except Exception as e:
+            logger.debug(f"Gagal mengambil token CSRF Grab: {e}")
+        return getattr(self, "csrf_token", None)
 
     async def call_api(self, url, method="GET", params=None, headers=None, body=None):
         """Call Grab API from within the page context to reuse session/headers"""
@@ -92,7 +118,15 @@ class GrabAPI:
             query = "&".join([f"{k}={v}" for k, v in params.items()])
             full_url = f"{url}?{query}" if "?" not in url else f"{url}&{query}"
         
-        headers_js = json.dumps(headers or {})
+        req_headers = dict(headers or {})
+        if method.upper() in ("POST", "PUT", "DELETE", "PATCH"):
+            has_csrf = any(k.lower() == "x-csrf-token" for k in req_headers)
+            if not has_csrf:
+                csrf = await self.get_csrf_token()
+                if csrf:
+                    req_headers["x-csrf-token"] = csrf
+
+        headers_js = json.dumps(req_headers)
         body_js = json.dumps(body) if body is not None else "null"
         
         js_code = f"""
@@ -101,17 +135,33 @@ class GrabAPI:
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
                 
-                const extraHeaders = {headers_js};
+                const rawHeaders = {headers_js};
                 const bodyObj = {body_js};
+                
+                // Normalisasi semua key header ke lowercase
+                const extraHeaders = {{}};
+                for (const [k, v] of Object.entries(rawHeaders)) {{
+                    extraHeaders[k.toLowerCase()] = v;
+                }}
+                
+                if (!extraHeaders["x-csrf-token"]) {{
+                    const m = document.cookie.match(/(?:^|;\\s*)mexusers_authn_token_jti=([^;]*)/);
+                    if (m && m[1]) {{
+                        extraHeaders["x-csrf-token"] = decodeURIComponent(m[1]);
+                    }}
+                }}
+                
+                if (!extraHeaders["accept"]) {{
+                    extraHeaders["accept"] = "application/json";
+                }}
+                if (bodyObj !== null && !extraHeaders["content-type"]) {{
+                    extraHeaders["content-type"] = "application/json";
+                }}
                 
                 const fetchOptions = {{
                     method: "{method}",
                     signal: controller.signal,
-                    headers: {{
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        ...extraHeaders
-                    }},
+                    headers: extraHeaders,
                     credentials: "include"
                 }};
                 
@@ -330,7 +380,7 @@ class GrabAPI:
                     })
         return results
 
-    async def get_merchant_ids_from_page_requests(self):
+    async def get_merchant_ids_from_page_requests(self, target_store_id=None):
         """
         Navigasi ke /food/menu dan intercept request halaman ke
         api.grab.com/food/merchant/v2/menu untuk mendapatkan merchantId/merchantgroupid.
@@ -351,9 +401,13 @@ class GrabAPI:
 
         self.page.on("request", on_request)
         try:
-            # Navigasi pertama
+            menu_url = "https://merchant.grab.com/food/menu"
+            if target_store_id:
+                menu_url = f"https://merchant.grab.com/food/menu/{target_store_id}"
+
+            # Navigasi to the selected outlet when a target SID is provided.
             await self.page.goto(
-                "https://merchant.grab.com/food/menu",
+                menu_url,
                 wait_until="networkidle",
                 timeout=30000
             )
@@ -367,7 +421,7 @@ class GrabAPI:
 
             # Fallback: cek URL apakah mengandung store ID
             # (beberapa versi portal redirect ke /food/menu/{storeId})
-            if not captured:
+            if not captured and not target_store_id:
                 current_url = self.page.url
                 if "/food/menu/" in current_url:
                     sid = current_url.split("/food/menu/")[-1].split("?")[0].split("/")[0]
@@ -383,10 +437,22 @@ class GrabAPI:
         return captured
 
 
-    async def fetch_menu(self, group_id, store_id, store_name=None, is_menu_group=False):
+    async def fetch_menu(self, group_id, store_id, store_name=None, is_menu_group=False, require_menu_group_match=False):
         """GET /food/merchant/v2/menu — dipanggil dari konteks halaman /food/menu.
         Mendukung deteksi otomatis Menu Groups untuk multi-cabang (seperti AGSA).
         """
+        def auth_error_from_response(response):
+            if not isinstance(response, dict):
+                return None
+            status = response.get("status")
+            detail = response.get("data") or response.get("error") or ""
+            detail_text = json.dumps(detail, ensure_ascii=False).casefold() if isinstance(detail, (dict, list)) else str(detail).casefold()
+            if status in (401, 403):
+                return f"Status {status}: {detail}"
+            if any(marker in detail_text for marker in ("unauthorized", "token invalid", "session expired", "session invalid")):
+                return f"Status {status or 'unknown'}: {detail}"
+            return None
+
         if is_menu_group:
             logger.info(f"  [MenuGroups] Direct group menu fetch for store_id/groupID: {store_id}")
             group_menu_url = f"https://api.grab.com/food/merchant/v2/menu-groups/menu?menuGroupID={store_id}"
@@ -418,6 +484,9 @@ class GrabAPI:
             for attempt in range(3):
                 try:
                     res = await self.page.evaluate(js_group_menu)
+                    auth_error = auth_error_from_response(res)
+                    if auth_error:
+                        return None, auth_error
                     if res and res.get("status") == 200:
                         data = res.get("data", {})
                         if isinstance(data, dict):
@@ -467,6 +536,9 @@ class GrabAPI:
         
         try:
             mg_res = await self.page.evaluate(js_menu_groups)
+            auth_error = auth_error_from_response(mg_res)
+            if auth_error:
+                return None, auth_error
             if mg_res and mg_res.get("status") == 200:
                 mg_data = mg_res.get("data", {})
                 menu_groups = mg_data.get("menuGroups") or mg_data.get("groups") or []
@@ -475,17 +547,34 @@ class GrabAPI:
                     
                     # Cari group yang cocok dengan store_name
                     matched_group = None
-                    if store_name:
+                    # A C5 mutation must never use an arbitrary first group:
+                    # its ID becomes merchantid/menuGroupID on the write call.
+                    # Match the selected SID against group metadata before
+                    # falling back to the outlet name.
+                    if require_menu_group_match:
+                        target_sid = str(store_id).strip().casefold()
+                        for g in menu_groups:
+                            candidate_ids = (
+                                g.get("merchantID"), g.get("merchantId"),
+                                g.get("storeID"), g.get("storeId"),
+                                g.get("store_id"), g.get("outletID"),
+                                g.get("outletId"), g.get("menuGroupID"), g.get("id"),
+                            )
+                            if any(str(candidate).strip().casefold() == target_sid for candidate in candidate_ids if candidate):
+                                matched_group = g
+                                break
+
+                    if not matched_group and store_name:
                         def clean_str(s):
                             return "".join(c for c in str(s).lower() if c.isalnum())
-                        
+
                         target_clean = clean_str(store_name)
                         for g in menu_groups:
                             g_name = g.get("name") or g.get("groupName") or g.get("menuGroupName") or ""
                             if clean_str(g_name) == target_clean:
                                 matched_group = g
                                 break
-                        if not matched_group:
+                        if not matched_group and not require_menu_group_match:
                             # Substring match
                             for g in menu_groups:
                                 g_name = g.get("name") or g.get("groupName") or g.get("menuGroupName") or ""
@@ -495,6 +584,8 @@ class GrabAPI:
                                     break
                     
                     if not matched_group:
+                        if require_menu_group_match:
+                            return None, f"Menu Group Grab tidak cocok dengan SID/outlet '{store_name or store_id}'. Push dihentikan agar tidak mengubah menu outlet lain."
                         matched_group = menu_groups[0]
                         logger.warning(f"  [MenuGroups] Tidak ditemukan kecocokan persis untuk '{store_name}'. Menggunakan group pertama: '{matched_group.get('name')}'")
                     
@@ -531,6 +622,9 @@ class GrabAPI:
                         for attempt in range(3):
                             try:
                                 res = await self.page.evaluate(js_group_menu)
+                                auth_error = auth_error_from_response(res)
+                                if auth_error:
+                                    return None, auth_error
                                 if res and res.get("status") == 200:
                                     data = res.get("data", {})
                                     if isinstance(data, dict):
@@ -586,6 +680,9 @@ class GrabAPI:
             """
             try:
                 res = await self.page.evaluate(js_code)
+                auth_error = auth_error_from_response(res)
+                if auth_error:
+                    return None, auth_error
                 if res and res.get("status") == 200:
                     return res.get("data", {}), None
                 err = res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
@@ -599,7 +696,7 @@ class GrabAPI:
 
     async def create_category(self, group_id, store_id, name, selling_time_id):
         """POST /food/merchant/v2/categories"""
-        url = f"{self.base_url}/food/merchant/v2/categories"
+        url = f"{self.api_base_url}/food/merchant/v2/categories"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -620,7 +717,7 @@ class GrabAPI:
 
     async def edit_category(self, group_id, store_id, category_id, name, selling_time_id):
         """PUT /food/merchant/v3/categories/{category_id}"""
-        url = f"{self.base_url}/food/merchant/v3/categories/{category_id}"
+        url = f"{self.api_base_url}/food/merchant/v3/categories/{category_id}"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -641,7 +738,7 @@ class GrabAPI:
 
     async def delete_category(self, group_id, store_id, category_id):
         """DELETE /food/merchant/v2/categories/{category_id}"""
-        url = f"{self.base_url}/food/merchant/v2/categories/{category_id}"
+        url = f"{self.api_base_url}/food/merchant/v2/categories/{category_id}"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -660,7 +757,7 @@ class GrabAPI:
 
     async def sort_categories(self, group_id, store_id, sorted_category_ids):
         """PUT /food/merchant/categories-sort"""
-        url = f"{self.base_url}/food/merchant/categories-sort"
+        url = f"{self.api_base_url}/food/merchant/categories-sort"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -699,19 +796,18 @@ class GrabAPI:
             use_mg_ep = bool(is_menu_group or mg_id)
 
         if use_mg_ep:
-            url = f"{self.base_url}/food/merchant/v2/menu-groups/item-validation"
+            url = f"{self.api_base_url}/food/merchant/v2/menu-groups/item-validation"
         else:
-            url = f"{self.base_url}/food/merchant/v2/item-validation"
+            url = f"{self.api_base_url}/food/merchant/v2/item-validation"
 
         headers = {
             "merchantgroupid": group_id,
             "merchantid": mg_id or store_id,
             "requestsource": "troyPortal",
             "x-client-id": "GrabMerchant-Portal",
-            "x-grabkit-clientid": "grabmerchant-portal"
+            "x-grabkit-clientid": "grabmerchant-portal",
+            "x-api-source": "food-max-api"
         }
-        if use_mg_ep:
-            headers["x-api-source"] = "food-max-api"
 
         item_copy = dict(item_data)
         item_copy["categoryID"] = category_id
@@ -732,6 +828,14 @@ class GrabAPI:
             item_copy["purchasability"] = {}
         if "prediction" not in item_copy or item_copy["prediction"] is None:
             item_copy["prediction"] = {}
+
+        for rk in (
+            "m41MetaData", "serviceTypePriceRange", "priceDisplay", "priceRange",
+            "bcrsInfo", "itemCampaignInfo", "suggestFields", "menuScanError",
+            "menuScanTaskMeta", "failedPhotos", "itemStock", "stockPrediction",
+            "eligibleSellingStatus", "aiGeneratedFields"
+        ):
+            item_copy.pop(rk, None)
 
         body = {
             "categoryID": category_id,
@@ -786,19 +890,18 @@ class GrabAPI:
             use_mg_ep = bool(is_menu_group or mg_id)
 
         if use_mg_ep:
-            url = f"{self.base_url}/food/merchant/v2/menu-groups/upsert-item"
+            url = f"{self.api_base_url}/food/merchant/v2/menu-groups/upsert-item"
         else:
-            url = f"{self.base_url}/food/merchant/v2/upsert-item"
+            url = f"{self.api_base_url}/food/merchant/v2/upsert-item"
 
         headers = {
             "merchantgroupid": group_id,
             "merchantid": mg_id or store_id,
             "requestsource": "troyPortal",
             "x-client-id": "GrabMerchant-Portal",
-            "x-grabkit-clientid": "grabmerchant-portal"
+            "x-grabkit-clientid": "grabmerchant-portal",
+            "x-api-source": "food-max-api"
         }
-        if use_mg_ep:
-            headers["x-api-source"] = "food-max-api"
         item_copy = dict(item_data)
         item_copy["categoryID"] = category_id
         if "categoryName" not in item_copy:
@@ -818,6 +921,14 @@ class GrabAPI:
             item_copy["purchasability"] = {}
         if "prediction" not in item_copy or item_copy["prediction"] is None:
             item_copy["prediction"] = {}
+
+        for rk in (
+            "m41MetaData", "serviceTypePriceRange", "priceDisplay", "priceRange",
+            "bcrsInfo", "itemCampaignInfo", "suggestFields", "menuScanError",
+            "menuScanTaskMeta", "failedPhotos", "itemStock", "stockPrediction",
+            "eligibleSellingStatus", "aiGeneratedFields"
+        ):
+            item_copy.pop(rk, None)
 
         body = {
             "categoryID": category_id,
@@ -867,7 +978,7 @@ class GrabAPI:
 
     async def delete_item(self, group_id, store_id, item_id):
         """DELETE /food/merchant/v2/items/{item_id}"""
-        url = f"{self.base_url}/food/merchant/v2/items/{item_id}"
+        url = f"{self.api_base_url}/food/merchant/v2/items/{item_id}"
         headers = {
             "merchantgroupid": group_id,
             "merchantid": store_id,
@@ -884,8 +995,287 @@ class GrabAPI:
             return True, None
         return False, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
 
+    async def get_advertiser_id(self):
+        """Resolves advertiser ID for the active merchant from the portal context."""
+        if getattr(self, "advertiser_id", None):
+            return self.advertiser_id
+
+        # 0. Check current page URL
+        try:
+            m = re.search(r'/advertisers/(\d+)', getattr(self.page, "url", "") or "")
+            if m:
+                self.advertiser_id = m.group(1)
+                return self.advertiser_id
+        except Exception:
+            pass
+
+        # 1. Try to find link in existing DOM
+        try:
+            adv_link = await self.page.evaluate('''() => {
+                const a = document.querySelector('a[href*="/marketing/advertisers/"]');
+                return a ? a.href : null;
+            }''')
+            if adv_link:
+                m = re.search(r'/advertisers/(\d+)', adv_link)
+                if m:
+                    self.advertiser_id = m.group(1)
+                    return self.advertiser_id
+        except Exception:
+            pass
+
+        # 3. Navigate to /marketing and listen to internal requests
+        captured_id = []
+
+        def _on_req(req):
+            url = req.url
+            m = re.search(r'advertiserID=(\d+)', url) or re.search(r'/advertisers/(\d+)', url)
+            if m:
+                captured_id.append(m.group(1))
+
+        self.page.on("request", _on_req)
+        try:
+            logger.info("Resolving Grab advertiser ID via https://merchant.grab.com/marketing ...")
+            await self.page.goto("https://merchant.grab.com/marketing", wait_until="domcontentloaded", timeout=25000)
+            for _ in range(8):
+                if captured_id:
+                    self.advertiser_id = captured_id[0]
+                    logger.info(f"  🎯 Intercepted advertiser ID via network: {self.advertiser_id}")
+                    break
+                m = re.search(r'/advertisers/(\d+)', self.page.url)
+                if m:
+                    self.advertiser_id = m.group(1)
+                    break
+                await self.page.wait_for_timeout(1000)
+        except Exception as e:
+            logger.warning(f"Could not resolve advertiser ID via navigation: {e}")
+        finally:
+            try:
+                self.page.remove_listener("request", _on_req)
+            except Exception:
+                pass
+
+        return getattr(self, "advertiser_id", None)
+
+    async def get_active_campaigns(self, advertiser_id: str):
+        """Fetches active/ongoing self-serve promo campaigns for the given advertiser."""
+        url = f"{self.api_base_url}/mex-app/troy/unifieddemandgen/v1/advertisers/{advertiser_id}/self-serve-promo/list"
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "requestsource": "troyPortal",
+            "lang": "EN",
+        }
+        body = {
+            "advertiserID": str(advertiser_id),
+            "size": 10,
+            "page": 0,
+            "sortBy": {"field": "UNKNOWN_SORT_COLUMNS", "order": "DESC"},
+            "filters": [
+                {
+                    "filed": "FIELD_STATUS",
+                    "operator": "OPERATOR_IN",
+                    "values": ["ongoing", "upcoming"]
+                }
+            ]
+        }
+        logger.debug(f"  🔍 [Grab Promo] Calling get_active_campaigns: advertiser_id={advertiser_id}, URL={url}")
+        res = await self.call_api(url, method="POST", headers=headers, body=body)
+        logger.debug(f"  🔍 [Grab Promo] get_active_campaigns result status={res.get('status')}")
+        if res.get("status") == 200:
+            data = res.get("data") or {}
+            configs = data.get("configs") or []
+            return [c for c in configs if c.get("status") in ("ongoing", "upcoming")], None
+        err = res.get("error") or res.get("data") or f"HTTP {res.get('status')}"
+        return [], err
+
+    async def get_campaign_detail(self, campaign_id: str):
+        """Fetches detailed scope and items list for a specific campaign."""
+        url = f"{self.api_base_url}/mex-app/troy/merchantcampaign/v1/campaigns/{campaign_id}"
+        headers = {
+            "accept": "application/json",
+            "requestsource": "troyPortal",
+            "lang": "EN",
+        }
+        res = await self.call_api(url, method="GET", headers=headers)
+        if res.get("status") == 200:
+            return res.get("data") or {}, None
+        err = res.get("error") or res.get("data") or f"HTTP {res.get('status')}"
+        return None, err
+
+    async def delete_campaign(self, campaign_id: str):
+        """Deletes / terminates an active promo campaign on Grab."""
+        url = f"{self.api_base_url}/mex-app/troy/merchantcampaign/v1/campaigns/{campaign_id}"
+        headers = {
+            "accept": "application/json",
+            "requestsource": "troyPortal",
+            "lang": "EN",
+        }
+        res = await self.call_api(url, method="DELETE", headers=headers)
+        if res.get("status") in (200, 204):
+            return res.get("data") or True, None
+        err = res.get("error") or res.get("data") or f"HTTP {res.get('status')}"
+        return None, err
+
+    async def cancel_promos_for_item(self, store_id: str, item_id: str, item_name: str = ""):
+        """
+        Finds and deletes any active campaign on Grab that includes the target item.
+        Returns (canceled_campaigns: list[str], error: str|None).
+        """
+        adv_id = await self.get_advertiser_id()
+        if not adv_id:
+            return [], "Tidak dapat menemukan Advertiser ID di portal Grab."
+
+        campaigns, err = await self.get_active_campaigns(adv_id)
+        if err:
+            return [], f"Gagal mengambil daftar promo aktif: {err}"
+
+        sid_str = str(store_id or "").strip()
+        relevant = [c for c in campaigns if sid_str in str(c.get("id", "")) or sid_str in str(c.get("name", ""))]
+        if not relevant:
+            relevant = campaigns
+
+        canceled = []
+        clean_item_id = str(item_id or "").strip()
+        clean_name = str(item_name or "").strip().lower()
+
+        for camp in relevant:
+            c_id = camp.get("id")
+            if not c_id:
+                continue
+
+            camp_name = camp.get("name", "")
+            contains_item = False
+
+            if clean_name and clean_name in camp_name.lower():
+                contains_item = True
+            else:
+                detail, det_err = await self.get_campaign_detail(c_id)
+                if detail:
+                    scope = (detail.get("info") or {}).get("scope") or {}
+                    items_in_camp = scope.get("items") or scope.get("objects") or []
+                    for it_obj in items_in_camp:
+                        it_obj_id = str(it_obj.get("itemID") or it_obj.get("objectID") or "").strip()
+                        it_obj_name = str(it_obj.get("itemName") or it_obj.get("objectName") or "").strip().lower()
+                        if (clean_item_id and it_obj_id == clean_item_id) or (clean_name and it_obj_name == clean_name):
+                            contains_item = True
+                            break
+
+            if contains_item:
+                logger.info(f"🗑️ [Grab Promo] Menghapus promo aktif '{camp_name}' (ID: {c_id}) untuk item '{item_name or item_id}'...")
+                del_res, del_err = await self.delete_campaign(c_id)
+                if del_err:
+                    logger.warning(f"⚠️ [Grab Promo] Gagal menghapus promo '{c_id}': {del_err}")
+                else:
+                    logger.info(f"✅ [Grab Promo] Berhasil mencopot promo '{camp_name}' (ID: {c_id})")
+                    canceled.append(c_id)
+
+        return canceled, None
+
+    async def fetch_grab_campaign_promotions(self, target_store_id: str = None) -> dict:
+        """
+        Fetches active Grab promotion campaigns for the merchant and returns a mapping:
+        item_id -> promo_info and lower(item_name) -> promo_info.
+        """
+        adv_id = await self.get_advertiser_id()
+        if not adv_id:
+            logger.warning("  ⚠️ [Grab Promo] Tidak dapat menemukan Advertiser ID untuk penarikan promo.")
+            return {}
+
+        campaigns, err = await self.get_active_campaigns(adv_id)
+        if err or not campaigns:
+            if err:
+                logger.warning(f"  ⚠️ [Grab Promo] Gagal mengambil daftar promo aktif: {err}")
+            return {}
+
+        sid_str = str(target_store_id or "").strip()
+        relevant = [c for c in campaigns if sid_str in str(c.get("id", "")) or sid_str in str(c.get("name", ""))]
+        if not relevant:
+            relevant = campaigns
+
+        promo_map = {}
+        for camp in relevant:
+            c_id = camp.get("id")
+            if not c_id:
+                continue
+
+            status = str(camp.get("status") or "").lower()
+            if status not in ("ongoing", "upcoming"):
+                continue
+
+            detail, det_err = await self.get_campaign_detail(c_id)
+            if not detail:
+                continue
+
+            info = detail.get("info") or {}
+            camp_store_id = info.get("storeID") or (info.get("selectedStores") or [None])[0]
+            if sid_str and camp_store_id and sid_str != str(camp_store_id).strip():
+                continue
+
+            camp_name = camp.get("name") or info.get("name") or ""
+            discount_info = info.get("discount") or {}
+            disc_type = str(discount_info.get("type") or "").lower()
+            disc_val = discount_info.get("discountValue") or 0
+            disc_disp = str(discount_info.get("discountValueDisplay") or "").strip()
+
+            soc_ranges = info.get("itemSOCTypePriceRanges") or []
+            soc_map = {}
+            for soc_item in soc_ranges:
+                it_id = str(soc_item.get("itemID") or "").strip()
+                delivery_val = (soc_item.get("socTypePriceRanges") or {}).get("Delivery")
+                if it_id and delivery_val:
+                    soc_map[it_id] = parse_numeric_price(delivery_val)
+
+            scope = info.get("scope") or {}
+            items_in_camp = scope.get("items") or []
+            for it_obj in items_in_camp:
+                it_id = str(it_obj.get("itemID") or "").strip()
+                it_name = str(it_obj.get("itemName") or "").strip()
+
+                orig_price = 0.0
+                if "priceInMin" in it_obj and it_obj["priceInMin"] is not None:
+                    orig_price = float(it_obj["priceInMin"]) / 100.0
+                elif it_obj.get("priceDisplay"):
+                    orig_price = parse_numeric_price(it_obj.get("priceDisplay"))
+
+                disc_price = soc_map.get(it_id)
+                if not disc_price or disc_price <= 0:
+                    if "percentage" in disc_type and disc_val:
+                        disc_price = round(orig_price * (1.0 - (float(disc_val) / 100.0)))
+                    elif disc_val:
+                        disc_price = max(0.0, orig_price - float(disc_val))
+                    else:
+                        disc_price = orig_price
+
+                diff = orig_price - disc_price
+                if diff > 0 and orig_price > 0:
+                    pct_calc = round((diff / orig_price) * 100)
+                    slash_pct = f"{pct_calc}%"
+                elif disc_disp and "%" in disc_disp:
+                    slash_pct = disc_disp
+                else:
+                    slash_pct = "0%"
+
+                slash_rp = int(diff) if diff > 0 else 0
+
+                p_entry = {
+                    "campaign_id": c_id,
+                    "campaign_name": camp_name,
+                    "discount_type": disc_type,
+                    "original_price": orig_price,
+                    "discounted_price": disc_price,
+                    "slash_pct": slash_pct,
+                    "slash_rp": slash_rp,
+                    "store_id": camp_store_id or sid_str
+                }
+                if it_id:
+                    promo_map[it_id] = p_entry
+                if it_name:
+                    promo_map[it_name.lower()] = p_entry
+
+        return promo_map
+
 async def perform_login(page, user, pwd):
-    """Robust login steps — clears cookies on mismatch and handles sticky 'Welcome back' pages."""
+    """Robust login steps: clears cookies on mismatch and handles sticky 'Welcome back' pages."""
     CLEAN_LOGIN_URL = (
         "https://weblogin.grab.com/merchant/login"
         "?service_id=MEXUSERS&redirect=https%3A%2F%2Fmerchant.grab.com%2Fportal"
@@ -1064,7 +1454,7 @@ def parse_numeric_price(val):
     except ValueError:
         return 0.0
 
-def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
+def parse_menu(menu_data, store_id, outlet_name, shopee_short_name, campaign_promos_map=None):
     items_list = []
     modifiers_list = []
     
@@ -1139,6 +1529,10 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
             
             # Cek campaign / promo
             campaign = item.get("itemCampaignInfo")
+            promo_lookup = None
+            if campaign_promos_map:
+                promo_lookup = campaign_promos_map.get(str(item_id).strip()) or campaign_promos_map.get(str(item_name).strip().lower())
+
             if campaign and isinstance(campaign, dict):
                 promo_price = campaign.get("campaignPrice") or campaign.get("discountedPrice") or campaign.get("price")
                 if promo_price is not None:
@@ -1154,6 +1548,16 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
                         if discount_amount_val > 1000000 and discounted_price < 100000:
                             discount_amount_val = discount_amount_val / 100.0
                         original_price = discounted_price + discount_amount_val
+            elif promo_lookup and isinstance(promo_lookup, dict):
+                p_orig = promo_lookup.get("original_price")
+                p_disc = promo_lookup.get("discounted_price")
+                if p_orig and p_orig > 0:
+                    original_price = float(p_orig)
+                elif discounted_price > 0:
+                    original_price = discounted_price
+
+                if p_disc and p_disc > 0:
+                    discounted_price = float(p_disc)
             
             promo_val = original_price - discounted_price
             if promo_val < 0:
@@ -1226,7 +1630,15 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
             
             sold_qty = item.get("soldQuantity") or item.get("soldQty") or item.get("sold_qty") or 0
             
-            is_in_promo = (item.get("itemCampaignInfo") is not None) or (item.get("advancedPricing") is not None) or (original_price > discounted_price and original_price > 0)
+            is_in_promo = bool(
+                (item.get("itemCampaignInfo") is not None)
+                or promo_lookup
+                or (item.get("advancedPricing") is not None)
+                or (original_price > discounted_price and original_price > 0)
+            )
+
+            slash_pct_val = (promo_lookup or {}).get("slash_pct")
+            slash_rp_val = (promo_lookup or {}).get("slash_rp") if promo_lookup else promo_val
 
             items_list.append({
                 "Link outlet": f"https://food.grab.com/id/en/restaurant/{store_id}",
@@ -1242,7 +1654,8 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name):
                 "Deskripsi item": item_desc,
                 "Harga item sebelum promo (harga coret)": original_price,
                 "Harga item setelah promo (harga coret)": discounted_price,
-                "Nominal atau persentase promo (harga coret)": promo_val,
+                "Nominal atau persentase promo (harga coret)": slash_rp_val or promo_val,
+                "Persentase promo": slash_pct_val,
                 "Ketersediaan item": availability,
                 "Sedang promo": "Ya" if is_in_promo else "Tidak",
                 "Link foto": photo_url
@@ -1297,6 +1710,7 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                     headless=headless_env,
                     args=[
                         "--no-sandbox",
+                        "--disable-blink-features=AutomationControlled",
                         "--disable-dev-shm-usage",
                         "--disable-gpu",
                         "--disable-extensions",
@@ -1315,8 +1729,10 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
             storage_state = session_path if os.path.exists(session_path) and run_attempt == 0 else None
             context = await browser.new_context(
                 storage_state=storage_state,
-                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
             )
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); window.chrome = { runtime: {} };")
             page = await context.new_page()
             try:
                 from src.core.browser_factory import setup_resource_blocking
@@ -1460,7 +1876,16 @@ async def run_api_download_for_portal(user, pwd, start_date: str = None, end_dat
                 logger.info(f"  [Fetch] Fetching menu API for {store_name} ({store_id})...")
                 menu_data, err = await api.fetch_menu(group_id, store_id, store_name, is_mg)
                 if menu_data:
-                    items, modifiers = parse_menu(menu_data, store_id, store_name, "")
+                    # Ambil pemetaan promo aktif dari Grab Campaign API jika ada
+                    campaign_promos_map = {}
+                    try:
+                        campaign_promos_map = await api.fetch_grab_campaign_promotions(target_store_id=store_id)
+                        if campaign_promos_map:
+                            logger.info(f"  🎯 Memuat {len(campaign_promos_map)} pemetaan promo campaign aktif untuk {store_name} ({store_id})")
+                    except Exception as camp_err:
+                        logger.warning(f"  ⚠️ Gagal mengambil campaign promos untuk {store_id}: {camp_err}")
+
+                    items, modifiers = parse_menu(menu_data, store_id, store_name, "", campaign_promos_map=campaign_promos_map)
                     all_items.extend(items)
                     all_modifiers.extend(modifiers)
                     logger.info(f"  ✓ {store_name}: {len(items)} items, {len(modifiers)} modifiers")
