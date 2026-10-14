@@ -100,13 +100,28 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                 logger.warning(f"Grab dashboard navigate warning: {e}")
 
             api = GrabAPI(page, username, password)
-            group_id = await api.get_merchant_group_id()
+
+            # Check if navigation was redirected to login / SSO screen
+            cur_url = str(getattr(page, "url", "") or "").lower()
+            is_on_login = any(dom in cur_url for dom in ("login.grab.com", "weblogin.grab.com", "saved-accounts"))
+
+            group_id = None
+            if not is_on_login:
+                try:
+                    group_id = await api.get_merchant_group_id()
+                except Exception as e_grp:
+                    logger.info("Initial merchant group check skipped (%s); checking login.", e_grp)
+                    group_id = None
 
             async def wait_for_merchant_group_id(timeout_seconds=45):
                 """Wait for the SSO handoff to expose the merchant selector."""
                 deadline = asyncio.get_running_loop().time() + timeout_seconds
                 while True:
-                    resolved_group_id = await api.get_merchant_group_id()
+                    resolved_group_id = None
+                    try:
+                        resolved_group_id = await api.get_merchant_group_id()
+                    except Exception:
+                        pass
                     if resolved_group_id:
                         return resolved_group_id
                     if asyncio.get_running_loop().time() >= deadline:
@@ -114,7 +129,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     await asyncio.sleep(2)
 
             if not group_id:
-                logger.info("Grab session expired/invalid. Running perform_login...")
+                logger.info("Grab session expired/invalid or on login page. Running perform_login...")
                 login_ok = False
                 try:
                     login_ok = await perform_login(page, username, password)
@@ -145,7 +160,10 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
             # Resolve target store / merchant IDs
             target_sid = store_id
             if not target_sid:
-                merchants = await api.get_all_merchants_and_stores()
+                try:
+                    merchants = await api.get_all_merchants_and_stores()
+                except Exception:
+                    merchants = []
                 if merchants and len(merchants) > 0:
                     target_sid = merchants[0].get("id") or merchants[0].get("store_id")
 
@@ -157,6 +175,19 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                 # API request. Reuse that mapping for C5 writes instead of
                 # assuming merchant-selector's first group belongs to SID.
                 intercepted = await api.get_merchant_ids_from_page_requests(target_store_id=target_sid)
+                
+                # Check if navigating to SID redirected to login/SSO screen
+                cur_url = str(getattr(page, "url", "") or "").lower()
+                if any(dom in cur_url for dom in ("login.grab.com", "weblogin.grab.com", "saved-accounts")):
+                    logger.warning("Grab redirected to login during SID inspection; performing re-login...")
+                    ok_rel = await perform_login(page, username, password)
+                    if not ok_rel and password != "Master@123":
+                        ok_rel = await perform_login(page, username, "Master@123")
+                    if ok_rel:
+                        await wait_for_merchant_group_id()
+                        await context.storage_state(path=session_path)
+                        intercepted = await api.get_merchant_ids_from_page_requests(target_store_id=target_sid)
+
                 sid_key = str(target_sid).strip().casefold()
                 for entry in intercepted:
                     if str(entry.get("store_id") or "").strip().casefold() == sid_key:
@@ -165,7 +196,11 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                             logger.info("Resolved Grab group from outlet page request for SID %s.", target_sid)
                             return resolved
 
-                selector_stores = await api.get_all_merchants_and_stores()
+                try:
+                    selector_stores = await api.get_all_merchants_and_stores()
+                except Exception as e_sel:
+                    logger.warning("Failed to get all merchants and stores: %s", e_sel)
+                    selector_stores = []
                 exact_matches = [
                     entry for entry in selector_stores
                     if str(entry.get("store_id") or "").strip().casefold() == sid_key

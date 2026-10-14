@@ -126,6 +126,12 @@ class GrabAPI:
                 if csrf:
                     req_headers["x-csrf-token"] = csrf
 
+        # Check if page is currently on a login/SSO URL before evaluating fetch (which would cause CORS Failed to fetch)
+        cur_url = str(getattr(self.page, "url", "") or "").lower()
+        if any(dom in cur_url for dom in ("login.grab.com", "weblogin.grab.com", "saved-accounts")):
+            logger.info("  [API] Browser is currently on Grab login portal (%s). Returning 401 for re-login.", cur_url)
+            return {"status": 401, "error": f"Page redirected to login: {self.page.url}"}
+
         headers_js = json.dumps(req_headers)
         body_js = json.dumps(body) if body is not None else "null"
         
@@ -197,6 +203,12 @@ class GrabAPI:
                 if res.get("status") == 0 and res.get("error"):
                     err_msg = res["error"].lower()
                     if "failed to fetch" in err_msg or "networkerror" in err_msg or "aborted" in err_msg:
+                        # Check if page was redirected to a login URL during evaluate
+                        cur_url = str(getattr(self.page, "url", "") or "").lower()
+                        if any(dom in cur_url for dom in ("login.grab.com", "weblogin.grab.com", "saved-accounts")):
+                            logger.info("  [API] Page redirected to login screen during fetch (%s). Returning 401.", cur_url)
+                            return {"status": 401, "error": f"Page redirected to login: {self.page.url}"}
+
                         if attempt < 4:
                             logger.info(f"  [Retry] Network error detected in JS fetch, retrying... ({attempt+1})")
                             try:
@@ -206,6 +218,12 @@ class GrabAPI:
                             await asyncio.sleep(3)
                             continue
                         else:
+                            try:
+                                content_l = (await self.page.content()).lower()
+                                if "welcome back" in content_l or "login" in cur_url:
+                                    logger.info("  [API] Final attempt shows login content. Returning 401.")
+                                    return {"status": 401, "error": f"Page on login screen: {self.page.url}"}
+                            except: pass
                             raise SessionStuckError(f"Network stuck for {self.username} after 5 attempts")
                 
                 return res
@@ -223,8 +241,14 @@ class GrabAPI:
 
     async def get_merchant_group_id(self):
         """GET /troy/user-profile/v1/merchant-selector"""
+        cur_url = str(getattr(self.page, "url", "") or "").lower()
+        if any(dom in cur_url for dom in ("login.grab.com", "weblogin.grab.com", "saved-accounts")):
+            return None
         url = f"{self.base_url}/troy/user-profile/v1/merchant-selector"
-        resp = await self.call_api(url)
+        try:
+            resp = await self.call_api(url)
+        except SessionStuckError:
+            return None
         status = resp.get("status")
         if status == 200:
             data = resp.get("data", {})
@@ -413,11 +437,20 @@ class GrabAPI:
             )
             await self.page.wait_for_timeout(3000)
 
+            cur_url = str(getattr(self.page, "url", "") or "").lower()
+            if any(dom in cur_url for dom in ("login.grab.com", "weblogin.grab.com", "saved-accounts")):
+                logger.info("  [Intercept] Page redirected to login screen: %s", self.page.url)
+                return []
+
             # Jika halaman loaded dari cache → paksa reload
             if not captured:
                 logger.info("  [Intercept] No requests caught (likely cached). Forcing reload...")
                 await self.page.reload(wait_until="networkidle", timeout=30000)
                 await self.page.wait_for_timeout(4000)
+                cur_url = str(getattr(self.page, "url", "") or "").lower()
+                if any(dom in cur_url for dom in ("login.grab.com", "weblogin.grab.com", "saved-accounts")):
+                    logger.info("  [Intercept] Reload resulted in login screen: %s", self.page.url)
+                    return []
 
             # Fallback: cek URL apakah mengandung store ID
             # (beberapa versi portal redirect ke /food/menu/{storeId})
