@@ -65,18 +65,24 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
 
     async with async_playwright() as p:
         proc = None
+        # Determine headless mode: on Linux servers or in Docker without $DISPLAY, headless MUST be True.
+        # Can be overridden via HEADLESS_GRAB environment variable (defaults to True).
+        headless_mode = os.environ.get("HEADLESS_GRAB", "true").lower() in ("true", "1", "yes")
+        if not os.environ.get("DISPLAY"):
+            headless_mode = True
+
         use_system_chromium = os.path.exists("/usr/lib/chromium/chromium") or os.path.exists("/usr/bin/chromium")
         if use_system_chromium:
             chromium_bin = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else "/usr/bin/chromium"
             browser = await p.chromium.launch(
                 executable_path=chromium_bin,
-                headless=False,
+                headless=headless_mode,
                 args=["--no-sandbox", "--no-zygote", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--disable-gpu"],
             )
         else:
             browser = await p.chromium.launch(
-                headless=False,
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+                headless=headless_mode,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--disable-gpu"]
             )
 
         context = await browser.new_context(
