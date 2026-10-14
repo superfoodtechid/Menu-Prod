@@ -2738,7 +2738,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
 
                 final_name = new_name if (want_name and new_name) else (orig_item.get('name') or upd.get('item_name') or "Item Baru")
                 final_photo = new_photo if (want_photo and new_photo) else orig_item.get('image_url', orig_item.get('image', ''))
-                final_desc = new_desc if (want_desc and new_desc) else orig_item.get('description', '')
+                final_desc = new_desc if want_desc else orig_item.get('description', '')
 
                 # A PHOTO_CHANGE must use GoFood's cloud upload flow. Sending a
                 # Drive URL directly makes the API store a non-existent CDN path.
@@ -4204,9 +4204,21 @@ async def parse_c5_endpoint(
             diff_details.append({"column": "Photo Link", "old_val": base_img or "(Kosong)", "new_val": photo_link})
 
         # 4. Description Change
-        description_changed = bool(description and norm_str(description) != norm_str(base_desc))
+        # C5 is a full snapshot of the pulled menu: a blank Description cell
+        # for an existing baseline item means the user intentionally cleared
+        # the description. New items with a blank description remain unchanged
+        # here because they have no baseline record to compare against.
+        description_changed = bool(
+            desc_col
+            and base_rec is not None
+            and norm_str(description) != norm_str(base_desc)
+        )
         if description_changed:
-            diff_details.append({"column": "Description", "old_val": base_desc or "(Kosong)", "new_val": description})
+            diff_details.append({
+                "column": "Description",
+                "old_val": base_desc or "(Kosong)",
+                "new_val": description or "(Dikosongkan)",
+            })
 
         # Offline price is saved as C5 bookkeeping and never participates in
         # the platform push plan. Track it separately so the preview can show

@@ -1761,7 +1761,9 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                     <div>
                       <span className="text-[11px] font-semibold text-slate-400 dark:text-zinc-500 block">Deskripsi</span>
                       <p className="text-slate-700 dark:text-zinc-300 mt-0.5 text-[11px] line-clamp-3">
-                        {diffModalItem.description || "-"}
+                        {diffModalItem.changes?.description_changed && !diffModalItem.description?.trim()
+                          ? "(Dikosongkan)"
+                          : diffModalItem.description || "-"}
                       </p>
                     </div>
                   </div>
