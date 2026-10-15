@@ -4,6 +4,9 @@ import socket
 import asyncio
 import platform
 import subprocess
+import shutil
+import tempfile
+import urllib.request
 from contextlib import contextmanager, asynccontextmanager
 from rich.console import Console
 
@@ -37,6 +40,61 @@ def kill_process_tree(proc):
                 proc.wait(timeout=2)
     except Exception as e:
         console.print(f"Note during Chromium subprocess termination: {e}")
+    finally:
+        if hasattr(proc, "_log_file") and proc._log_file:
+            try:
+                proc._log_file.close()
+            except Exception:
+                pass
+        if hasattr(proc, "_user_data_dir") and proc._user_data_dir and os.path.exists(proc._user_data_dir):
+            try:
+                shutil.rmtree(proc._user_data_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+def _wait_for_cdp_ready(port: int, proc: subprocess.Popen, log_file, timeout: float = 15.0):
+    start = time.time()
+    while time.time() - start < timeout:
+        if proc.poll() is not None:
+            log_content = ""
+            if log_file:
+                try:
+                    log_file.seek(0)
+                    log_content = log_file.read()[-1000:]
+                except Exception:
+                    pass
+            raise RuntimeError(f"Chromium process exited prematurely with code {proc.returncode}. Log:\n{log_content}")
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.5) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.25)
+    raise TimeoutError(f"Chromium did not start listening on CDP port {port} within {timeout} seconds.")
+
+async def _async_wait_for_cdp_ready(port: int, proc: subprocess.Popen, log_file, timeout: float = 15.0):
+    start = time.time()
+    while time.time() - start < timeout:
+        if proc.poll() is not None:
+            log_content = ""
+            if log_file:
+                try:
+                    log_file.seek(0)
+                    log_content = log_file.read()[-1000:]
+                except Exception:
+                    pass
+            raise RuntimeError(f"Chromium process exited prematurely with code {proc.returncode}. Log:\n{log_content}")
+        try:
+            s = socket.socket()
+            s.settimeout(0.3)
+            s.connect(('127.0.0.1', port))
+            s.close()
+            return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.25)
+    raise TimeoutError(f"Chromium did not start listening on CDP port {port} within {timeout} seconds.")
 
 def cleanup_zombie_chromium():
     """Utility to clean up any orphaned or stale Chromium debugging processes."""
@@ -73,10 +131,14 @@ def launch_universal_playwright_browser(p, headless=True):
     if is_arm_architecture():
         cdp_port = get_free_port()
         chromium_bin = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else "/usr/bin/chromium"
+        user_data_dir = tempfile.mkdtemp(prefix=f"chrome_cdp_{cdp_port}_")
+        log_path = os.path.join(user_data_dir, "chromium.log")
+        log_file = open(log_path, "w+")
         
         chrome_args = [
             chromium_bin,
             "--no-sandbox",
+            "--disable-setuid-sandbox",
             "--no-zygote",
             "--in-process-gpu",
             "--disable-gpu",
@@ -84,15 +146,22 @@ def launch_universal_playwright_browser(p, headless=True):
             "--disable-gpu-sandbox",
             "--disable-blink-features=AutomationControlled",
             "--dbus-stub",
-            f"--remote-debugging-port={cdp_port}"
+            "--remote-debugging-address=127.0.0.1",
+            f"--remote-debugging-port={cdp_port}",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
         ]
         if headless:
             chrome_args.append("--headless=new")
 
-        proc = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2.5)
-        
+        proc = subprocess.Popen(chrome_args, stdout=log_file, stderr=log_file)
+        proc._user_data_dir = user_data_dir
+        proc._log_file = log_file
+
         try:
+            _wait_for_cdp_ready(cdp_port, proc, log_file, timeout=15.0)
             browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
             return browser, proc
         except Exception as e:
@@ -129,10 +198,14 @@ async def async_launch_universal_playwright_browser(p, headless=True):
     if is_arm_architecture():
         cdp_port = get_free_port()
         chromium_bin = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else "/usr/bin/chromium"
+        user_data_dir = tempfile.mkdtemp(prefix=f"chrome_cdp_{cdp_port}_")
+        log_path = os.path.join(user_data_dir, "chromium.log")
+        log_file = open(log_path, "w+")
         
         chrome_args = [
             chromium_bin,
             "--no-sandbox",
+            "--disable-setuid-sandbox",
             "--no-zygote",
             "--in-process-gpu",
             "--disable-gpu",
@@ -140,15 +213,22 @@ async def async_launch_universal_playwright_browser(p, headless=True):
             "--disable-gpu-sandbox",
             "--disable-blink-features=AutomationControlled",
             "--dbus-stub",
-            f"--remote-debugging-port={cdp_port}"
+            "--remote-debugging-address=127.0.0.1",
+            f"--remote-debugging-port={cdp_port}",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
         ]
         if headless:
             chrome_args.append("--headless=new")
 
-        proc = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        await asyncio.sleep(2.5)
-        
+        proc = subprocess.Popen(chrome_args, stdout=log_file, stderr=log_file)
+        proc._user_data_dir = user_data_dir
+        proc._log_file = log_file
+
         try:
+            await _async_wait_for_cdp_ready(cdp_port, proc, log_file, timeout=15.0)
             browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
             return browser, proc
         except Exception as e:

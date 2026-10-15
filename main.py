@@ -1170,35 +1170,8 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     session_path = os.path.join(SESSION_DIR, f"{username}.json")
                     storage_state = session_path if os.path.exists(session_path) else None
                     
-                    proc = None
-                    use_system_chromium = os.path.exists("/usr/lib/chromium/chromium") or os.path.exists("/usr/bin/chromium")
-                    if use_system_chromium:
-                        import socket, subprocess
-                        def get_free_port():
-                            s = socket.socket()
-                            s.bind(('', 0))
-                            port = s.getsockname()[1]
-                            s.close()
-                            return port
-                        cdp_port = get_free_port()
-                        chromium_bin = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else "/usr/bin/chromium"
-                        proc = subprocess.Popen([
-                            chromium_bin, "--no-sandbox", "--no-zygote", "--in-process-gpu", "--disable-gpu",
-                            "--disable-dev-shm-usage", "--disable-gpu-sandbox", "--disable-blink-features=AutomationControlled",
-                            "--dbus-stub", f"--remote-debugging-port={cdp_port}", "--headless=new"
-                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        await asyncio.sleep(3.0)
-                        browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
-                    else:
-                        browser = await p.chromium.launch(
-                            headless=True,
-                            args=[
-                                "--no-sandbox",
-                                "--disable-blink-features=AutomationControlled",
-                                "--disable-dev-shm-usage",
-                                "--disable-gpu"
-                            ]
-                        )
+                    from src.core.browser_factory import async_launch_universal_playwright_browser
+                    browser, proc = await async_launch_universal_playwright_browser(p, headless=True)
                     context = await browser.new_context(
                         storage_state=storage_state,
                         viewport={"width": 1920, "height": 1080},
@@ -1245,7 +1218,8 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                         else:
                             await browser.close()
                             if proc:
-                                proc.terminate()
+                                from src.core.browser_factory import kill_process_tree
+                                kill_process_tree(proc)
                             return "Grab login failed."
 
                     # Navigasi ke store-specific menu page untuk mengaktifkan konteks sesi store di Grab
@@ -1266,7 +1240,8 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                     if err or not menu_data:
                         await browser.close()
                         if proc:
-                            proc.terminate()
+                            from src.core.browser_factory import kill_process_tree
+                            kill_process_tree(proc)
                         return f"Failed to fetch Grab menu: {err}"
 
                     # Detect if menu_data is from a Menu Group V2
@@ -1553,10 +1528,8 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
 
                     await browser.close()
                     if proc:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
+                        from src.core.browser_factory import kill_process_tree
+                        kill_process_tree(proc)
                     return None
 
             import threading
