@@ -1780,10 +1780,10 @@ export default function EditHargaTab({ API_BASE_URL, API_SECRET_KEY }) {
 
             <div className="rounded-xl bg-zinc-50 dark:bg-zinc-950/60 p-4 border border-zinc-200/80 dark:border-zinc-800 text-xs text-zinc-600 dark:text-zinc-400 space-y-2">
               <p className="leading-relaxed">
-                Sebelum melakukan perubahan harga, pastikan seluruh diskon dan promo aktif pada outlet telah <strong>dinonaktifkan di portal GrabMerchant</strong>.
+                Sistem akan otomatis melepas promo yang melekat pada item sebelum memperbarui harga.
               </p>
-              <p className="leading-relaxed text-rose-600 dark:text-rose-400 font-medium">
-                Pembaruan harga akan otomatis ditolak oleh sistem Grab jika menu masih terdaftar dalam program promo aktif.
+              <p className="leading-relaxed text-amber-700 dark:text-amber-400 font-medium">
+                <strong>Penting:</strong> Setelah harga berhasil diperbarui, pastikan promo diaktifkan kembali melalui aplikasi GrabMerchant.
               </p>
             </div>
 
