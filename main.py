@@ -3545,12 +3545,14 @@ async def parse_c5_endpoint(
 
     headers = []
     data_row1 = rows[0]
-    explicit_header_names = {
-        str(value).strip()
-        for value in data_row1
-        if value is not None and str(value).strip()
-    }
     max_cols = max(len(data_row1), len(raw_row1))
+    explicit_header_names = set()
+    for c_idx in range(max_cols):
+        r_val = raw_row1[c_idx] if c_idx < len(raw_row1) else None
+        d_val = data_row1[c_idx] if c_idx < len(data_row1) else None
+        is_formula = hasattr(r_val, 'text') or (isinstance(r_val, str) and str(r_val).startswith('='))
+        if not is_formula and d_val is not None and str(d_val).strip():
+            explicit_header_names.add(str(d_val).strip())
     for c_idx in range(max_cols):
         d_val = data_row1[c_idx] if c_idx < len(data_row1) else None
         r_val = raw_row1[c_idx] if c_idx < len(raw_row1) else None
