@@ -1328,32 +1328,20 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                             campaign = orig_item.get("itemCampaignInfo")
                             if campaign and isinstance(campaign, dict):
                                 item_label = orig_item.get("itemName", real_item_id)
-                                err_promo = f"Item '{item_label}' sedang dalam promo/slash price aktif di GrabFood. Perubahan harga dasar dikunci."
-                                logger.warning(f"🔒 Promo Grab Terdeteksi: {err_promo}")
-                                trail = AuditTrail(
-                                    job_id=job.id,
-                                    outlet_id=outlet.id,
-                                    item_id=real_item_id,
-                                    item_name=item_label,
-                                    change_type="PRICE_UPDATE",
-                                    field_changed="price",
-                                    old_value=str(old_p),
-                                    new_value=str(new_price),
-                                    status="SKIPPED_ACTIVE_PROMO",
-                                    error_message=err_promo
-                                )
-                                thread_db.add(trail)
-                                thread_db.commit()
-                                items_breakdown.append({
-                                    "item_id": real_item_id,
-                                    "item_name": item_label,
-                                    "old_price": old_p,
-                                    "requested_price": new_price,
-                                    "verified_price": old_p,
-                                    "status": "SKIPPED_ACTIVE_PROMO",
-                                    "error_message": err_promo
-                                })
-                                continue
+                                logger.info(f"🔍 [Grab Edit Harga] Item '{item_label}' ({real_item_id}) sedang dalam promo aktif. Mencopot promo sebelum update harga...")
+                                try:
+                                    canceled_camps, camp_err = await api.cancel_promos_for_item(
+                                        store_id=store_id,
+                                        item_id=str(real_item_id),
+                                        item_name=item_label
+                                    )
+                                    if canceled_camps:
+                                        logger.info(f"🔓 [Grab Edit Harga] Berhasil mencopot promo aktif: {canceled_camps}")
+                                        await asyncio.sleep(2.0)
+                                    elif camp_err:
+                                        logger.warning(f"⚠️ [Grab Edit Harga] Gagal mencopot promo: {camp_err}")
+                                except Exception as e_promo:
+                                    logger.warning(f"⚠️ [Grab Edit Harga] Error saat mencopot promo: {e_promo}")
 
                             # 2. Cek Kuota Bulanan Grab (Maksimal 15x Perubahan Harga per Item per 30 Hari)
                             thirty_days_ago = datetime.utcnow() - timedelta(days=30)
@@ -1443,8 +1431,23 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                 if not (upsert_res and not upsert_err):
                                     raw_err = str(upsert_err or "Unknown Grab API error.")
                                     if "ItemPromoAttributeLimit" in raw_err or "not allowed during item promotion" in raw_err.lower() or ("409" in raw_err and "promo" in raw_err.lower()):
+                                        logger.info(f"🔄 [Grab Edit Harga] Terdeteksi promo aktif saat update. Mencopot promo untuk '{item_label}'...")
+                                        try:
+                                            await api.cancel_promos_for_item(store_id=store_id, item_id=str(real_item_id), item_name=item_label)
+                                            await asyncio.sleep(2.0)
+                                            upsert_res, upsert_err = await api.upsert_item(
+                                                mgid, store_id, category_id, item_data,
+                                                is_menu_group=is_menu_group_detected,
+                                                menu_group_id=detected_menu_group_id
+                                            )
+                                        except Exception as e_retry:
+                                            logger.warning(f"⚠️ [Grab Edit Harga] Retry cancel promo gagal: {e_retry}")
+
+                                if not (upsert_res and not upsert_err):
+                                    raw_err = str(upsert_err or "Unknown Grab API error.")
+                                    if "ItemPromoAttributeLimit" in raw_err or "not allowed during item promotion" in raw_err.lower() or ("409" in raw_err and "promo" in raw_err.lower()):
                                         status_str = "SKIPPED_ACTIVE_PROMO"
-                                        err_msg = "Menu sedang dalam promo aktif di GrabFood. Perubahan harga tidak diizinkan selama masa promo."
+                                        err_msg = "Menu sedang dalam promo aktif di GrabFood. Gagal mencopot promo otomatis."
                                     else:
                                         status_str = "FAILED"
                                         err_msg = raw_err
@@ -3545,12 +3548,14 @@ async def parse_c5_endpoint(
 
     headers = []
     data_row1 = rows[0]
-    explicit_header_names = {
-        str(value).strip()
-        for value in data_row1
-        if value is not None and str(value).strip()
-    }
     max_cols = max(len(data_row1), len(raw_row1))
+    explicit_header_names = set()
+    for c_idx in range(max_cols):
+        r_val = raw_row1[c_idx] if c_idx < len(raw_row1) else None
+        d_val = data_row1[c_idx] if c_idx < len(data_row1) else None
+        is_formula = hasattr(r_val, 'text') or (isinstance(r_val, str) and str(r_val).startswith('='))
+        if not is_formula and d_val is not None and str(d_val).strip():
+            explicit_header_names.add(str(d_val).strip())
     for c_idx in range(max_cols):
         d_val = data_row1[c_idx] if c_idx < len(data_row1) else None
         r_val = raw_row1[c_idx] if c_idx < len(raw_row1) else None
@@ -5323,6 +5328,7 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
                 promo_details = shopee_promo.get("promo_details")
                 is_in_promo = True
 
+        platform_lower = (outlet_obj.platform or "").lower() if outlet_obj else ""
         if not promo_details:
             name_lower = ri["name"].lower()
             is_name_nominal = "nominal" in name_lower
@@ -5332,7 +5338,7 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
                 promo_type = "NOMINAL"
                 diff = (base_p - selling_p) if (base_p > selling_p and base_p > 0) else slash_rp_val
                 promo_value = f"Rp {diff:,}" if diff > 0 else (f"Rp {slash_rp_val:,}" if slash_rp_val > 0 else "Nominal")
-                is_price_locked = True
+                is_price_locked = False if platform_lower == "grab" else True
             elif is_name_percentage:
                 promo_type = "PERCENTAGE"
                 if has_pct:
@@ -5350,7 +5356,7 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
             elif has_rp:
                 promo_type = "NOMINAL"
                 promo_value = f"Rp {slash_rp_val:,}"
-                is_price_locked = True   # Nominal promo locks base price
+                is_price_locked = False if platform_lower == "grab" else True   # Nominal promo locks base price on GoFood/Shopee, but on Grab promo is detached
             elif is_in_promo:
                 # Fallback deduction if % or Rp not explicitly formatted
                 if has_price_diff:
@@ -5364,7 +5370,7 @@ def get_outlet_menu_items(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
                     else:
                         promo_type = "NOMINAL"
                         promo_value = f"Rp {diff:,}"
-                        is_price_locked = True
+                        is_price_locked = False if platform_lower == "grab" else True
                 else:
                     promo_type = "NOMINAL"
                     promo_value = "Promo Aktif"
