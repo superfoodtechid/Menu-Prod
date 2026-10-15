@@ -52,7 +52,7 @@ def kill_process_tree(proc):
             except Exception:
                 pass
 
-def _wait_for_cdp_ready(port: int, proc: subprocess.Popen, log_file, timeout: float = 15.0):
+def _wait_for_cdp_ready(port: int, proc: subprocess.Popen, log_file, timeout: float = 30.0):
     start = time.time()
     while time.time() - start < timeout:
         if proc.poll() is not None:
@@ -70,10 +70,10 @@ def _wait_for_cdp_ready(port: int, proc: subprocess.Popen, log_file, timeout: fl
                     return True
         except Exception:
             pass
-        time.sleep(0.25)
+        time.sleep(0.1)
     raise TimeoutError(f"Chromium did not start listening on CDP port {port} within {timeout} seconds.")
 
-async def _async_wait_for_cdp_ready(port: int, proc: subprocess.Popen, log_file, timeout: float = 15.0):
+async def _async_wait_for_cdp_ready(port: int, proc: subprocess.Popen, log_file, timeout: float = 30.0):
     start = time.time()
     while time.time() - start < timeout:
         if proc.poll() is not None:
@@ -93,7 +93,7 @@ async def _async_wait_for_cdp_ready(port: int, proc: subprocess.Popen, log_file,
             return True
         except Exception:
             pass
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.1)
     raise TimeoutError(f"Chromium did not start listening on CDP port {port} within {timeout} seconds.")
 
 def cleanup_zombie_chromium():
@@ -119,6 +119,36 @@ OPTIMIZED_CHROMIUM_ARGS = [
     "--renderer-process-limit=2",
 ]
 
+LEAN_CONTAINER_CHROMIUM_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-breakpad",
+    "--disable-client-side-phishing-detection",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-default-apps",
+    "--disable-extensions",
+    "--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,AudioServiceSandbox",
+    "--disable-hang-monitor",
+    "--disable-ipc-flooding-protection",
+    "--disable-popup-blocking",
+    "--disable-prompt-on-repost",
+    "--disable-renderer-backgrounding",
+    "--disable-sync",
+    "--force-color-profile=srgb",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--password-store=basic",
+    "--use-mock-keychain",
+]
+
 def launch_universal_playwright_browser(p, headless=True):
     """
     Universal Playwright Chromium Launcher (Sync):
@@ -137,21 +167,10 @@ def launch_universal_playwright_browser(p, headless=True):
         
         chrome_args = [
             chromium_bin,
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--no-zygote",
-            "--in-process-gpu",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
-            "--disable-gpu-sandbox",
-            "--disable-blink-features=AutomationControlled",
-            "--dbus-stub",
+            *LEAN_CONTAINER_CHROMIUM_ARGS,
             "--remote-debugging-address=127.0.0.1",
             f"--remote-debugging-port={cdp_port}",
             f"--user-data-dir={user_data_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
         ]
         if headless:
             chrome_args.append("--headless=new")
@@ -161,7 +180,7 @@ def launch_universal_playwright_browser(p, headless=True):
         proc._log_file = log_file
 
         try:
-            _wait_for_cdp_ready(cdp_port, proc, log_file, timeout=15.0)
+            _wait_for_cdp_ready(cdp_port, proc, log_file, timeout=30.0)
             browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
             return browser, proc
         except Exception as e:
@@ -204,21 +223,10 @@ async def async_launch_universal_playwright_browser(p, headless=True):
         
         chrome_args = [
             chromium_bin,
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--no-zygote",
-            "--in-process-gpu",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
-            "--disable-gpu-sandbox",
-            "--disable-blink-features=AutomationControlled",
-            "--dbus-stub",
+            *LEAN_CONTAINER_CHROMIUM_ARGS,
             "--remote-debugging-address=127.0.0.1",
             f"--remote-debugging-port={cdp_port}",
             f"--user-data-dir={user_data_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
         ]
         if headless:
             chrome_args.append("--headless=new")
@@ -228,7 +236,7 @@ async def async_launch_universal_playwright_browser(p, headless=True):
         proc._log_file = log_file
 
         try:
-            await _async_wait_for_cdp_ready(cdp_port, proc, log_file, timeout=15.0)
+            await _async_wait_for_cdp_ready(cdp_port, proc, log_file, timeout=30.0)
             browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
             return browser, proc
         except Exception as e:
