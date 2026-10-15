@@ -2121,6 +2121,7 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
         combined_path,
         previous_workbook=previous_workbook,
         return_restore_count=True,
+        db=db,
     )
     if not combine_result or not combine_result.get("success"):
         raise HTTPException(status_code=500, detail="Gagal menggabungkan file C5.")
@@ -3711,13 +3712,31 @@ async def parse_c5_endpoint(
     _offline_baseline_cache = {}
 
     def load_offline_baseline(sid):
-        """Read the latest combined C5 snapshot for locally saved offline prices."""
+        """Read the stored offline prices from DB first, then fallback to combined C5 snapshot."""
         sid_key = str(sid or "").strip()
         if sid_key in _offline_baseline_cache:
             return _offline_baseline_cache[sid_key]
 
-        combined_dir = Path(__file__).parent / "data" / "exports" / "combined"
         result = {"by_id": {}, "by_name": {}, "file": None}
+
+        # 1. Check database first
+        try:
+            from menu_core.database import get_offline_prices_by_store
+            db_off = get_offline_prices_by_store(db, [sid_key])
+            for (s, iid), vals in db_off.get("by_id", {}).items():
+                if vals.get("offline_price") is not None:
+                    result["by_id"][iid] = vals["offline_price"]
+            for (s, norm_n), vals in db_off.get("by_name", {}).items():
+                if vals.get("offline_price") is not None:
+                    result["by_name"][norm_n] = vals["offline_price"]
+            if result["by_id"] or result["by_name"]:
+                result["file"] = "database"
+                _offline_baseline_cache[sid_key] = result
+                return result
+        except Exception as e_db:
+            logger.debug("Tidak dapat membaca baseline harga offline dari DB (%s).", e_db)
+
+        combined_dir = Path(__file__).parent / "data" / "exports" / "combined"
         if not combined_dir.exists():
             _offline_baseline_cache[sid_key] = result
             return result
@@ -4023,6 +4042,7 @@ async def parse_c5_endpoint(
     c5_parsed_ids_by_sid = {}
     c5_parsed_names_by_sid = {}
     drive_image_cache = {}
+    offline_records_to_sync = []
 
     def is_drive_folder_link(value):
         value = str(value or "").strip()
@@ -4224,6 +4244,7 @@ async def parse_c5_endpoint(
         # the platform push plan. Track it separately so the preview can show
         # a badge without inflating `is_changed` or the push item count.
         offline_price = parse_price(get_val(row, "Offline Price (Rp)"))
+        offline_adj = parse_price(get_val(row, "Offline Adjustment (Rp)"))
         offline_baseline = load_offline_baseline(sid)
         if item_id and item_id in offline_baseline["by_id"]:
             baseline_offline_price = offline_baseline["by_id"][item_id]
@@ -4236,6 +4257,16 @@ async def parse_c5_endpoint(
                 "column": "Harga Offline (disimpan di C5)",
                 "old_val": f"Rp {baseline_offline_price:,.0f}" if baseline_offline_price is not None else "(Kosong)",
                 "new_val": f"Rp {offline_price:,.0f}" if offline_price is not None else "(Dikosongkan)",
+            })
+
+        if offline_price is not None or offline_adj is not None:
+            offline_records_to_sync.append({
+                "store_id": sid,
+                "item_id": item_id or None,
+                "item_name": item_name or display_name,
+                "offline_price": offline_price,
+                "offline_adjustment": offline_adj,
+                "source": "c5_upload",
             })
 
         # 5. Price Change
@@ -4457,6 +4488,15 @@ async def parse_c5_endpoint(
                         "invalid": False,
                     }
                 })
+
+    if offline_records_to_sync:
+        try:
+            from menu_core.database import bulk_upsert_offline_prices
+            saved_offline = bulk_upsert_offline_prices(db, offline_records_to_sync)
+            if saved_offline > 0:
+                logger.info(f"💾 Tersimpan/terupdate {saved_offline} harga offline ke database dari C5.")
+        except Exception as e_off:
+            logger.warning(f"Gagal menyimpan harga offline ke database: {e_off}")
 
     return {
         "success": True,

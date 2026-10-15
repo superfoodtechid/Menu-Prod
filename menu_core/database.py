@@ -1,6 +1,10 @@
 import os
+import re
 import uuid
+import logging
 from datetime import datetime
+
+logger = logging.getLogger("FoodMasterAPI.Database")
 from sqlalchemy import (
     create_engine, Column, String, Boolean, DateTime, Integer, Text, ForeignKey, UniqueConstraint, JSON, inspect, text, event, Engine, select, func
 )
@@ -203,6 +207,176 @@ class AuditTrail(Base):
         return f"<AuditTrail {self.change_type} {self.item_name} -> {self.status}>"
 
 
+class ItemOfflinePrice(Base):
+    __tablename__ = "item_offline_prices"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    store_id = Column(String(100), nullable=False, index=True)
+    item_id = Column(String(100), nullable=True, index=True)
+    item_name = Column(String(255), nullable=False)
+    normalized_item_name = Column(String(255), nullable=False, index=True)
+    offline_price = Column(Integer, nullable=True)
+    offline_adjustment = Column(Integer, nullable=True)
+    source = Column(String(50), default="c5_upload")
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("store_id", "item_id", name="uq_offline_store_item_id"),
+    )
+
+    def __repr__(self):
+        return f"<ItemOfflinePrice {self.store_id}:{self.item_id or self.normalized_item_name} -> Rp {self.offline_price}>"
+
+
+def normalize_offline_item_name(value):
+    """Normalize item name for conservative fallback matching."""
+    if value is None:
+        return ""
+    val_str = str(value).strip().casefold()
+    val_str = re.sub(r'[^\w\s]', ' ', val_str, flags=re.UNICODE)
+    return re.sub(r'\s+', ' ', val_str).strip()
+
+
+def get_offline_prices_by_store(db, store_ids: list) -> dict:
+    """
+    Returns {'by_id': {(sid, iid): {'offline_price': p, 'offline_adjustment': a}},
+             'by_name': {(sid, norm_name): {'offline_price': p, 'offline_adjustment': a}}}
+    for the requested store_ids.
+    """
+    if not db or not store_ids:
+        return {'by_id': {}, 'by_name': {}}
+
+    clean_sids = [str(s).strip() for s in store_ids if str(s).strip()]
+    if not clean_sids:
+        return {'by_id': {}, 'by_name': {}}
+
+    rows = db.query(ItemOfflinePrice).filter(ItemOfflinePrice.store_id.in_(clean_sids)).all()
+
+    by_id = {}
+    by_name_candidates = {}
+    name_counts = {}
+
+    for r in rows:
+        sid = str(r.store_id).strip()
+        val = {
+            'offline_price': r.offline_price,
+            'offline_adjustment': r.offline_adjustment
+        }
+        if r.item_id and str(r.item_id).strip():
+            by_id[(sid, str(r.item_id).strip())] = val
+
+        norm_name = str(r.normalized_item_name or "").strip()
+        if norm_name:
+            key = (sid, norm_name)
+            name_counts[key] = name_counts.get(key, 0) + 1
+            by_name_candidates[key] = val
+
+    by_name = {
+        k: v for k, v in by_name_candidates.items()
+        if name_counts.get(k) == 1
+    }
+    return {'by_id': by_id, 'by_name': by_name}
+
+
+def bulk_upsert_offline_prices(db, records: list) -> int:
+    """
+    Upserts a list of offline price records into item_offline_prices.
+    records = [{'store_id': sid, 'item_id': iid, 'item_name': name,
+                'offline_price': price, 'offline_adjustment': adj, 'source': src}, ...]
+    """
+    if not db or not records:
+        return 0
+
+    upserted_count = 0
+    for rec in records:
+        sid = str(rec.get("store_id") or "").strip()
+        if not sid:
+            continue
+        iid = str(rec.get("item_id") or "").strip() or None
+        iname = str(rec.get("item_name") or "").strip()
+        norm_name = normalize_offline_item_name(iname)
+        price_raw = rec.get("offline_price")
+        adj_raw = rec.get("offline_adjustment")
+        source = rec.get("source") or "c5_upload"
+
+        price = None
+        if price_raw is not None and str(price_raw).strip() not in ("", "nan", "None"):
+            try:
+                price = int(round(float(price_raw)))
+            except (ValueError, TypeError):
+                price = None
+
+        adj = None
+        if adj_raw is not None and str(adj_raw).strip() not in ("", "nan", "None"):
+            try:
+                adj = int(round(float(adj_raw)))
+            except (ValueError, TypeError):
+                adj = None
+
+        if price is None and adj is None:
+            continue
+
+        existing = None
+        if iid:
+            existing = db.query(ItemOfflinePrice).filter(
+                ItemOfflinePrice.store_id == sid,
+                ItemOfflinePrice.item_id == iid
+            ).first()
+
+        if not existing and norm_name:
+            candidates = db.query(ItemOfflinePrice).filter(
+                ItemOfflinePrice.store_id == sid,
+                ItemOfflinePrice.normalized_item_name == norm_name
+            ).all()
+            if len(candidates) == 1:
+                existing = candidates[0]
+
+        if existing:
+            changed = False
+            if price is not None and existing.offline_price != price:
+                existing.offline_price = price
+                changed = True
+            if adj is not None and existing.offline_adjustment != adj:
+                existing.offline_adjustment = adj
+                changed = True
+            if iid and not existing.item_id:
+                existing.item_id = iid
+                changed = True
+            if iname and existing.item_name != iname:
+                existing.item_name = iname
+                existing.normalized_item_name = norm_name
+                changed = True
+            if changed:
+                existing.source = source
+                existing.updated_at = datetime.utcnow()
+                upserted_count += 1
+        else:
+            new_item = ItemOfflinePrice(
+                id=uuid.uuid4(),
+                store_id=sid,
+                item_id=iid,
+                item_name=iname or norm_name,
+                normalized_item_name=norm_name,
+                offline_price=price,
+                offline_adjustment=adj,
+                source=source,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            db.add(new_item)
+            upserted_count += 1
+
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error bulk upserting offline prices: {e}")
+        return 0
+
+    return upserted_count
+
+
 def init_db():
     """Initializes the database, creating all tables if they do not exist, and auto-migrating missing columns."""
     global engine, SessionLocal, DATABASE_URL
@@ -242,6 +416,11 @@ def init_db():
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_jobs_status_type ON jobs(job_type, status)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audit_trails_outlet_id ON audit_trails(outlet_id)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audit_trails_item_id ON audit_trails(item_id)"))
+        if "item_offline_prices" in inspector.get_table_names():
+            with engine.begin() as conn:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_offline_store_id ON item_offline_prices(store_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_offline_item_id ON item_offline_prices(item_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_offline_norm_name ON item_offline_prices(normalized_item_name)"))
     except Exception as migrate_err:
         pass
 

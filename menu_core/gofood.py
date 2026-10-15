@@ -631,10 +631,21 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                             prev_user_data[iid] = row_data
             wb_prev.close()
             if prev_user_data:
-                print(f"   🔄 Ditemukan C5 sebelumnya — memuat {len(prev_user_data)} baris data user untuk di-preserve.")
+                print(f"   🔄 Ditemukan C5 sebelumnya: memuat {len(prev_user_data)} baris data user untuk di-preserve.")
         except Exception as prev_err:
             print(f"   ⚠️ Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
     
+    # ── Load offline price dari database jika ada ──
+    db_offline = {}
+    gofood_sid = str(store_metadata.get('store_id') or '').strip()
+    if gofood_sid:
+        try:
+            from menu_core.database import SessionLocal, get_offline_prices_by_store
+            with SessionLocal() as db_session:
+                db_offline = get_offline_prices_by_store(db_session, [gofood_sid])
+        except Exception as e_db:
+            print(f"   ⚠️ Gagal memuat harga offline dari DB: {e_db}")
+
     try:
         wb = openpyxl.load_workbook(template_path)
         sheet_item = wb['Item']
@@ -659,6 +670,21 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                     # Jika kolom ini bisa diisi user & nilai baru kosong, restore nilai lama
                     if col_name in USER_EDITABLE_COLS and (val == "" or val is None):
                         val = prev_row.get(col_name, val)
+                        # Fallback ke harga offline dari database jika masih kosong
+                        if (val == "" or val is None) and db_offline:
+                            off_val = None
+                            if item_id_val and (gofood_sid, item_id_val) in db_offline.get('by_id', {}):
+                                off_val = db_offline['by_id'][(gofood_sid, item_id_val)]
+                            elif row.get('Item'):
+                                from menu_core.database import normalize_offline_item_name
+                                norm_n = normalize_offline_item_name(row.get('Item'))
+                                if (gofood_sid, norm_n) in db_offline.get('by_name', {}):
+                                    off_val = db_offline['by_name'][(gofood_sid, norm_n)]
+                            if off_val:
+                                if col_name == 'Offline Price (Rp)':
+                                    val = off_val.get('offline_price', val)
+                                elif col_name == 'Offline Adjustment (Rp)':
+                                    val = off_val.get('offline_adjustment', val)
                     
                     sheet_item.cell(row=r_idx + 2, column=headers_item[col_name], value=val)
                     

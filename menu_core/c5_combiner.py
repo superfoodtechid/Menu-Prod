@@ -83,10 +83,17 @@ def _read_offline_prices(previous_workbook):
         return {}
 
 
-def _restore_offline_prices(output_path, previous_workbook):
-    saved_values = _read_offline_prices(previous_workbook)
-    if not saved_values or not (saved_values.get('by_id') or saved_values.get('by_name')):
-        return 0
+def _restore_offline_prices(output_path, previous_workbook=None, db=None):
+    from menu_core.database import SessionLocal, get_offline_prices_by_store, bulk_upsert_offline_prices
+
+    close_db_when_done = False
+    if db is None:
+        try:
+            db = SessionLocal()
+            close_db_when_done = True
+        except Exception:
+            db = None
+
     try:
         workbook = openpyxl.load_workbook(output_path)
         if 'Item' not in workbook.sheetnames:
@@ -102,25 +109,97 @@ def _restore_offline_prices(output_path, previous_workbook):
             workbook.close()
             return 0
 
+        # Collect all unique SIDs from this sheet
+        sheet_sids = set()
         target_name_counts = {}
-        if item_name_col:
-            for row_idx in range(2, sheet.max_row + 1):
-                sid = _identity_value(sheet.cell(row=row_idx, column=sid_col).value)
+        for row_idx in range(2, sheet.max_row + 1):
+            sid = _identity_value(sheet.cell(row=row_idx, column=sid_col).value)
+            if sid:
+                sheet_sids.add(sid)
+            if item_name_col:
                 item_name = _normalize_item_name(sheet.cell(row=row_idx, column=item_name_col).value)
                 if sid and item_name:
                     key = (sid, item_name)
                     target_name_counts[key] = target_name_counts.get(key, 0) + 1
 
+        # 1. Query database for known offline prices
+        db_values = {'by_id': {}, 'by_name': {}}
+        if db and sheet_sids:
+            try:
+                raw_db = get_offline_prices_by_store(db, list(sheet_sids))
+                for k, v in raw_db.get('by_id', {}).items():
+                    entry = {}
+                    if v.get('offline_price') is not None:
+                        entry['Offline Price (Rp)'] = v['offline_price']
+                    if v.get('offline_adjustment') is not None:
+                        entry['Offline Adjustment (Rp)'] = v['offline_adjustment']
+                    if entry:
+                        db_values['by_id'][k] = entry
+                for k, v in raw_db.get('by_name', {}).items():
+                    entry = {}
+                    if v.get('offline_price') is not None:
+                        entry['Offline Price (Rp)'] = v['offline_price']
+                    if v.get('offline_adjustment') is not None:
+                        entry['Offline Adjustment (Rp)'] = v['offline_adjustment']
+                    if entry:
+                        db_values['by_name'][k] = entry
+            except Exception as e_db:
+                print(f"[C5 Combiner] Warning reading offline prices from DB: {e_db}")
+
+        # 2. Read previous workbook (Drive / local file backup)
+        saved_from_file = _read_offline_prices(previous_workbook) if previous_workbook else {}
+
+        # 3. Combine: DB takes priority, file fills any missing items
+        combined_by_id = dict(saved_from_file.get('by_id', {}))
+        combined_by_id.update(db_values.get('by_id', {}))
+        combined_by_name = dict(saved_from_file.get('by_name', {}))
+        combined_by_name.update(db_values.get('by_name', {}))
+
+        # 4. Auto-seed: If file had values not in DB, save them to DB for next time
+        if db and saved_from_file:
+            records_to_seed = []
+            for (s, iid), vals in saved_from_file.get('by_id', {}).items():
+                if (s, iid) not in db_values.get('by_id', {}):
+                    records_to_seed.append({
+                        'store_id': s,
+                        'item_id': iid,
+                        'item_name': '',
+                        'offline_price': vals.get('Offline Price (Rp)'),
+                        'offline_adjustment': vals.get('Offline Adjustment (Rp)'),
+                        'source': 'drive_backup'
+                    })
+            for (s, norm_name), vals in saved_from_file.get('by_name', {}).items():
+                if (s, norm_name) not in db_values.get('by_name', {}):
+                    records_to_seed.append({
+                        'store_id': s,
+                        'item_id': None,
+                        'item_name': norm_name,
+                        'offline_price': vals.get('Offline Price (Rp)'),
+                        'offline_adjustment': vals.get('Offline Adjustment (Rp)'),
+                        'source': 'drive_backup'
+                    })
+            if records_to_seed:
+                try:
+                    seeded = bulk_upsert_offline_prices(db, records_to_seed)
+                    if seeded > 0:
+                        print(f"[C5 Combiner] Auto-seeded {seeded} offline prices from backup workbook to database.")
+                except Exception as e_seed:
+                    print(f"[C5 Combiner] Failed auto-seeding offline prices to DB: {e_seed}")
+
+        if not combined_by_id and not combined_by_name:
+            workbook.close()
+            return 0
+
         restored = 0
         for row_idx in range(2, sheet.max_row + 1):
             sid = _identity_value(sheet.cell(row=row_idx, column=sid_col).value)
             item_id = _identity_value(sheet.cell(row=row_idx, column=item_id_col).value) if item_id_col else ''
-            values = saved_values['by_id'].get((sid, item_id)) if item_id else None
+            values = combined_by_id.get((sid, item_id)) if item_id else None
             if not values and item_name_col:
                 item_name = _normalize_item_name(sheet.cell(row=row_idx, column=item_name_col).value)
                 name_key = (sid, item_name)
                 if item_name and target_name_counts.get(name_key) == 1:
-                    values = saved_values['by_name'].get(name_key)
+                    values = combined_by_name.get(name_key)
             if not values:
                 continue
             for name, value in values.items():
@@ -130,12 +209,18 @@ def _restore_offline_prices(output_path, previous_workbook):
                     restored += 1
         workbook.save(output_path)
         workbook.close()
-        matched_item_count = len(saved_values['by_id']) + len(saved_values['by_name'])
-        print(f"[C5 Combiner] Memulihkan {restored} nilai harga offline untuk hingga {matched_item_count} item (Item ID diprioritaskan, nama unik sebagai cadangan).")
+        matched_item_count = len(combined_by_id) + len(combined_by_name)
+        print(f"[C5 Combiner] Memulihkan {restored} nilai harga offline untuk hingga {matched_item_count} item (Database diprioritaskan, cadangan Drive).")
         return restored
     except Exception as exc:
         print(f"[C5 Combiner] Gagal memulihkan harga offline: {exc}")
         return 0
+    finally:
+        if close_db_when_done and db:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 def _get_ofd_sort_order(ofd_val):
     v = str(ofd_val or '').strip().lower()
@@ -148,7 +233,7 @@ def _get_ofd_sort_order(ofd_val):
     return 4
 
 
-def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_count=False):
+def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_count=False, db=None):
     """
     Combines multiple C5 Excel files (Item & Modifier sheets) into a single C5 Excel file.
     """
@@ -241,7 +326,7 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
                         sheet_mod.cell(row=r, column=cell.column).number_format = '0%'
                         
             wb.save(output_path)
-            restored_count = _restore_offline_prices(output_path, previous_workbook)
+            restored_count = _restore_offline_prices(output_path, previous_workbook, db=db)
             return {"success": True, "offline_fields_restored": restored_count} if return_restore_count else True
         except Exception as e:
             print(f"[C5 Combiner] Failed writing to template, fallback to raw pandas export: {e}")
@@ -250,7 +335,7 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             df_combined_items.to_excel(writer, sheet_name='Item', index=False)
             df_combined_mods.to_excel(writer, sheet_name='Modifier', index=False)
-        restored_count = _restore_offline_prices(output_path, previous_workbook)
+        restored_count = _restore_offline_prices(output_path, previous_workbook, db=db)
         return {"success": True, "offline_fields_restored": restored_count} if return_restore_count else True
     except Exception as ex:
         print(f"[C5 Combiner] Export error: {ex}")
