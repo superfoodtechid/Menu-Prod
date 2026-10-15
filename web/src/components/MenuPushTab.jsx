@@ -111,6 +111,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
   // Input Mode ('file' | 'drive')
   const [inputMode, setInputMode] = useState("file");
   const [driveUrl, setDriveUrl] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
 
   const normalizePlatform = (value) => String(value || "")
     .toLowerCase()
@@ -199,12 +200,26 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
             .map((store) => store.sid));
         }
       } else {
-        const errData = await res.json();
-        setErrorMsg(errData.detail || "Gagal mengurai file C5.");
+        let errorText = "Gagal mengurai file C5.";
+        try {
+          const errData = await res.json();
+          errorText = errData.detail || errorText;
+        } catch (_) {
+          if (res.status === 413) {
+            errorText = "Ukuran file terlalu besar (maksimal 50 MB).";
+          } else if (res.status === 504) {
+            errorText = "Waktu pemrosesan file melebihi batas (Gateway Timeout).";
+          } else if (res.status === 502) {
+            errorText = "Backend sedang tidak dapat diakses (Bad Gateway).";
+          } else {
+            errorText = `Gagal memproses file C5 (HTTP ${res.status}).`;
+          }
+        }
+        setErrorMsg(errorText);
       }
     } catch (err) {
       console.error("Error parsing C5:", err);
-      setErrorMsg("Terjadi kesalahan jaringan saat memproses file C5.");
+      setErrorMsg("Terjadi kesalahan jaringan atau koneksi terputus saat memproses file C5.");
     } finally {
       setParsing(false);
     }
@@ -212,6 +227,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
 
   const handleFileUpload = (uploadedFile) => {
     if (!uploadedFile) return;
+    const name = (uploadedFile.name || "").toLowerCase();
+    if (name && !name.endsWith(".xlsx") && !name.endsWith(".xls")) {
+      setErrorMsg("File harus berformat Excel (.xlsx atau .xls).");
+      return;
+    }
     handleParse({ uploadedFile });
   };
 
@@ -594,14 +614,34 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
             </div>
           ) : (
             <div
-              onDragOver={(e) => e.preventDefault()}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!isDragging) setIsDragging(true);
+              }}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(false);
+              }}
               onDrop={(e) => {
                 e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(false);
                 if (e.dataTransfer.files && e.dataTransfer.files[0]) {
                   handleFileUpload(e.dataTransfer.files[0]);
                 }
               }}
-              className="mx-auto flex max-w-xl flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50/50 px-6 py-10 transition hover:border-slate-300 dark:border-zinc-800 dark:bg-zinc-950/40"
+              className={`mx-auto flex max-w-xl flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-10 transition duration-150 ${
+                isDragging
+                  ? "border-red-500 bg-red-50/60 dark:border-red-500 dark:bg-red-950/20 scale-[1.01]"
+                  : "border-slate-200 bg-slate-50/50 hover:border-slate-300 dark:border-zinc-800 dark:bg-zinc-950/40"
+              }`}
             >
               <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-slate-100 text-slate-600 dark:bg-zinc-900 dark:text-zinc-400">
                 <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
