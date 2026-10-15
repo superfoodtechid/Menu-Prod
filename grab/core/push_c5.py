@@ -647,21 +647,12 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                                     if canceled_camps:
                                         logger.info(f"🔓 [Grab C5 Push] Berhasil mencopot {len(canceled_camps)} promo aktif untuk '{new_name or item_name}': {canceled_camps}")
                                         res_item["note"] = f"Promo aktif dicopot ({', '.join(canceled_camps)})"
-                                        await asyncio.sleep(2.0)
                                     elif camp_err:
-                                        logger.warning(f"⚠️ [Grab C5 Push] Tidak dapat mencopot promo otomatis ({camp_err}).")
-                                        if has_price_change:
-                                            target_price_val = old_price_minor
-                                            res_item["note"] = f"Harga dipertahankan karena gagal mencopot promo: {camp_err}"
-                                            price_steps = [old_price]
+                                        logger.warning(f"⚠️ [Grab C5 Push] Peringatan saat mencopot promo otomatis ({camp_err}). Melanjutkan push harga...")
                                     else:
                                         logger.info(f"ℹ️ [Grab C5 Push] Tidak ditemukan kampanye aktif yang cocok untuk '{new_name or item_name}'. Melanjutkan push perubahan.")
                             except Exception as e_camp:
-                                logger.warning(f"⚠️ [Grab C5 Push] Error saat mencopot promo: {e_camp}.")
-                                if has_price_change:
-                                    target_price_val = old_price_minor
-                                    res_item["note"] = f"Harga dipertahankan: {e_camp}"
-                                    price_steps = [old_price]
+                                logger.warning(f"⚠️ [Grab C5 Push] Error saat mencopot promo: {e_camp}. Melanjutkan push harga...")
 
                     # If multiple price steps are needed, push intermediate price steps first
                     if has_price_change and not is_new_item and len(price_steps) > 1:
