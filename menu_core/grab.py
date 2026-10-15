@@ -204,6 +204,16 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
         except Exception as prev_err:
             print(f"   ⚠️ Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
 
+    # ── Load offline price dari database jika ada ──
+    db_offline = {}
+    if store_id:
+        try:
+            from menu_core.database import SessionLocal, get_offline_prices_by_store
+            with SessionLocal() as db_session:
+                db_offline = get_offline_prices_by_store(db_session, [store_id])
+        except Exception as e_db:
+            print(f"   ⚠️ Gagal memuat harga offline dari DB: {e_db}")
+
     try:
         wb = openpyxl.load_workbook(template_path)
         
@@ -267,6 +277,24 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
             for col_name in USER_EDITABLE_COLS:
                 if col_name not in mapping and col_name in prev_row:
                     mapping[col_name] = prev_row[col_name]
+
+            # Fallback ke harga offline dari database jika belum terisi dari C5 lama
+            if db_offline:
+                off_val = None
+                if item_id_str and (store_id, item_id_str) in db_offline.get('by_id', {}):
+                    off_val = db_offline['by_id'][(store_id, item_id_str)]
+                elif item.get('Nama item'):
+                    from menu_core.database import normalize_offline_item_name
+                    norm_n = normalize_offline_item_name(item.get('Nama item'))
+                    if (store_id, norm_n) in db_offline.get('by_name', {}):
+                        off_val = db_offline['by_name'][(store_id, norm_n)]
+                if off_val:
+                    if 'Offline Price (Rp)' not in mapping or mapping['Offline Price (Rp)'] in ('', None):
+                        if off_val.get('offline_price') is not None:
+                            mapping['Offline Price (Rp)'] = off_val['offline_price']
+                    if 'Offline Adjustment (Rp)' not in mapping or mapping['Offline Adjustment (Rp)'] in ('', None):
+                        if off_val.get('offline_adjustment') is not None:
+                            mapping['Offline Adjustment (Rp)'] = off_val['offline_adjustment']
             
             for key, val in mapping.items():
                 if key in headers_item:
