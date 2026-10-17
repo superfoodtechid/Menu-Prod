@@ -10,6 +10,8 @@ const CHANGE_LABELS = {
   PRICE_WARNING_STEP_PUSH: "Step push >15%",
   NAME_CHANGE: "Nama",
   CATEGORY_CHANGE: "Kategori",
+  CATEGORY_ORDER_CHANGE: "Urutan Kat",
+  ITEM_ORDER_CHANGE: "Urutan Item",
   PHOTO_CHANGE: "Foto",
   DESCRIPTION_CHANGE: "Deskripsi",
   OTHER_CHANGE: "Atribut lain",
@@ -70,7 +72,7 @@ function friendlyPushError(rawMessage) {
   return message;
 }
 
-export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
+export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTab }) {
   const [parsing, setParsing] = useState(false);
   const [parseResult, setParseResult] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
@@ -104,9 +106,23 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
   const [reportOpen, setReportOpen] = useState(false);
   const [reportSearch, setReportSearch] = useState("");
   const [reportFilter, setReportFilter] = useState("all");
+  const [pullReminderOpen, setPullReminderOpen] = useState(false);
+  const [pushedOutletsSummary, setPushedOutletsSummary] = useState([]);
   const pollingRef = useRef(null);
   const pollingBusyRef = useRef(false);
   const reportedBatchRef = useRef(null);
+
+  const handleNavigateToPull = () => {
+    setPullReminderOpen(false);
+    setReportOpen(false);
+    if (typeof onNavigateTab === "function") {
+      onNavigateTab("pull");
+    } else {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("tab");
+      window.location.href = url.toString();
+    }
+  };
 
   // Input Mode ('file' | 'drive')
   const [inputMode, setInputMode] = useState("file");
@@ -166,6 +182,8 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
     setActiveJobs([]);
     setReportData(null);
     setReportOpen(false);
+    setPullReminderOpen(false);
+    setPushedOutletsSummary([]);
     reportedBatchRef.current = null;
     setCurrentPage(1);
 
@@ -261,7 +279,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
       const platformStores = parseResult.stores.filter((store) => storeMatchesPlatform(store, platform));
       const selectedPlatformSids = platformStores.map((store) => store.sid).filter((sid) => selectedSids.includes(sid));
       const sidSet = new Set(selectedPlatformSids);
-      const items = parseResult.items.filter((item) => sidSet.has(item.sid) && item.is_changed);
+      const items = parseResult.items.filter((item) => sidSet.has(item.sid) && item.is_changed && item.is_valid !== false);
       return { platform, sids: selectedPlatformSids, items };
     }).filter((job) => job.sids.length > 0 && job.items.length > 0);
   }, [parseResult, selectedPlatforms, selectedSids]);
@@ -320,9 +338,31 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
       setReportData(jobs);
       setReportSearch("");
       setReportFilter("all");
-      setReportOpen(true);
+
+      const outlets = [];
+      const seen = new Set();
+      activeJobs.forEach((job) => {
+        const sids = Array.isArray(job.selected_sids)
+          ? job.selected_sids
+          : (job.result_metadata?.selected_sids || []);
+        sids.forEach((sid) => {
+          const key = `${job.platform}-${sid}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            const st = parseResult?.stores?.find((s) => s.sid === sid);
+            outlets.push({
+              sid,
+              name: st?.name || `Store ${sid}`,
+              platform: job.platform,
+            });
+          }
+        });
+      });
+      setPushedOutletsSummary(outlets);
+      setPullReminderOpen(true);
+      setReportOpen(false);
     });
-  }, [activeJobs, API_BASE_URL, API_SECRET_KEY]);
+  }, [activeJobs, parseResult, API_BASE_URL, API_SECRET_KEY]);
 
   const handleOpenConfirmation = () => {
     if (parseResult?.summary?.has_validation_errors) {
@@ -348,6 +388,8 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
     setErrorMsg("");
     setReportData(null);
     setReportOpen(false);
+    setPullReminderOpen(false);
+    setPushedOutletsSummary([]);
     reportedBatchRef.current = null;
 
     try {
@@ -378,7 +420,10 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                 description: item.description,
                 current_fake_price: item.baseline_price,
                 new_fake_price: item.new_fake_price,
-                changes: item.change_types
+                changes: item.change_types,
+                c5_categories: item.c5_categories,
+                category_weight: item.category_weight,
+                item_weight: item.item_weight
               }))
             })
           });
@@ -413,6 +458,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
 
       // 2. Filter by Change Type
       if (changeTypeFilter === "changed" && !item.is_changed) return false;
+      if (changeTypeFilter === "order_changed" && !item.changes?.order_changed) return false;
       if (changeTypeFilter === "offline_price" && !item.changes?.offline_price_changed) return false;
       if (changeTypeFilter === "new_item" && !item.is_new_item) return false;
       if (changeTypeFilter === "new_category" && !item.is_new_category) return false;
@@ -422,6 +468,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
 
       // 3. Filter by Attribute
       if (attributeFilter === "price" && !item.changes?.price_changed) return false;
+      if (attributeFilter === "order" && !item.changes?.order_changed) return false;
       if (attributeFilter === "name" && !item.changes?.name_changed) return false;
       if (attributeFilter === "category" && !item.changes?.category_changed) return false;
       if (attributeFilter === "photo" && !item.changes?.photo_changed) return false;
@@ -461,7 +508,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
     if (!parseResult?.items) return 0;
     const visibleSidSet = new Set(visibleStores.map((store) => store.sid));
     return parseResult.items.filter(
-      (item) => visibleSidSet.has(item.sid) && selectedSids.includes(item.sid) && item.is_changed
+      (item) => visibleSidSet.has(item.sid) && selectedSids.includes(item.sid) && item.is_changed && item.is_valid !== false
     ).length;
   }, [parseResult, selectedSids, visibleStores]);
 
@@ -528,6 +575,8 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                 setConfirmJobs(null);
                 setReportData(null);
                 setReportOpen(false);
+                setPullReminderOpen(false);
+                setPushedOutletsSummary([]);
                 reportedBatchRef.current = null;
               }}
               disabled={hasRunningJobs || triggering}
@@ -971,9 +1020,29 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                   </div>
                 )}
                 </div>)}
-                {reportData && <button type="button" onClick={() => setReportOpen(true)} className="secondary-action text-xs">
-                  Lihat Laporan per Item
-                </button>}
+                {reportData && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {pushedOutletsSummary.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setPullReminderOpen(true)}
+                        className="primary-action text-xs flex items-center gap-1.5"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                        <span>Pengingat Pull Menu Ulang</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setReportOpen(true)}
+                      className="secondary-action text-xs"
+                    >
+                      Lihat Laporan per Item
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -986,6 +1055,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                 {[
                   ["all", `Semua Item (${parseResult?.items?.length || 0})`],
                   ["changed", `Ada Perubahan (${parseResult?.summary?.total_changes || 0})`],
+                  ["order_changed", `Perubahan Urutan (${parseResult?.summary?.order_changes_count || 0})`],
                   ["offline_price", `Harga Offline (${parseResult?.summary?.offline_price_changes || 0})`],
                   ["new_item", `Item Baru (${parseResult?.summary?.new_items_count || 0})`],
                   ["new_category", `Kategori Baru (${parseResult?.summary?.new_categories_count || 0})`],
@@ -1020,6 +1090,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                 >
                   <option value="all">Semua Atribut</option>
                   <option value="price">Hanya Perubahan Harga</option>
+                  <option value="order">Hanya Perubahan Urutan</option>
                   <option value="name">Hanya Perubahan Nama</option>
                   <option value="category">Hanya Perubahan Kategori</option>
                   <option value="photo">Hanya Perubahan Foto</option>
@@ -1120,7 +1191,14 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                               <span className="font-semibold text-slate-900 dark:text-white">{item.category || item.baseline_category || "-"}</span>
                             </div>
                           ) : (
-                            <span>{item.category || item.baseline_category || "-"}</span>
+                            <div className="flex items-center gap-1.5">
+                              <span>{item.category || item.baseline_category || "-"}</span>
+                              {item.changes?.cat_order_changed && (
+                                <span className="rounded bg-violet-50 px-1 py-0.2 text-[9px] font-semibold text-violet-700 dark:bg-violet-950/60 dark:text-violet-300" title={`Urutan kategori: ke-${item.category_weight}`}>
+                                  #{item.category_weight}
+                                </span>
+                              )}
+                            </div>
                           )}
                         </td>
 
@@ -1140,9 +1218,16 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                               </span>
                             </div>
                           ) : (
-                            <span className="font-medium text-slate-800 dark:text-zinc-200">
-                              {item.item_name || item.baseline_name || "-"}
-                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-medium text-slate-800 dark:text-zinc-200">
+                                {item.item_name || item.baseline_name || "-"}
+                              </span>
+                              {item.changes?.item_order_changed && (
+                                <span className="rounded bg-cyan-50 px-1 py-0.2 text-[9px] font-semibold text-cyan-700 dark:bg-cyan-950/60 dark:text-cyan-300" title={`Posisi item: ke-${item.item_weight}`}>
+                                  Posisi #{item.item_weight}
+                                </span>
+                              )}
+                            </div>
                           )}
                         </td>
 
@@ -1200,7 +1285,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                                       ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
                                       : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
                                   }`}
-                                  title={item.price_warning ? "Kenaikan harga > 15%" : "Perubahan harga"}
+                                  title={
+                                    item.price_warning
+                                      ? `${item.price_diff_percent < 0 ? "Penurunan" : "Kenaikan"} harga > 15%`
+                                      : "Perubahan harga"
+                                  }
                                 >
                                   {item.price_diff_percent > 0 ? `+${item.price_diff_percent}%` : `${item.price_diff_percent}%`}
                                 </span>
@@ -1266,6 +1355,16 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
                               {item.changes?.description_changed && (
                                 <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
                                   Deskripsi
+                                </span>
+                              )}
+                              {item.changes?.cat_order_changed && (
+                                <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800 dark:bg-violet-950/60 dark:text-violet-300">
+                                  Urutan Kat
+                                </span>
+                              )}
+                              {item.changes?.item_order_changed && (
+                                <span className="rounded bg-cyan-100 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-800 dark:bg-cyan-950/60 dark:text-cyan-300">
+                                  Urutan Item
                                 </span>
                               )}
                               {item.changes?.offline_price_changed && (
@@ -1417,6 +1516,26 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
               </div>
               <button type="button" onClick={() => setReportOpen(false)} aria-label="Tutup laporan" className="secondary-action px-2 py-1 text-sm">✕</button>
             </div>
+
+            {/* Reminder Banner inside Report Modal */}
+            <div className="mt-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 rounded-xl border border-amber-300 bg-amber-50/80 p-3 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+              <div className="flex items-center gap-2">
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-200 text-amber-900 dark:bg-amber-900 dark:text-amber-100 text-[11px] font-bold">
+                  !
+                </span>
+                <span className="text-[11.5px]">
+                  <strong>Pengingat:</strong> Silakan lakukan Pull Menu ulang untuk outlet ini agar data baseline lokal di FoodMaster kembali sinkron.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleNavigateToPull}
+                className="shrink-0 rounded-lg bg-amber-700 px-3 py-1 text-xs font-bold text-white hover:bg-amber-800 transition dark:bg-amber-600 dark:hover:bg-amber-500"
+              >
+                Buka Menu Pull
+              </button>
+            </div>
+
             {reportData.map(({ job, error }) => (error || job.status === "FAILED" || job.status === "CANCELLED") && (
               <p key={job.id} className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
                 {job.platform}: {friendlyPushError(error || job.error_message || job.current_step || job.status)}
@@ -1449,6 +1568,119 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
             </div>
             <div className="mt-4 flex justify-end border-t border-slate-200 pt-4 dark:border-zinc-800">
               <button type="button" onClick={() => setReportOpen(false)} className="secondary-action text-xs">Tutup laporan</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pop Up Pengingat Pull Menu Ulang Setelah Push C5 */}
+      {pullReminderOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs overflow-y-auto"
+          role="presentation"
+          onClick={() => setPullReminderOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="c5-pull-reminder-title"
+            className="surface-card relative max-w-lg w-full my-6 overflow-hidden p-6 shadow-2xl animate-scale-up flex flex-col"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {/* Header with icon */}
+            <div className="flex items-start gap-3.5 border-b border-slate-100 pb-4 dark:border-zinc-800">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 id="c5-pull-reminder-title" className="text-base font-bold text-slate-900 dark:text-white">
+                  Push Selesai: Lakukan Pull Ulang Outlet
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-zinc-400">
+                  Perubahan menu C5 telah selesai dikirim ke merchant portal.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPullReminderOpen(false)}
+                aria-label="Tutup pengingat"
+                className="secondary-action px-2 py-1 text-sm shrink-0"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Instruction Body */}
+            <div className="mt-4 space-y-3 text-xs">
+              <div className="rounded-xl border border-amber-200/80 bg-amber-50/70 p-3.5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                <p className="font-semibold text-xs text-amber-950 dark:text-amber-100">
+                  Instruksi Penting:
+                </p>
+                <p className="mt-1 text-[11.5px] leading-relaxed text-amber-900/90 dark:text-amber-200/90">
+                  Agar data katalog dan baseline di FoodMaster sinkron dengan kondisi terbaru di merchant portal setelah perubahan diterapkan, mohon lakukan <strong>Pull Menu</strong> ulang untuk outlet terkait berikut:
+                </p>
+              </div>
+
+              {/* Outlet List */}
+              {pushedOutletsSummary.length > 0 && (
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-zinc-400 block mb-1.5">
+                    Daftar Outlet yang Di-push ({pushedOutletsSummary.length})
+                  </span>
+                  <div className="max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50/50 divide-y divide-slate-100 dark:border-zinc-800 dark:bg-zinc-900/30 dark:divide-zinc-800">
+                    {pushedOutletsSummary.map((item, idx) => (
+                      <div key={`${item.platform}-${item.sid}-${idx}`} className="flex items-center justify-between p-2.5 gap-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-bold text-slate-900 dark:text-white text-xs truncate">
+                            {item.name}
+                          </p>
+                          <p className="text-[10.5px] font-mono text-slate-500 dark:text-zinc-400">
+                            Store ID: {item.sid}
+                          </p>
+                        </div>
+                        <PlatformBadge platform={item.platform} size="sm" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="mt-5 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-2 border-t border-slate-100 pt-3 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setPullReminderOpen(false)}
+                className="secondary-action text-xs w-full sm:w-auto"
+              >
+                Nanti Saja
+              </button>
+              <div className="flex flex-col sm:flex-row items-center gap-2 w-full sm:w-auto">
+                {reportData && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPullReminderOpen(false);
+                      setReportOpen(true);
+                    }}
+                    className="secondary-action text-xs w-full sm:w-auto"
+                  >
+                    Lihat Rincian Push
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleNavigateToPull}
+                  className="primary-action text-xs w-full sm:w-auto flex items-center justify-center gap-1.5"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  <span>Buka Menu Pull Sekarang</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1840,11 +2072,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY }) {
               {/* Catatan Khusus Peringatan Step Push */}
               {diffModalItem.grab_price_limit_exceeded ? (
                 <div className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
-                  Push harga item ini diblokir. Kenaikan {diffModalItem.price_diff_percent}% melampaui batas Grab 15% untuk satu perubahan. Turunkan target maksimal 15% dari harga saat ini.
+                  Push harga item ini diblokir. {diffModalItem.price_diff_percent < 0 ? "Penurunan" : "Kenaikan"} {diffModalItem.price_diff_percent > 0 ? `+${diffModalItem.price_diff_percent}%` : `${diffModalItem.price_diff_percent}%`} melampaui batas kuota Grab (maksimal 10 tahapan perubahan per 24 jam).
                 </div>
               ) : diffModalItem.price_warning ? (
                 <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
-                  Peringatan Step Push: Kenaikan harga hidangan ini sebesar {diffModalItem.price_diff_percent}% (&gt;15%). Sistem otomasi FoodMaster akan memecah kenaikan ini menjadi beberapa tahapan bertahap saat di-push ke merchant portal.
+                  Peringatan Step Push: {diffModalItem.price_diff_percent < 0 ? "Penurunan" : "Kenaikan"} harga hidangan ini sebesar {diffModalItem.price_diff_percent > 0 ? `+${diffModalItem.price_diff_percent}%` : `${diffModalItem.price_diff_percent}%`} (&gt;15%). Sistem otomasi FoodMaster akan memecah perubahan ini menjadi beberapa tahapan bertahap saat di-push ke merchant portal.
                 </div>
               ) : null}
             </div>
