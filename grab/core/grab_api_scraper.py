@@ -796,14 +796,20 @@ class GrabAPI:
             "merchantid": store_id,
             "requestsource": "troyPortal",
             "x-client-id": "GrabMerchant-Portal",
-            "x-grabkit-clientid": "grabmerchant-portal"
+            "x-grabkit-clientid": "grabmerchant-portal",
+            "content-type": "application/json"
         }
         sorts = []
-        for idx, cat_id in enumerate(sorted_category_ids):
-            sorts.append({
-                "resourceID": cat_id,
-                "sortOrder": idx + 1
-            })
+        for idx, cat_item in enumerate(sorted_category_ids):
+            if isinstance(cat_item, dict) and "resourceID" in cat_item and "sortOrder" in cat_item:
+                sorts.append(cat_item)
+            elif isinstance(cat_item, tuple) and len(cat_item) == 2:
+                sorts.append({"resourceID": str(cat_item[0]), "sortOrder": int(cat_item[1])})
+            else:
+                sorts.append({
+                    "resourceID": str(cat_item),
+                    "sortOrder": idx + 1
+                })
         body = {
             "sectionSorts": [
                 {
@@ -813,6 +819,40 @@ class GrabAPI:
             ]
         }
         res = await self.call_api(url, method="PUT", headers=headers, body=body)
+        if res.get("status") in (200, 204):
+            return True, None
+        return False, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
+
+    async def sort_items(self, group_id, store_id, category_id, sorted_item_ids, menu_group_id=""):
+        """PUT /food/merchant/items-sort"""
+        url = f"{self.api_base_url}/food/merchant/items-sort"
+        headers = {
+            "merchantgroupid": group_id,
+            "merchantid": store_id,
+            "requestsource": "troyPortal",
+            "x-client-id": "GrabMerchant-Portal",
+            "x-grabkit-clientid": "grabmerchant-portal",
+            "content-type": "application/json"
+        }
+        sorts = []
+        for idx, it in enumerate(sorted_item_ids):
+            if isinstance(it, dict) and "resourceID" in it and "sortOrder" in it:
+                sorts.append(it)
+            elif isinstance(it, tuple) and len(it) == 2:
+                sorts.append({"resourceID": str(it[0]), "sortOrder": int(it[1])})
+            else:
+                sorts.append({
+                    "resourceID": str(it),
+                    "sortOrder": idx + 1
+                })
+        body = {
+            "categoryID": category_id,
+            "sorts": sorts,
+            "menuGroupID": menu_group_id or ""
+        }
+        res = await self.call_api(url, method="PUT", headers=headers, body=body)
+        if res.get("status") in (200, 204):
+            return True, None
         return False, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
 
     async def validate_item(self, group_id, store_id, category_id, item_data, is_menu_group: bool = False, menu_group_id: str = None, force_store_level: bool = False):
@@ -988,7 +1028,7 @@ class GrabAPI:
                 finally:
                     self._in_upsert_fallback = False
             elif not use_mg_ep and not getattr(self, "_in_upsert_fallback", False):
-                self._in_upsert_fallback = True
+                 self._in_upsert_fallback = True
                 try:
                     extracted_mg_id = item_data.get("menuGroupID")
                     if not extracted_mg_id and "-" in str(item_data.get("itemID", "")):

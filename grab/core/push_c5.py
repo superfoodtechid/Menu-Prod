@@ -504,6 +504,17 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                             item_result_cb(upd, res_item["status"], res_item.get("error"), applied=res_item)
                         continue
 
+                    # Validate character length limits (Name <= 60, Category <= 80, Description <= 250)
+                    target_name_check = (new_name or item_name or "").strip()
+                    if len(target_name_check) > 60:
+                        raise ValueError(f"Nama item melebihi batas 60 karakter ({len(target_name_check)} karakter): '{target_name_check[:30]}...'")
+                    target_cat_check = (new_cat_name or "").strip()
+                    if len(target_cat_check) > 80:
+                        raise ValueError(f"Nama kategori melebihi batas 80 karakter ({len(target_cat_check)} karakter): '{target_cat_check[:30]}...'")
+                    target_desc_check = (description or "").strip()
+                    if len(target_desc_check) > 250:
+                        raise ValueError(f"Deskripsi item melebihi batas 250 karakter ({len(target_desc_check)} karakter).")
+
                     # Validate existing item and price before any category API
                     # mutation so a blocked price cannot leave partial changes.
                     # 3. Validate price mutations before sending them to Grab.
@@ -723,6 +734,13 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     if item_id:
                         item_payload["itemID"] = item_id
 
+                    item_weight = upd.get("item_weight")
+                    if item_weight is not None:
+                        try:
+                            item_payload["sortOrder"] = int(item_weight)
+                        except (ValueError, TypeError):
+                            pass
+
                     upsert_res, upsert_err = await call_with_auth_recovery(
                         lambda: api.upsert_item(
                             group_id,
@@ -739,6 +757,12 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         res_item["status"] = "FAILED"
                         res_item["error"] = upsert_err
                     else:
+                        new_item_id = (upsert_res or {}).get("itemID")
+                        if new_item_id:
+                            res_item["item_id"] = str(new_item_id)
+                            item_info_obj = {"itemID": str(new_item_id), "itemName": new_name or item_name, "_c5CategoryID": target_cat_id}
+                            existing_items_map[str(new_item_id)] = item_info_obj
+                            existing_items_map[(new_name or item_name).strip().lower()] = item_info_obj
                         if len(price_steps) > 1:
                             logger.info(f"✅ [Grab C5 Push] Successfully updated item '{new_name or item_name}' (SID: {target_sid}) via {len(price_steps)} price steps")
                         else:
@@ -756,6 +780,138 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         item_result_cb(upd, res_item.get("status", "FAILED"), err_cb, applied=res_item)
                     except Exception:
                         pass
+
+            # ── 1. Reorder Categories via PUT /food/merchant/categories-sort ──
+            try:
+                ordered_c5_cat_names = []
+                category_weights = {}
+                for upd in updates:
+                    for c_name in (upd.get("c5_categories") or []):
+                        if c_name and c_name not in ordered_c5_cat_names:
+                            ordered_c5_cat_names.append(c_name)
+                    c_name_upd = (upd.get("category") or "").strip()
+                    cw = upd.get("category_weight")
+                    if c_name_upd and cw is not None and c_name_upd.casefold() not in category_weights:
+                        try:
+                            category_weights[c_name_upd.casefold()] = int(cw)
+                        except (ValueError, TypeError):
+                            pass
+
+                if not ordered_c5_cat_names and category_weights:
+                    sorted_c = sorted(category_weights.items(), key=lambda x: x[1])
+                    ordered_c5_cat_names = [x[0] for x in sorted_c]
+
+                if ordered_c5_cat_names or category_weights:
+                    target_cat_ids = []
+                    seen_cat_ids = set()
+                    for c_name in ordered_c5_cat_names:
+                        c_key = (c_name or "").strip().casefold()
+                        cid = cat_map.get(c_key)
+                        if cid and str(cid) not in seen_cat_ids:
+                            target_cat_ids.append(str(cid))
+                            seen_cat_ids.add(str(cid))
+
+                    # Append any remaining existing categories from Grab not mentioned in C5
+                    existing_sorted_cats = sorted(categories, key=lambda c: int(c.get("sortOrder") or 9999))
+                    current_cat_ids = []
+                    for c in existing_sorted_cats:
+                        cid = str(c.get("categoryID") or c.get("id") or "")
+                        if cid:
+                            current_cat_ids.append(cid)
+                            if cid not in seen_cat_ids:
+                                target_cat_ids.append(cid)
+                                seen_cat_ids.add(cid)
+
+                    if target_cat_ids and target_cat_ids != current_cat_ids:
+                        logger.info(f"📐 [Grab C5 Push] Updating Category Order via PUT /food/merchant/categories-sort...")
+                        logger.info(f"   Urutan target kategori: {target_cat_ids}")
+                        sort_payload = [
+                            {"resourceID": cid, "sortOrder": idx + 1}
+                            for idx, cid in enumerate(target_cat_ids)
+                        ]
+                        ok_sort, err_sort = await call_with_auth_recovery(
+                            lambda: api.sort_categories(group_id, target_sid, sort_payload),
+                            "sort categories",
+                        )
+                        if ok_sort:
+                            logger.info(f"✅ [Grab C5 Push] Category order successfully updated: {target_cat_ids}")
+                        else:
+                            logger.warning(f"⚠️ [Grab C5 Push] Failed to sort categories: {err_sort}")
+            except Exception as cat_sort_ex:
+                logger.warning(f"⚠️ [Grab C5 Push] Exception while sorting categories: {cat_sort_ex}")
+
+            # ── 2. Reorder Items within each Category via PUT /food/merchant/items-sort ──
+            try:
+                target_cat_keys = set()
+                for upd in updates:
+                    c_name = (upd.get("category") or "").strip()
+                    if c_name:
+                        target_cat_keys.add(c_name.casefold())
+
+                for cat_key in target_cat_keys:
+                    cat_id = cat_map.get(cat_key)
+                    if not cat_id:
+                        continue
+
+                    c5_items_in_cat = [
+                        upd for upd in updates
+                        if (upd.get("category") or "").strip().casefold() == cat_key
+                        and not ("DELETE_ITEM" in (upd.get("changes") or upd.get("change_types") or []))
+                        and not (isinstance(upd.get("changes"), dict) and upd["changes"].get("is_deleted_item"))
+                    ]
+                    c5_items_in_cat.sort(key=lambda u: u.get("item_weight") or 9999)
+
+                    target_item_ids = []
+                    seen_item_ids = set()
+                    for upd in c5_items_in_cat:
+                        it_id = str(upd.get("item_id") or "").strip()
+                        it_name = upd.get("item_name_new") or upd.get("item_name") or ""
+                        matched_id = None
+                        if it_id and it_id in existing_items_map:
+                            matched_id = it_id
+                        elif it_name and it_name.strip().lower() in existing_items_map:
+                            matched_id = str(existing_items_map[it_name.strip().lower()].get("itemID") or "")
+
+                        final_iid = matched_id or it_id
+                        if final_iid and final_iid not in seen_item_ids:
+                            target_item_ids.append(final_iid)
+                            seen_item_ids.add(final_iid)
+
+                    # Append existing items in this category not in C5
+                    cat_obj = cat_obj_map.get(cat_id) or {}
+                    existing_cat_items = sorted(
+                        cat_obj.get("items") or cat_obj.get("menuItems") or [],
+                        key=lambda it: int(it.get("sortOrder") or 9999)
+                    )
+                    current_item_ids = []
+                    for it in existing_cat_items:
+                        iid = str(it.get("itemID") or it.get("id") or "")
+                        if iid:
+                            current_item_ids.append(iid)
+                            if iid not in seen_item_ids:
+                                target_item_ids.append(iid)
+                                seen_item_ids.add(iid)
+
+                    if target_item_ids and len(target_item_ids) > 1 and target_item_ids != current_item_ids:
+                        logger.info(f"📐 [Grab C5 Push] Updating Item Order for category '{cat_key}' ({cat_id}) via PUT /food/merchant/items-sort...")
+                        logger.info(f"   Urutan target item: {target_item_ids}")
+                        item_sort_payload = [
+                            {"resourceID": iid, "sortOrder": idx + 1}
+                            for idx, iid in enumerate(target_item_ids)
+                        ]
+                        ok_isort, err_isort = await call_with_auth_recovery(
+                            lambda cid=cat_id, payload=item_sort_payload: api.sort_items(
+                                group_id, target_sid, cid, payload, menu_group_id=menu_group_id or ""
+                            ),
+                            f"sort items ({cat_key})",
+                        )
+                        if ok_isort:
+                            logger.info(f"✅ [Grab C5 Push] Items successfully reordered for category '{cat_key}'")
+                        else:
+                            logger.warning(f"⚠️ [Grab C5 Push] Failed to reorder items for category '{cat_key}': {err_isort}")
+            except Exception as item_sort_ex:
+                logger.warning(f"⚠️ [Grab C5 Push] Exception while sorting items: {item_sort_ex}")
+
 
         finally:
             proc_killed = False
