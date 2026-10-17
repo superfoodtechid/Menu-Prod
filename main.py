@@ -290,6 +290,9 @@ class C5PushItemUpdate(BaseModel):
     new_fake_price: Optional[float] = None
     current_real_price: Optional[float] = None
     changes: Optional[List[str]] = []
+    c5_categories: Optional[List[str]] = None
+    category_weight: Optional[int] = None
+    item_weight: Optional[int] = None
 
 class C5PushRequest(BaseModel):
     platform: str = Field("gofood", description="Target platform (default: gofood)")
@@ -2266,6 +2269,17 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
             except Exception as e:
                 logger.warning(f"Error adding cookies: {e}")
 
+        if cached_data and cached_data.get("localStorage"):
+            try:
+                ls_script = f"""
+                for (const [key, value] of Object.entries({json.dumps(cached_data["localStorage"])})) {{
+                    try {{ localStorage.setItem(key, value); }} catch(e) {{}}
+                }}
+                """
+                context.add_init_script(ls_script)
+            except Exception as e:
+                logger.warning(f"Error restoring localStorage: {e}")
+
         page = context.new_page()
         api_headers = {}
 
@@ -2343,13 +2357,44 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 logger.warning(f"Terjadi kesalahan saat login_outlet: {e}")
             return False
 
+        def safe_navigate_gofood(target_sid):
+            nav_urls = [
+                f"https://portal.gofoodmerchant.co.id/gofood/{target_sid}/menu-items",
+                "https://portal.gofoodmerchant.co.id/gofood",
+                "https://portal.gofoodmerchant.co.id/dashboard"
+            ]
+            last_err = None
+            for idx, nav_url in enumerate(nav_urls):
+                for attempt in range(1, 3):
+                    try:
+                        logger.info(f"🌐 Navigasi GoFood portal ({idx + 1}/{len(nav_urls)}, percobaan {attempt}): {nav_url}...")
+                        page.goto(nav_url, wait_until="domcontentloaded", timeout=40000)
+                        time.sleep(2)
+                        return True
+                    except Exception as nav_err:
+                        last_err = nav_err
+                        logger.warning(f"⚠️ Navigasi ke {nav_url} (percobaan {attempt}) terkendala: {nav_err}")
+                        if page.url and "portal.gofoodmerchant.co.id" in page.url and page.url != "about:blank":
+                            logger.info(f"ℹ️ Halaman sudah berada di domain portal ({page.url}), melanjutkan proses.")
+                            return True
+                        try:
+                            if page.url and page.url != "about:blank":
+                                page.reload(wait_until="commit", timeout=25000)
+                                time.sleep(2)
+                                return True
+                        except Exception:
+                            pass
+                        time.sleep(1.5)
+            if last_err:
+                raise last_err
+            return False
+
         try:
-            page.goto(f"https://portal.gofoodmerchant.co.id/gofood/{merchant_id}/menu-items", wait_until="domcontentloaded")
-            time.sleep(2)
+            safe_navigate_gofood(merchant_id)
 
             if "/auth" in page.url or "login" in page.url or not api_headers.get('authorization'):
                 perform_fresh_login()
-                page.goto(f"https://portal.gofoodmerchant.co.id/gofood/{merchant_id}/menu-items", wait_until="domcontentloaded")
+                safe_navigate_gofood(merchant_id)
                 time.sleep(3)
                 if "/auth" in page.url or "login" in page.url:
                     raise Exception(f"Gagal login ke GoFood portal untuk {email}. Sesi telah kadaluarsa dan membutuhkan login/OTP ulang via 'python login_gofood.py'.")
@@ -2414,7 +2459,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
             if not token or not menu_data:
                 logger.warning("⚠️ GoFood session/menu tidak valid. Memicu fresh login ulang...")
                 perform_fresh_login()
-                page.goto(f"https://portal.gofoodmerchant.co.id/gofood/{merchant_id}/menu-items", wait_until="domcontentloaded")
+                safe_navigate_gofood(merchant_id)
                 time.sleep(3)
                 start_wait = time.time()
                 while (time.time() - start_wait) < 15:
@@ -2463,18 +2508,54 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
             if not menu_data:
                 raise Exception("Gagal menarik menu GoFood untuk perbandingan.")
 
-            # Index live menu items by id/common_id
+            # Index live menu items and categories by id/common_id/name
             categories = go_api.parse_menus(menu_data)
             go_items_by_id = {}
+            go_items_by_name = {}
+            go_categories_by_name = {}
+            go_categories_by_id = {}
+            category_remaining_items = {}
             for cat in categories:
-                cat_group = cat.get("menu_common_id") or cat.get("common_id") or cat.get("id")
+                cat_group = str(cat.get("menu_common_id") or cat.get("common_id") or cat.get("id") or "")
+                cat_common = str(cat.get("common_id") or cat_group or "")
+                cat_v1_id = str(cat.get("id") or cat_common or "")
+                cat_name_str = (cat.get("name") or cat.get("menu_name") or cat.get("category_name") or "").strip()
+                cat_entry = {
+                    "category": cat,
+                    "id": cat_v1_id,
+                    "common_id": cat_common,
+                    "name": cat_name_str,
+                }
+                if cat_name_str:
+                    go_categories_by_name[norm_str(cat_name_str)] = cat_entry
+                if cat_common:
+                    go_categories_by_id[cat_common] = cat_entry
+                    category_remaining_items.setdefault(cat_common, set())
+                if cat_v1_id:
+                    go_categories_by_id[cat_v1_id] = cat_entry
                 for it in cat.get("menu_items") or []:
-                    iid = it.get("common_id") or it.get("id")
-                    go_items_by_id[str(iid)] = {
+                    iid_common = str(it.get("common_id") or "").strip()
+                    iid_v1 = str(it.get("id") or "").strip()
+                    primary_iid = iid_common or iid_v1
+                    if not primary_iid:
+                        continue
+                    item_record = {
                         "item": it,
+                        "id": primary_iid,
+                        "v1_id": iid_v1 or primary_iid,
                         "category_id": cat.get("id"),
-                        "category_common_id": cat.get("common_id") or cat_group,
+                        "category_common_id": cat_common,
+                        "category_name": cat_name_str,
                     }
+                    if iid_common:
+                        go_items_by_id[iid_common] = item_record
+                    if iid_v1:
+                        go_items_by_id[iid_v1] = item_record
+                    if cat_common:
+                        category_remaining_items.setdefault(cat_common, set()).add(primary_iid)
+                    it_name = norm_str(it.get("name") or it.get("item_name") or "")
+                    if it_name and it_name not in go_items_by_name:
+                        go_items_by_name[it_name] = item_record
 
             # Fetch active MPP promotions to prevent updating promo items
             mpp_promos_map = {}
@@ -2485,7 +2566,6 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
             except Exception as mpp_err:
                 logger.warning(f"⚠️ Gagal fetch MPP promo map di run_push_c5_job: {mpp_err}")
 
-            passkey = api_headers.get('x-passkey') or "1729b182-c60e-4568-849d-5eb7d794fd09"
             passkey = api_headers.get('x-passkey') or "1729b182-c60e-4568-849d-5eb7d794fd09"
             headers_direct = {
                 'Accept': 'application/json, text/plain, */*',
@@ -2576,7 +2656,11 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
             patch_group_id = group_id or api_headers.get('menu_group_id')
 
             # ── 1. Execute New Categories Creation & Category Renames (GoFood V2 API) ──
-            created_cat_ids = {}
+            created_cat_ids = {
+                cat_key: cat_info["common_id"]
+                for cat_key, cat_info in go_categories_by_name.items()
+                if cat_info.get("common_id")
+            }
             category_creation_errors = {}
             category_renames = {}
 
@@ -2621,41 +2705,75 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                     return None
                 try:
                     menus = go_api.fetch_menus_v2(page, token, patch_group_id, passkey=passkey)
-                    return find_category_common_id(menus, category_name)
+                    found_id = find_category_common_id(menus, category_name)
+                    if not found_id and rest_uuid and len(str(rest_uuid)) == 36:
+                        menus_v1 = go_api.fetch_menus(page, token, rest_uuid, passkey=passkey)
+                        found_id = find_category_common_id(menus_v1, category_name)
+                    return found_id
                 except Exception as lookup_error:
                     logger.warning("Gagal mencari ID kategori GoFood '%s': %s", category_name, lookup_error)
                     return None
 
+            c5_category_keys = set()
+            active_target_cat_keys = set()
+            category_weights = {}
             for upd in updates:
-                cat_id = upd.get("category_id")
-                cat_name = upd.get("category")
+                for c_idx, c_name in enumerate(upd.get("c5_categories") or []):
+                    if c_name and norm_str(c_name):
+                        c5_category_keys.add(norm_str(c_name))
+                        if norm_str(c_name) not in category_weights:
+                            category_weights[norm_str(c_name)] = c_idx + 1
+                cat_id = str(upd.get("category_id") or "").strip()
+                cat_name = (upd.get("category") or "").strip()
+                cw = upd.get("category_weight")
+                if cat_name and cw is not None and norm_str(cat_name) not in category_weights:
+                    try:
+                        category_weights[norm_str(cat_name)] = int(cw)
+                    except (ValueError, TypeError):
+                        pass
                 change_types = upd.get("changes") or upd.get("change_types") or []
                 is_dict_changes = isinstance(upd.get("changes"), dict)
+                is_deleted_upd = ("DELETE_ITEM" in change_types) or (is_dict_changes and upd["changes"].get("is_deleted_item"))
+                if is_deleted_upd:
+                    continue
+                if cat_name:
+                    active_target_cat_keys.add(norm_str(cat_name))
                 is_new_cat = ("NEW_CATEGORY" in change_types) or (is_dict_changes and upd["changes"].get("is_new_category"))
+                is_cat_changed = ("CATEGORY_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("category_changed"))
+                needs_new_category = bool(
+                    cat_name
+                    and norm_str(cat_name) not in go_categories_by_name
+                    and (is_new_cat or is_cat_changed or not cat_id or str(cat_id) not in go_categories_by_id)
+                )
 
-                if (cat_name and is_new_cat
+                if (cat_name and (is_new_cat or needs_new_category)
                         and norm_str(cat_name) not in created_cat_ids
                         and norm_str(cat_name) not in category_creation_errors
                         and patch_group_id):
                     try:
                         category_key = norm_str(cat_name)
-                        # Reuse a category created by an earlier partial run instead
-                        # of creating duplicates when the user retries the C5 job.
                         new_c_id = lookup_category_common_id(cat_name)
                         if new_c_id:
-                            created_cat_ids[category_key] = new_c_id
+                            created_cat_ids[category_key] = str(new_c_id)
+                            category_remaining_items.setdefault(str(new_c_id), set())
                             logger.info("♻️ Reusing existing GoFood category '%s' (common ID: %s)", cat_name, new_c_id)
                         else:
                             logger.info(f"📂 Creating New Category '{cat_name}' on GoFood merchant...")
-                            cat_res = go_api.create_category(page, token, patch_group_id, {"name": cat_name, "active": True}, passkey=passkey)
-                            # The helper returns `body` as JSON text. Prefer an
-                            # explicit common_id and refresh categories if the POST
-                            # response omits it (or reports a duplicate after retry).
+                            cat_payload = {"name": cat_name, "active": True}
+                            cat_weight = category_weights.get(category_key)
+                            if cat_weight is not None:
+                                cat_payload["weight"] = cat_weight
+                            cat_res = go_api.create_category(page, token, patch_group_id, cat_payload, passkey=passkey)
+                            if not (cat_res and cat_res.get("ok")) and "weight" in cat_payload and not is_gofood_transient_error(cat_res):
+                                logger.warning("Retry creating category '%s' without weight...", cat_name)
+                                cat_payload_no_weight = {"name": cat_name, "active": True}
+                                cat_res = go_api.create_category(page, token, patch_group_id, cat_payload_no_weight, passkey=passkey)
                             new_c_id = find_category_common_id(cat_res.get("body") if cat_res else None, cat_name)
                             if not new_c_id:
                                 new_c_id = lookup_category_common_id(cat_name)
                             if new_c_id and str(new_c_id) != str(patch_group_id):
                                 created_cat_ids[category_key] = str(new_c_id)
+                                category_remaining_items.setdefault(str(new_c_id), set())
                                 logger.info("✅ Category '%s' ready (common ID: %s)", cat_name, new_c_id)
                             else:
                                 detail = (cat_res.get("body") or cat_res.get("error") or "ID common kategori tidak ditemukan") if cat_res else "Respons pembuatan kategori kosong"
@@ -2665,38 +2783,124 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         category_creation_errors[norm_str(cat_name)] = str(cat_ex)
                         logger.warning(f"⚠️ Exception creating category '{cat_name}': {cat_ex}")
 
-                if cat_id and cat_name and not is_new_cat:
-                    is_cat_changed = ("CATEGORY_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("category_changed"))
-                    if is_cat_changed:
-                        category_renames[cat_id] = cat_name
+                if cat_id and cat_name and not is_new_cat and not needs_new_category:
+                    if is_cat_changed and norm_str(cat_name) not in created_cat_ids:
+                        resolved_cat_info = go_categories_by_id.get(cat_id)
+                        target_rename_id = resolved_cat_info["common_id"] if resolved_cat_info else cat_id
+                        category_renames[target_rename_id] = cat_name
 
             if category_renames and patch_group_id:
                 for cat_id, new_cat_name in category_renames.items():
                     try:
                         logger.info(f"🏷️ Pushing Category Rename for Category ID '{cat_id}' -> '{new_cat_name}'...")
-                        cat_res = go_api.update_menu_item(page, token, patch_group_id, cat_id, {"name": new_cat_name, "active": True}, passkey=passkey)
+                        cat_payload = {"name": new_cat_name, "active": True}
+                        c_weight = category_weights.get(norm_str(new_cat_name))
+                        if c_weight is not None:
+                            cat_payload["weight"] = c_weight
+                        cat_res = go_api.update_menu_item(page, token, patch_group_id, cat_id, cat_payload, passkey=passkey)
+                        if not (cat_res and cat_res.get("ok")) and "weight" in cat_payload and not is_gofood_transient_error(cat_res):
+                            logger.warning(f"Retry updating category '{cat_id}' without weight...")
+                            cat_payload_no_weight = {"name": new_cat_name, "active": True}
+                            cat_res = go_api.update_menu_item(page, token, patch_group_id, cat_id, cat_payload_no_weight, passkey=passkey)
                         if cat_res and cat_res.get("ok"):
+                            created_cat_ids[norm_str(new_cat_name)] = str(cat_id)
                             logger.info(f"✅ Category '{cat_id}' successfully renamed to '{new_cat_name}'")
                         else:
                             logger.warning(f"⚠️ Category rename warning for '{cat_id}': {cat_res}")
                     except Exception as cat_ex:
                         logger.warning(f"⚠️ Exception renaming category '{cat_id}': {cat_ex}")
 
+            # Reorder categories via PUT /v2/menu_groups/{group_id}/menus/weights
+            if patch_group_id and (c5_category_keys or category_weights):
+                ordered_c5_cat_names = []
+                for upd in updates:
+                    for c_name in (upd.get("c5_categories") or []):
+                        if c_name and c_name not in ordered_c5_cat_names:
+                            ordered_c5_cat_names.append(c_name)
+
+                if not ordered_c5_cat_names and category_weights:
+                    sorted_cats = sorted(category_weights.items(), key=lambda x: x[1])
+                    ordered_c5_cat_names = [x[0] for x in sorted_cats]
+
+                target_common_ids = []
+                seen_common_ids = set()
+                for c_name in ordered_c5_cat_names:
+                    c_key = norm_str(c_name)
+                    c_info = go_categories_by_name.get(c_key) or {}
+                    cid = created_cat_ids.get(c_key) or c_info.get("common_id") or c_info.get("id")
+                    if not cid:
+                        cid = lookup_category_common_id(c_name)
+                    if cid and str(cid) not in seen_common_ids:
+                        target_common_ids.append(str(cid))
+                        seen_common_ids.add(str(cid))
+
+                # Append any remaining existing categories not mentioned in C5
+                existing_sorted = sorted(categories, key=lambda c: c.get("weight") or 9999)
+                current_common_ids = []
+                for c in existing_sorted:
+                    cid = str(c.get("common_id") or c.get("id") or "")
+                    if cid:
+                        current_common_ids.append(cid)
+                        if cid not in seen_common_ids:
+                            target_common_ids.append(cid)
+                            seen_common_ids.add(cid)
+
+                if target_common_ids and target_common_ids != current_common_ids:
+                    try:
+                        logger.info(f"📐 Updating Category Weights/Order via PUT /menus/weights (group: {patch_group_id})...")
+                        logger.info(f"   Urutan target: {target_common_ids}")
+                        reorder_res = call_gofood_with_backoff(
+                            lambda: go_api.update_category_weights(page, token, patch_group_id, target_common_ids, passkey=passkey),
+                            "mengurutkan kategori (menus/weights)",
+                        )
+                        if reorder_res and reorder_res.get("ok"):
+                            logger.info(f"✅ Category weights/order successfully updated to: {target_common_ids}")
+                            for new_idx, cid in enumerate(target_common_ids):
+                                cat_record = go_categories_by_id.get(cid)
+                                if cat_record and isinstance(cat_record.get("category"), dict):
+                                    cat_record["category"]["weight"] = new_idx + 1
+                        else:
+                            logger.warning(f"⚠️ Failed to update category weights: {reorder_res}")
+                    except Exception as reorder_ex:
+                        logger.warning(f"⚠️ Exception updating category weights: {reorder_ex}")
+
+
             # ── 2. Execute Item Updates & New Item Creation (tambah_item) ──
             import random
             total = len(updates)
+            vacated_cat_ids = set()
+            moved_or_deleted_item_ids = set()
+            active_c5_item_ids = set()
+            created_item_ids = {}
             for idx, upd in enumerate(updates):
-                item_id = str(upd.get("item_id") or "")
+                item_id = str(upd.get("item_id") or "").strip()
                 new_name = (upd.get("item_name_new") or "").strip()
                 raw_price = upd.get("new_fake_price")
                 new_photo = (upd.get("photo_link") or "").strip()
                 new_desc = (upd.get("description") or "").strip()
                 new_cat = (upd.get("category") or "").strip()
+                upd_cat_id = str(upd.get("category_id") or "").strip()
 
                 change_types = upd.get("changes") or upd.get("change_types") or []
                 is_dict_changes = isinstance(upd.get("changes"), dict)
 
-                is_new_item = ("NEW_ITEM" in change_types) or (is_dict_changes and upd["changes"].get("is_new_item")) or (not item_id)
+                is_deleted_item = ("DELETE_ITEM" in change_types) or (is_dict_changes and upd["changes"].get("is_deleted_item"))
+                is_new_cat = ("NEW_CATEGORY" in change_types) or (is_dict_changes and upd["changes"].get("is_new_category"))
+                is_cat_changed = ("CATEGORY_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("category_changed"))
+
+                item_info = go_items_by_id.get(item_id) if item_id else None
+                if not item_info and not is_deleted_item:
+                    for candidate_name in (upd.get("baseline_name"), upd.get("item_name"), new_name):
+                        if candidate_name and norm_str(candidate_name) in go_items_by_name:
+                            item_info = go_items_by_name[norm_str(candidate_name)]
+                            if not item_id:
+                                item_id = str(item_info.get("id") or "")
+                            break
+
+                is_new_item = (
+                    (("NEW_ITEM" in change_types) or (is_dict_changes and upd["changes"].get("is_new_item")) or (not item_id))
+                    and item_info is None
+                )
                 has_change_metadata = is_dict_changes or bool(change_types)
                 allow_field_fallback = is_new_item or not has_change_metadata
                 want_name = ("NAME_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("name_changed")) or (allow_field_fallback and bool(new_name))
@@ -2707,11 +2911,42 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 if progress_cb:
                     progress_cb(idx, total, upd)
 
-                item_info = go_items_by_id.get(item_id)
                 orig_item = item_info["item"] if item_info else {}
-                cat_common_id = item_info["category_common_id"] if item_info else (
-                    created_cat_ids.get(norm_str(new_cat)) or upd.get("category_id")
+                orig_cat_common_id = str(item_info["category_common_id"]) if (item_info and item_info.get("category_common_id")) else ""
+                orig_cat_name = item_info.get("category_name") if item_info else ""
+                v2_item_id = str(orig_item.get("common_id") or (item_info.get("id") if item_info else "") or item_id)
+
+                want_cat_move = bool(
+                    new_cat and (
+                        is_new_cat
+                        or is_cat_changed
+                        or not item_info
+                        or (orig_cat_name and norm_str(new_cat) != norm_str(orig_cat_name))
+                    )
                 )
+                target_cat_common_id = None
+                if new_cat:
+                    target_cat_common_id = (
+                        created_cat_ids.get(norm_str(new_cat))
+                        or (go_categories_by_name.get(norm_str(new_cat)) or {}).get("common_id")
+                    )
+                if not target_cat_common_id and upd_cat_id and upd_cat_id in go_categories_by_id:
+                    target_cat_common_id = go_categories_by_id[upd_cat_id].get("common_id")
+                if want_cat_move and new_cat and not target_cat_common_id and patch_group_id:
+                    target_cat_common_id = lookup_category_common_id(new_cat)
+                    if not target_cat_common_id and norm_str(new_cat) not in category_creation_errors:
+                        cat_res = go_api.create_category(page, token, patch_group_id, {"name": new_cat, "active": True}, passkey=passkey)
+                        target_cat_common_id = find_category_common_id(cat_res.get("body") if cat_res else None, new_cat) or lookup_category_common_id(new_cat)
+                    if target_cat_common_id and str(target_cat_common_id) != str(patch_group_id):
+                        created_cat_ids[norm_str(new_cat)] = str(target_cat_common_id)
+                        category_remaining_items.setdefault(str(target_cat_common_id), set())
+
+                if want_cat_move and target_cat_common_id:
+                    cat_common_id = str(target_cat_common_id)
+                elif item_info and orig_cat_common_id:
+                    cat_common_id = orig_cat_common_id
+                else:
+                    cat_common_id = str(target_cat_common_id or upd_cat_id or "")
 
                 final_name = new_name if (want_name and new_name) else (orig_item.get('name') or upd.get('item_name') or "Item Baru")
                 final_photo = new_photo if (want_photo and new_photo) else orig_item.get('image_url', orig_item.get('image', ''))
@@ -2737,20 +2972,27 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 except (ValueError, TypeError):
                     final_price = int(float(orig_item.get('price') or 0))
 
-                is_deleted_item = ("DELETE_ITEM" in change_types) or (is_dict_changes and upd["changes"].get("is_deleted_item"))
                 if is_deleted_item and item_id and not item_id.startswith("NEW_"):
-                    logger.info(f"🗑️ Deleting item on GoFood merchant: '{item_id}' ({upd.get('item_name')})...")
+                    del_target_id = v2_item_id or item_id
+                    logger.info(f"🗑️ Deleting item on GoFood merchant: '{del_target_id}' ({upd.get('item_name')})...")
                     del_res = call_gofood_with_backoff(
-                        lambda: go_api.delete_v2_menu_item(page, token, patch_group_id, item_id, passkey=passkey),
+                        lambda: go_api.delete_v2_menu_item(page, token, patch_group_id, del_target_id, passkey=passkey),
                         "hapus item",
                     )
                     if not (del_res and del_res.get("ok")) and not is_gofood_transient_error(del_res):
                         del_res = call_gofood_with_backoff(
-                            lambda: go_api.delete_menu_item(page, token, patch_group_id, item_id, passkey=passkey),
+                            lambda: go_api.delete_menu_item(page, token, patch_group_id, del_target_id, passkey=passkey),
                             "hapus item (endpoint cadangan)",
                         )
                     if del_res and del_res.get("ok"):
-                        logger.info(f"✅ Item '{item_id}' deleted successfully!")
+                        logger.info(f"✅ Item '{del_target_id}' deleted successfully!")
+                        for tracked_id in {item_id, del_target_id, str(orig_item.get("id") or "")}:
+                            if tracked_id:
+                                moved_or_deleted_item_ids.add(tracked_id)
+                                if orig_cat_common_id and orig_cat_common_id in category_remaining_items:
+                                    category_remaining_items[orig_cat_common_id].discard(tracked_id)
+                        if orig_cat_common_id:
+                            vacated_cat_ids.add(orig_cat_common_id)
                         results.append({
                             "item_id": item_id, "item_name": upd.get("item_name"),
                             "status": "SUCCESS", "error": None, "action": "DELETED"
@@ -2759,7 +3001,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         wait_before_next_item(idx, total)
                         continue
                     else:
-                        logger.warning(f"⚠️ Failed deleting item '{item_id}': {del_res}")
+                        logger.warning(f"⚠️ Failed deleting item '{del_target_id}': {del_res}")
                         delete_error = (del_res.get("body") or del_res.get("error") or "Gagal menghapus item GoFood.") if del_res else "Gagal menghapus item GoFood."
                         results.append({
                             "item_id": item_id, "item_name": upd.get("item_name"),
@@ -2799,12 +3041,37 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         "active": True,
                         "signature": False
                     }
+                    target_item_weight = upd.get("item_weight")
+                    if target_item_weight is not None:
+                        try:
+                            create_payload["weight"] = int(target_item_weight)
+                        except (ValueError, TypeError):
+                            pass
                     create_res = call_gofood_with_backoff(
                         lambda: go_api.create_menu_item(page, token, patch_group_id, create_payload, passkey=passkey),
                         "membuat item",
                     )
+                    if not (create_res and create_res.get("ok")) and "weight" in create_payload and not is_gofood_transient_error(create_res):
+                        logger.warning(f"Retry creating item '{final_name}' without weight...")
+                        create_payload_no_weight = dict(create_payload)
+                        create_payload_no_weight.pop("weight", None)
+                        create_res = call_gofood_with_backoff(
+                            lambda: go_api.create_menu_item(page, token, patch_group_id, create_payload_no_weight, passkey=passkey),
+                            "membuat item (tanpa weight)",
+                        )
                     if create_res and create_res.get("ok"):
                         logger.info(f"✅ New item '{final_name}' created successfully!")
+                        category_remaining_items.setdefault(str(target_cat_id), set()).add(f"NEW:{norm_str(final_name)}")
+                        new_item_cid = None
+                        try:
+                            c_body = json.loads(create_res.get("body")) if isinstance(create_res.get("body"), str) else create_res.get("body")
+                            if isinstance(c_body, dict):
+                                d_val = c_body.get("data") if isinstance(c_body.get("data"), dict) else c_body
+                                new_item_cid = d_val.get("common_id") or d_val.get("id")
+                        except Exception:
+                            pass
+                        if new_item_cid:
+                            created_item_ids[norm_str(final_name)] = str(new_item_cid)
                         results.append({
                             "item_id": "NEW_ITEM", "item_name": final_name,
                             "new_name": final_name, "new_price": final_price,
@@ -2831,6 +3098,19 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         "status": "FAILED", "error": "Item ID tidak ditemukan di menu GoFood.",
                     })
                     report_item_result(upd, "FAILED", results[-1]["error"], applied=results[-1])
+                    continue
+
+                if want_cat_move and (not cat_common_id or str(cat_common_id) == str(patch_group_id)):
+                    category_key = norm_str(new_cat)
+                    category_error = category_creation_errors.get(category_key)
+                    move_error = f"ID kategori GoFood tidak tersedia untuk '{new_cat}'."
+                    if category_error:
+                        move_error += f" Detail kategori: {category_error}"
+                    results.append({
+                        "item_id": item_id, "item_name": orig_item.get("name", item_id),
+                        "new_category": new_cat, "status": "FAILED", "error": move_error,
+                    })
+                    report_item_result(upd, "FAILED", move_error, applied=results[-1])
                     continue
 
                 try:
@@ -2887,11 +3167,17 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                     "image_url": final_photo,
                     "menu_common_id": cat_common_id,
                 }
+                target_item_weight = upd.get("item_weight")
+                if target_item_weight is not None:
+                    try:
+                        v2_payload["weight"] = int(target_item_weight)
+                    except (ValueError, TypeError):
+                        pass
 
                 def send_patch_request(payload, max_retries=4):
                     return call_gofood_with_backoff(
                         lambda: go_api.update_v2_menu_item(
-                            page, token, patch_group_id, item_id, payload, passkey=passkey
+                            page, token, patch_group_id, v2_item_id, payload, passkey=passkey
                         ),
                         "mengubah harga/menu",
                         max_attempts=max_retries,
@@ -2905,6 +3191,16 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                     v2_payload["price"] = step_price
                     res = send_patch_request(v2_payload)
 
+                    # Fallback weight: if rejected and weight was included, retry without weight
+                    if (not res or not res.get('ok')) and "weight" in v2_payload and not is_gofood_transient_error(res):
+                        logger.warning(f"GoFood V2 PATCH gagal dengan weight untuk '{final_name}', mencoba tanpa weight...")
+                        v2_payload_no_weight = dict(v2_payload)
+                        v2_payload_no_weight.pop("weight", None)
+                        res_no_weight = send_patch_request(v2_payload_no_weight, max_retries=1)
+                        if res_no_weight and res_no_weight.get('ok'):
+                            res = res_no_weight
+                            v2_payload.pop("weight", None)
+
                     # Fallback 1: include variant_category_common_ids if present
                     if (not res or not res.get('ok')) and not is_gofood_transient_error(res):
                         time.sleep(0.6)
@@ -2915,6 +3211,12 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                             res_var = send_patch_request(v2_payload_with_vars, max_retries=1)
                             if res_var and res_var.get('ok'):
                                 res = res_var
+                            elif "weight" in v2_payload_with_vars:
+                                v2_payload_with_vars.pop("weight", None)
+                                res_var_no_weight = send_patch_request(v2_payload_with_vars, max_retries=1)
+                                if res_var_no_weight and res_var_no_weight.get('ok'):
+                                    res = res_var_no_weight
+                                    v2_payload.pop("weight", None)
 
                     # Fallback 2: V1 PUT
                     if (not res or not res.get('ok')) and not is_gofood_transient_error(res):
@@ -2936,9 +3238,11 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                                 cr_v1 = context.request.fetch(
                                     v1_url, method='PUT', headers=headers_direct, data=json.dumps(v1_payload)
                                 )
-                                res = {'ok': cr_v1.ok, 'status': cr_v1.status, 'body': cr_v1.text()}
+                                if cr_v1.ok or not res:
+                                    res = {'ok': cr_v1.ok, 'status': cr_v1.status, 'body': cr_v1.text()}
                             except Exception as e:
-                                res = {'ok': False, 'error': str(e)}
+                                if not res:
+                                    res = {'ok': False, 'error': str(e)}
 
                     if res and res.get('ok'):
                         if len(price_steps) > 1:
@@ -2951,13 +3255,24 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                         break
 
                 if res and res.get('ok'):
+                    for tracked_id in {item_id, v2_item_id, str(orig_item.get("id") or "")}:
+                        if tracked_id:
+                            active_c5_item_ids.add(tracked_id)
+                    if orig_cat_common_id and cat_common_id and str(orig_cat_common_id) != str(cat_common_id):
+                        for tracked_id in {item_id, v2_item_id, str(orig_item.get("id") or "")}:
+                            if tracked_id:
+                                moved_or_deleted_item_ids.add(tracked_id)
+                                if orig_cat_common_id in category_remaining_items:
+                                    category_remaining_items[orig_cat_common_id].discard(tracked_id)
+                        category_remaining_items.setdefault(str(cat_common_id), set()).add(v2_item_id or item_id)
+                        vacated_cat_ids.add(str(orig_cat_common_id))
                     res_entry = {
                         "item_id": item_id, "item_name": orig_item.get('name', item_id),
                         "new_name": final_name if want_name else None,
                         "new_price": final_price if want_price else None,
                         "new_photo": final_photo if want_photo else None,
                         "new_desc": final_desc if want_desc else None,
-                        "new_category": new_cat if upd.get("category_id") in category_renames else None,
+                        "new_category": new_cat if (want_cat_move or upd_cat_id in category_renames or orig_cat_common_id in category_renames) else None,
                         "status": "SUCCESS", "error": None,
                     }
                     results.append(res_entry)
@@ -2975,6 +3290,165 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
 
                 # Pacing + batch breather to respect GoFood rate limits
                 wait_before_next_item(idx, total)
+
+            # ── 3. Delete Obsolete Categories Missing from C5 After Items Are Detached/Deleted ──
+            if patch_group_id and (c5_category_keys or vacated_cat_ids):
+                try:
+                    latest_menus = None
+                    if rest_uuid and len(str(rest_uuid)) == 36:
+                        latest_menus = go_api.fetch_menus(page, token, rest_uuid, passkey=passkey)
+                    if not latest_menus:
+                        latest_menus = go_api.fetch_menus_v2(page, token, patch_group_id, passkey=passkey)
+                    live_cats = go_api.parse_menus(latest_menus) if latest_menus else categories
+                except Exception as refresh_err:
+                    logger.warning(f"⚠️ Gagal refresh menu GoFood sebelum hapus kategori: {refresh_err}")
+                    live_cats = categories
+
+                for lcat in (live_cats or []):
+                    lcat_name = (lcat.get("name") or lcat.get("menu_name") or lcat.get("category_name") or "").strip()
+                    lcat_key = norm_str(lcat_name)
+                    lcat_common_id = str(lcat.get("common_id") or lcat.get("menu_common_id") or lcat.get("id") or "").strip()
+                    if not lcat_common_id or lcat_common_id == str(patch_group_id):
+                        continue
+                    if lcat_key and lcat_key in active_target_cat_keys:
+                        continue
+                    if c5_category_keys:
+                        if lcat_key in c5_category_keys:
+                            continue
+                    elif lcat_common_id not in vacated_cat_ids:
+                        continue
+
+                    lcat_items = lcat.get("menu_items") or lcat.get("items") or []
+                    remaining_live_items = []
+                    for lit in lcat_items:
+                        lit_common = str(lit.get("common_id") or "").strip()
+                        lit_v1 = str(lit.get("id") or "").strip()
+                        lit_id = lit_common or lit_v1
+                        if lit_id and (lit_id in moved_or_deleted_item_ids or lit_common in moved_or_deleted_item_ids or lit_v1 in moved_or_deleted_item_ids):
+                            continue
+                        remaining_live_items.append(lit)
+
+                    # GoFood forbids deleting a category that still has items attached.
+                    # If the category is absent from C5 and still holds leftover items,
+                    # detach or delete those leftover items first before deleting the category.
+                    if remaining_live_items and c5_category_keys and lcat_key not in c5_category_keys:
+                        still_attached = []
+                        for lit in remaining_live_items:
+                            lit_id = str(lit.get("common_id") or lit.get("id") or "").strip()
+                            if not lit_id or lit_id in active_c5_item_ids:
+                                still_attached.append(lit_id)
+                                continue
+                            logger.info(f"🗑️ Melepas/menghapus item '{lit.get('name')}' ({lit_id}) sebelum menghapus kategori lama '{lcat_name}'...")
+                            del_lit_res = call_gofood_with_backoff(
+                                lambda lid=lit_id: go_api.delete_v2_menu_item(page, token, patch_group_id, lid, passkey=passkey),
+                                "hapus item pada kategori lama",
+                            )
+                            if not (del_lit_res and del_lit_res.get("ok")) and not is_gofood_transient_error(del_lit_res):
+                                del_lit_res = call_gofood_with_backoff(
+                                    lambda lid=lit_id: go_api.delete_menu_item(page, token, patch_group_id, lid, passkey=passkey),
+                                    "hapus item pada kategori lama (endpoint cadangan)",
+                                )
+                            if del_lit_res and del_lit_res.get("ok"):
+                                moved_or_deleted_item_ids.add(lit_id)
+                            else:
+                                still_attached.append(lit_id)
+                        remaining_live_items = still_attached
+
+                    if remaining_live_items:
+                        logger.info(f"⏭️ Kategori GoFood '{lcat_name}' ({lcat_common_id}) dilewati karena masih memiliki {len(remaining_live_items)} item tertaut.")
+                        continue
+
+                    logger.info(f"🗑️ Menghapus kategori GoFood yang tidak ada di C5: '{lcat_name}' ({lcat_common_id})...")
+                    del_cat_res = call_gofood_with_backoff(
+                        lambda cid=lcat_common_id: go_api.delete_menu_item(page, token, patch_group_id, cid, passkey=passkey),
+                        "hapus kategori",
+                    )
+                    if del_cat_res and del_cat_res.get("ok"):
+                        logger.info(f"✅ Kategori '{lcat_name}' ({lcat_common_id}) berhasil dihapus dari GoFood.")
+                    else:
+                        logger.warning(f"⚠️ Gagal menghapus kategori '{lcat_name}' ({lcat_common_id}): {del_cat_res}")
+
+            # ── 4. Reorder Items Within Each Category via PUT /menus/{cat_id}/menu_items/weights ──
+            if patch_group_id:
+                for cat_key in (active_target_cat_keys or set(go_categories_by_name.keys())):
+                    cat_info = go_categories_by_name.get(cat_key) or {}
+                    cat_cid = created_cat_ids.get(cat_key) or cat_info.get("common_id") or cat_info.get("id")
+                    if not cat_cid:
+                        cat_cid = lookup_category_common_id(cat_info.get("name") or cat_key)
+                    if not cat_cid or str(cat_cid) == str(patch_group_id):
+                        continue
+
+                    raw_cat = cat_info.get("category") or {}
+                    existing_cat_items = raw_cat.get("menu_items") or raw_cat.get("items") or []
+
+                    # Target item sequence from C5 updates
+                    c5_items_in_cat = [
+                        upd for upd in updates
+                        if norm_str(upd.get("category") or upd.get("new_category") or "") == cat_key
+                        and not ("DELETE_ITEM" in (upd.get("changes") or upd.get("change_types") or []))
+                        and not (isinstance(upd.get("changes"), dict) and upd["changes"].get("is_deleted_item"))
+                    ]
+                    c5_items_in_cat.sort(key=lambda u: u.get("item_weight") or 9999)
+
+                    target_item_cids = []
+                    seen_item_cids = set()
+                    for upd in c5_items_in_cat:
+                        it_name = upd.get("item_name_new") or upd.get("item_name") or ""
+                        it_id = str(upd.get("item_id") or "").strip()
+                        it_rec = go_items_by_id.get(it_id) if it_id else None
+                        if not it_rec and it_name:
+                            it_rec = go_items_by_name.get(norm_str(it_name))
+
+                        it_cid = created_item_ids.get(norm_str(it_name))
+                        if not it_cid and it_rec:
+                            it_cid = (it_rec.get("item") or {}).get("common_id") or it_rec.get("id")
+                        if not it_cid and it_id and not it_id.startswith("NEW_"):
+                            it_cid = it_id
+
+                        if it_cid and str(it_cid) not in seen_item_cids:
+                            target_item_cids.append(str(it_cid))
+                            seen_item_cids.add(str(it_cid))
+
+                    # Append any existing items from GoFood not mentioned in C5
+                    existing_sorted_items = sorted(existing_cat_items, key=lambda it: it.get("weight") or 9999)
+                    current_item_cids = []
+                    for it in existing_sorted_items:
+                        it_cid = str(it.get("common_id") or it.get("id") or "")
+                        if it_cid and it_cid not in moved_or_deleted_item_ids:
+                            current_item_cids.append(it_cid)
+                            if it_cid not in seen_item_cids:
+                                target_item_cids.append(it_cid)
+                                seen_item_cids.add(it_cid)
+
+                    # Send PUT /menus/{cat_id}/menu_items/weights if target order differs from current
+                    if len(target_item_cids) > 1 and target_item_cids != current_item_cids:
+                        cat_display_name = cat_info.get("name") or raw_cat.get("name") or cat_key
+                        try:
+                            logger.info(f"📐 Updating Item Weights/Order for category '{cat_display_name}' ({cat_cid})...")
+                            logger.info(f"   Urutan target item: {target_item_cids}")
+                            reorder_items_res = call_gofood_with_backoff(
+                                lambda cid=cat_cid, ids=target_item_cids: go_api.update_item_weights(
+                                    page, token, patch_group_id, cid, ids, passkey=passkey
+                                ),
+                                f"mengurutkan item kategori '{cat_display_name}'",
+                            )
+                            if reorder_items_res and reorder_items_res.get("ok"):
+                                logger.info(f"✅ Item weights/order successfully updated for category '{cat_display_name}'!")
+                            else:
+                                logger.warning(f"⚠️ Failed to update item weights for category '{cat_display_name}': {reorder_items_res}")
+                        except Exception as it_reorder_ex:
+                            logger.warning(f"⚠️ Exception updating item weights for '{cat_display_name}': {it_reorder_ex}")
+
+            # Refresh local baseline menu cache so subsequent C5 previews reflect the latest GoFood state
+            if rest_uuid and len(str(rest_uuid)) == 36 and token:
+                try:
+                    refreshed_menu = go_api.fetch_menus(page, token, rest_uuid, passkey=passkey)
+                    if refreshed_menu and isinstance(refreshed_menu, dict) and (refreshed_menu.get("menus") or refreshed_menu.get("categories")):
+                        os.makedirs(os.path.dirname(cache_menu_path), exist_ok=True)
+                        with open(cache_menu_path, "w", encoding="utf-8") as f_cache:
+                            json.dump(refreshed_menu, f_cache, ensure_ascii=False, indent=2)
+                except Exception as cache_err:
+                    logger.warning(f"⚠️ Gagal memperbarui cache menu GoFood setelah push: {cache_err}")
         finally:
             proc_killed = False
             try:
@@ -3639,6 +4113,91 @@ async def parse_c5_endpoint(
             }
             validation_error_messages.append(msg)
 
+    # ── Category Contiguity / Discontinuous Order Pass ──
+    # Within each Store (SID), all items belonging to the same category MUST appear
+    # in contiguous/consecutive rows. If category A appears, then category B appears,
+    # and then category A appears again, the category order is fragmented and invalid.
+    store_cat_blocks = {}       # s_id -> list of block dicts
+    store_current_block = {}    # s_id -> current block dict
+    discontinuous_categories = {}  # (s_id, cat_key) -> error info dict
+
+    for r_num, row in enumerate(rows[1:], start=2):
+        if not row or all(v is None for v in row):
+            continue
+        s_id = get_val(row, sid_col) or "STORE-DEFAULT"
+        c_id = get_val(row, cat_id_col)
+        c_name = get_val(row, cat_col)
+        i_id = get_val(row, item_id_col)
+        i_name = get_val(row, item_col)
+        i_imp = get_val(row, item_name_imp_col) if item_name_imp_col else ""
+
+        # Skip rows without item and category info
+        if not c_name and not c_id and not i_name and not i_id and not i_imp:
+            continue
+
+        cat_key = norm_str(c_name) if c_name else (str(c_id).strip() if c_id else "")
+        if not cat_key:
+            continue
+
+        curr_b = store_current_block.get(s_id)
+        if curr_b is not None and (curr_b["key"] == cat_key or (c_id and curr_b["id"] and curr_b["id"] == c_id)):
+            # Same category continues contiguously
+            curr_b["end_row"] = r_num
+            if c_id and not curr_b["id"]:
+                curr_b["id"] = c_id
+            if c_name and not curr_b["name"]:
+                curr_b["name"] = c_name
+        else:
+            # Transition to a new category block
+            prior_blocks = [
+                b for b in store_cat_blocks.get(s_id, [])
+                if b["key"] == cat_key or (c_id and b["id"] and b["id"] == c_id)
+            ]
+            new_b = {
+                "name": c_name or (prior_blocks[0]["name"] if prior_blocks else cat_key),
+                "id": c_id or (prior_blocks[0]["id"] if prior_blocks else ""),
+                "key": cat_key,
+                "start_row": r_num,
+                "end_row": r_num,
+            }
+            if prior_blocks:
+                # Discontinuous / fragmented category!
+                err_key = (s_id, cat_key)
+                if err_key not in discontinuous_categories:
+                    discontinuous_categories[err_key] = {
+                        "s_id": s_id,
+                        "name": new_b["name"],
+                        "id": new_b["id"],
+                        "key": cat_key,
+                    }
+                if c_id:
+                    discontinuous_categories[(s_id, str(c_id).strip())] = discontinuous_categories[err_key]
+
+            store_cat_blocks.setdefault(s_id, []).append(new_b)
+            store_current_block[s_id] = new_b
+
+    seen_disc_keys = set()
+    for (s_id, c_key), disc in list(discontinuous_categories.items()):
+        unique_disc_id = (s_id, disc["key"])
+        if unique_disc_id in seen_disc_keys:
+            continue
+        seen_disc_keys.add(unique_disc_id)
+        all_blocks = [
+            f"baris {b['start_row']}-{b['end_row']}" if b['start_row'] != b['end_row'] else f"baris {b['start_row']}"
+            for b in store_cat_blocks.get(s_id, [])
+            if b["key"] == disc["key"] or (disc["id"] and b["id"] == disc["id"])
+        ]
+        blocks_str = ", ".join(all_blocks)
+        disc["blocks_str"] = blocks_str
+        msg = (
+            f"Urutan kategori tidak valid untuk Store ID '{s_id}'. Kategori '{disc['name']}' terpisah / tidak berurutan "
+            f"(ditemukan terpecah di {len(all_blocks)} kelompok baris: {blocks_str}). "
+            f"Semua item dalam kategori yang sama harus dikelompokkan bersama dalam satu blok baris yang berurutan. "
+            f"Perbaiki urutan baris di C5 sebelum melakukan push."
+        )
+        disc["error"] = msg
+        validation_error_messages.append(msg)
+
     stores_dict = {}
     parsed_items = []
 
@@ -3647,6 +4206,7 @@ async def parse_c5_endpoint(
     price_changes_count = 0
     price_warning_count = 0
     category_changes_count = 0
+    order_changes_count = 0
     photo_changes_count = 0
     description_changes_count = 0
     offline_price_changes_count = 0
@@ -3836,7 +4396,23 @@ async def parse_c5_endpoint(
     def _parse_json_baseline(path, sid, by_id, by_name, categories, category_ids):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+
+            def _sort_by_weight(entries):
+                indexed = list(enumerate(entries))
+                def _get_key(pair):
+                    idx, item = pair
+                    if isinstance(item, dict) and item.get("weight") is not None:
+                        try:
+                            return (0, int(item["weight"]))
+                        except (ValueError, TypeError):
+                            pass
+                    return (1, idx)
+                indexed.sort(key=_get_key)
+                return [item for _, item in indexed]
+
             if "items" in data and isinstance(data.get("items"), list):
+                base_categories_order = []
+                base_category_item_counts = {}
                 for it in data["items"]:
                     it_sid = str(it.get("Store ID") or it.get("store_id") or it.get("SID") or "").strip()
                     if it_sid and sid and it_sid.lower() != str(sid).strip().lower():
@@ -3844,9 +4420,12 @@ async def parse_c5_endpoint(
                     cat_name = it.get("Category") or it.get("Nama Kategori") or it.get("Nama kategori") or it.get("kategori") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
+                        if norm_str(cat_name) not in [norm_str(c) for c in base_categories_order]:
+                            base_categories_order.append(cat_name)
                     cat_id = it.get("Category ID") or it.get("category_id") or it.get("category_common_id")
-                    if cat_id:
-                        category_ids.add(str(cat_id).strip())
+                    cat_id_str = str(cat_id).strip() if cat_id else ""
+                    if cat_id_str:
+                        category_ids.add(cat_id_str)
                     raw_price = (
                         it.get("Current Fake Price (Rp)") or it.get("Harga Fake")
                         or it.get("Harga item sebelum promo (harga coret)")
@@ -3855,14 +4434,22 @@ async def parse_c5_endpoint(
                         or it.get("price") or it.get("Harga") or it.get("harga")
                     )
                     price_val = parse_price(raw_price)
+                    iid = str(it.get("Item ID") or it.get("common_id") or it.get("id") or "").strip()
+                    c_key = norm_str(cat_name)
+                    cat_rank = ([norm_str(c) for c in base_categories_order].index(c_key) + 1) if c_key else 1
+                    base_category_item_counts[c_key] = base_category_item_counts.get(c_key, 0) + 1
+                    item_rank = base_category_item_counts[c_key]
                     rec = {
+                        "id": iid,
+                        "category_id": cat_id_str,
                         "name": it.get("Item") or it.get("Nama Item") or it.get("Nama item") or it.get("name") or "",
                         "price": price_val,
                         "image": it.get("Photo Link") or it.get("Link Foto") or it.get("Link foto") or it.get("image") or "",
                         "category": cat_name,
                         "description": it.get("Description") or it.get("Deskripsi") or it.get("Deskripsi item") or it.get("description") or "",
+                        "category_weight": cat_rank,
+                        "item_weight": item_rank,
                     }
-                    iid = str(it.get("Item ID") or it.get("common_id") or it.get("id") or "").strip()
                     if iid:
                         by_id[iid] = rec
                     nn = norm_str(rec["name"])
@@ -3870,48 +4457,66 @@ async def parse_c5_endpoint(
                         by_name[nn] = rec
             elif "catalogs" in (data.get("data") or data if isinstance(data.get("data") or data, dict) else {}):
                 catalogs_list = data.get("data", {}).get("catalogs") or data.get("catalogs") or []
-                for cat in catalogs_list:
+                for cat_idx, cat in enumerate(catalogs_list):
                     cat_name = cat.get("name") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
+                    cat_id_str = str(cat.get("common_id") or cat.get("id") or "").strip()
                     for cat_id in (cat.get("common_id"), cat.get("id")):
                         if cat_id:
                             category_ids.add(str(cat_id).strip())
-                    for dish in cat.get("dishes", []):
+                    for dish_idx, dish in enumerate(cat.get("dishes", [])):
                         raw_price = dish.get("list_price") or dish.get("price") or "0"
                         price_val = float(raw_price) / 100000.0 if float(raw_price) > 1000 else float(raw_price)
+                        iid = str(dish.get("id") or "").strip()
                         rec = {
+                            "id": iid,
+                            "category_id": cat_id_str,
                             "name": dish.get("name") or "",
                             "price": price_val,
                             "image": dish.get("picture") or "",
                             "category": cat_name,
                             "description": dish.get("description") or "",
+                            "category_weight": cat_idx + 1,
+                            "item_weight": dish_idx + 1,
                         }
-                        iid = str(dish.get("id") or "").strip()
                         if iid:
                             by_id[iid] = rec
                         nn = norm_str(rec["name"])
                         if nn and nn not in by_name:
                             by_name[nn] = rec
             else:
-                for menu in (data.get("menus") or data.get("categories") or []):
+                raw_menus = data.get("menus") or data.get("categories") or []
+                sorted_menus = _sort_by_weight(raw_menus)
+                for cat_idx, menu in enumerate(sorted_menus):
                     cat_name = menu.get("name") or menu.get("category_name") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
+                    cat_id_str = str(menu.get("common_id") or menu.get("id") or "").strip()
                     for cat_id in (menu.get("common_id"), menu.get("id")):
                         if cat_id:
                             category_ids.add(str(cat_id).strip())
-                    for it in (menu.get("menu_items") or menu.get("items") or []):
+                    raw_items = menu.get("menu_items") or menu.get("items") or []
+                    sorted_items = _sort_by_weight(raw_items)
+                    for it_idx, it in enumerate(sorted_items):
+                        iid_common = str(it.get("common_id") or "").strip()
+                        iid_v1 = str(it.get("id") or it.get("item_id") or "").strip()
+                        iid = iid_common or iid_v1
                         rec = {
+                            "id": iid,
+                            "category_id": cat_id_str,
                             "name": it.get("name") or it.get("item_name") or "",
                             "price": parse_price(it.get("price")),
                             "image": it.get("image") or it.get("photo_url") or "",
                             "category": cat_name,
                             "description": it.get("description") or "",
+                            "category_weight": cat_idx + 1,
+                            "item_weight": it_idx + 1,
                         }
-                        iid = str(it.get("common_id") or it.get("id") or it.get("item_id") or "").strip()
-                        if iid:
-                            by_id[iid] = rec
+                        if iid_common:
+                            by_id[iid_common] = rec
+                        if iid_v1:
+                            by_id[iid_v1] = rec
                         nn = norm_str(rec["name"])
                         if nn and nn not in by_name:
                             by_name[nn] = rec
@@ -3935,6 +4540,8 @@ async def parse_c5_endpoint(
                     desc_idx = exp_hmap.get("Description") or exp_hmap.get("Deskripsi")
                     price_idx = exp_hmap.get("Current Fake Price (Rp)") or exp_hmap.get("Current Real Price (Rp)") or exp_hmap.get("Current Fake Price")
 
+                    base_categories_order = []
+                    base_category_item_counts = {}
                     for r in exp_rows[1:]:
                         if not r or exp_sid_idx is None or exp_sid_idx >= len(r):
                             continue
@@ -3943,20 +4550,32 @@ async def parse_c5_endpoint(
                         cname = str(r[cat_idx]).strip() if cat_idx is not None and cat_idx < len(r) and r[cat_idx] is not None else ""
                         if cname:
                             categories.add(norm_str(cname))
-                        if cat_id_idx is not None and cat_id_idx < len(r) and r[cat_id_idx]:
-                            category_ids.add(str(r[cat_id_idx]).strip())
+                            if norm_str(cname) not in [norm_str(c) for c in base_categories_order]:
+                                base_categories_order.append(cname)
+                        cid_val = str(r[cat_id_idx]).strip() if cat_id_idx is not None and cat_id_idx < len(r) and r[cat_id_idx] else ""
+                        if cid_val:
+                            category_ids.add(cid_val)
                         iname = str(r[name_idx]).strip() if name_idx is not None and name_idx < len(r) and r[name_idx] is not None else ""
                         iid = str(r[iid_idx]).strip() if iid_idx is not None and iid_idx < len(r) and r[iid_idx] is not None else ""
                         photo = str(r[photo_idx]).strip() if photo_idx is not None and photo_idx < len(r) and r[photo_idx] is not None else ""
                         desc = str(r[desc_idx]).strip() if desc_idx is not None and desc_idx < len(r) and r[desc_idx] is not None else ""
                         price = parse_price(r[price_idx]) if price_idx is not None and price_idx < len(r) else None
 
+                        c_key = norm_str(cname)
+                        cat_rank = ([norm_str(c) for c in base_categories_order].index(c_key) + 1) if c_key else 1
+                        base_category_item_counts[c_key] = base_category_item_counts.get(c_key, 0) + 1
+                        item_rank = base_category_item_counts[c_key]
+
                         rec = {
+                            "id": iid,
+                            "category_id": cid_val,
                             "name": iname,
                             "price": price,
                             "image": photo,
                             "category": cname,
                             "description": desc,
+                            "category_weight": cat_rank,
+                            "item_weight": item_rank,
                         }
                         if iid:
                             by_id[iid] = rec
@@ -4019,8 +4638,11 @@ async def parse_c5_endpoint(
 
     c5_parsed_ids_by_sid = {}
     c5_parsed_names_by_sid = {}
+    c5_active_categories_by_sid = {}
+    c5_category_item_counts = {}
     drive_image_cache = {}
     offline_records_to_sync = []
+    seen_invalid_cat_names = set()
 
     def is_drive_folder_link(value):
         value = str(value or "").strip()
@@ -4065,6 +4687,8 @@ async def parse_c5_endpoint(
         if sid not in c5_parsed_ids_by_sid:
             c5_parsed_ids_by_sid[sid] = set()
             c5_parsed_names_by_sid[sid] = set()
+            c5_active_categories_by_sid[sid] = []
+            c5_category_item_counts[sid] = {}
 
         if item_id:
             c5_parsed_ids_by_sid[sid].add(str(item_id).strip())
@@ -4083,11 +4707,31 @@ async def parse_c5_endpoint(
         elif item_name and norm_str(item_name) in baseline["by_name"]:
             base_rec = baseline["by_name"][norm_str(item_name)]
 
+        # If Item ID was omitted in C5 for an existing item matched by name,
+        # backfill the baseline Item ID so it is updated/moved rather than duplicated.
+        if not item_id and base_rec and base_rec.get("id"):
+            candidate_base_id = str(base_rec["id"]).strip()
+            if candidate_base_id and candidate_base_id not in c5_parsed_ids_by_sid[sid]:
+                item_id = candidate_base_id
+                c5_parsed_ids_by_sid[sid].add(item_id)
+
         base_name = base_rec["name"] if base_rec else item_name
         base_price = base_rec["price"] if base_rec else None
         base_cat = base_rec["category"] if base_rec else ""
         base_img = base_rec["image"] if base_rec else ""
         base_desc = base_rec["description"] if base_rec else ""
+
+        effective_cat_name = (cat_name or base_cat or "").strip()
+        if effective_cat_name and effective_cat_name not in c5_active_categories_by_sid[sid]:
+            c5_active_categories_by_sid[sid].append(effective_cat_name)
+
+        cat_order_list = c5_active_categories_by_sid.get(sid, [])
+        cat_weight = (cat_order_list.index(effective_cat_name) + 1) if effective_cat_name in cat_order_list else 1
+
+        if sid not in c5_category_item_counts:
+            c5_category_item_counts[sid] = {}
+        c5_category_item_counts[sid][effective_cat_name] = c5_category_item_counts[sid].get(effective_cat_name, 0) + 1
+        item_weight = c5_category_item_counts[sid][effective_cat_name]
 
         # Resolve Drive images after baseline matching so rows with an empty
         # C5 item-name cell can still use the baseline item name.
@@ -4120,11 +4764,8 @@ async def parse_c5_endpoint(
             new_fake_price = parse_price(curr_fake_raw)
 
         if cat_name and (
-            not cat_id
-            or (
-                norm_str(cat_name) not in baseline["categories"]
-                and str(cat_id).strip() not in baseline["category_ids"]
-            )
+            norm_str(cat_name) not in baseline["categories"]
+            and (not cat_id or str(cat_id).strip() not in baseline["category_ids"])
         ):
             is_new_category = True
 
@@ -4158,6 +4799,22 @@ async def parse_c5_endpoint(
                 "new_val": f"Gunakan nama yang sama untuk Category ID '{cat_id}'"
             })
 
+        # Check Category Contiguity / Discontinuous Order error for this row
+        c_lookup_key = norm_str(cat_name) if cat_name else (str(cat_id).strip() if cat_id else "")
+        disc_info = discontinuous_categories.get((sid, c_lookup_key))
+        if not disc_info and cat_id:
+            disc_info = discontinuous_categories.get((sid, str(cat_id).strip()))
+        if disc_info:
+            is_valid = False
+            validation_errors_count += 1
+            cat_order_err = f"Urutan kategori tidak valid: Kategori '{disc_info['name']}' terpecah ({disc_info.get('blocks_str', '')}). Semua item dalam kategori harus berada dalam satu kelompok baris berurutan."
+            validation_error = f"{validation_error} {cat_order_err}" if validation_error else cat_order_err
+            diff_details.append({
+                "column": "Urutan Kategori",
+                "old_val": "Urutan Tidak Valid",
+                "new_val": f"Kategori terpecah ({disc_info.get('blocks_str', '')})"
+            })
+
         row_platform = get_val(row, platform_col) or baseline.get("baseline_platform") or ""
         normalized_platform = re.sub(r"[^a-z]", "", str(row_platform).casefold())
         is_grab_platform = normalized_platform in {"grab", "grabfood"}
@@ -4176,6 +4833,54 @@ async def parse_c5_endpoint(
                 "column": "Harga item baru",
                 "old_val": "(Belum ada)",
                 "new_val": new_fake_raw or "(Kosong)",
+            })
+
+        # Character length limits:
+        # Nama Item <= 60 karakter
+        # Category <= 80 karakter
+        # Description <= 250 karakter
+        clean_item_name = (display_name or "").strip()
+        invalid_name_length = bool(clean_item_name and len(clean_item_name) > 60)
+        if invalid_name_length:
+            name_len_err = f"Nama item melebihi batas maksimal 60 karakter ({len(clean_item_name)} karakter): '{clean_item_name}' (Store ID: {sid}, baris {r_idx}). Perpendek nama item sebelum push."
+            is_valid = False
+            validation_errors_count += 1
+            validation_error_messages.append(name_len_err)
+            validation_error = f"{validation_error} {name_len_err}" if validation_error else name_len_err
+            diff_details.append({
+                "column": "Nama Item",
+                "old_val": "Maksimal 60 karakter",
+                "new_val": f"{len(clean_item_name)} karakter (Terlalu panjang)",
+            })
+
+        clean_cat_name = (cat_name or "").strip()
+        invalid_cat_length = bool(clean_cat_name and len(clean_cat_name) > 80)
+        if invalid_cat_length:
+            cat_len_err = f"Nama kategori melebihi batas maksimal 80 karakter ({len(clean_cat_name)} karakter): '{clean_cat_name}' (Store ID: {sid}, baris {r_idx}). Perpendek nama kategori sebelum push."
+            is_valid = False
+            validation_errors_count += 1
+            if (sid, clean_cat_name) not in seen_invalid_cat_names:
+                seen_invalid_cat_names.add((sid, clean_cat_name))
+                validation_error_messages.append(cat_len_err)
+            validation_error = f"{validation_error} {cat_len_err}" if validation_error else cat_len_err
+            diff_details.append({
+                "column": "Category",
+                "old_val": "Maksimal 80 karakter",
+                "new_val": f"{len(clean_cat_name)} karakter (Terlalu panjang)",
+            })
+
+        clean_desc = (description or "").strip()
+        invalid_desc_length = bool(clean_desc and len(clean_desc) > 250)
+        if invalid_desc_length:
+            desc_len_err = f"Deskripsi item melebihi batas maksimal 250 karakter ({len(clean_desc)} karakter) pada item '{clean_item_name or 'Item'}' (Store ID: {sid}, baris {r_idx}). Perpendek deskripsi sebelum push."
+            is_valid = False
+            validation_errors_count += 1
+            validation_error_messages.append(desc_len_err)
+            validation_error = f"{validation_error} {desc_len_err}" if validation_error else desc_len_err
+            diff_details.append({
+                "column": "Description",
+                "old_val": "Maksimal 250 karakter",
+                "new_val": f"{len(clean_desc)} karakter (Terlalu panjang)",
             })
 
         # 1. New Item & New Category Indications
@@ -4256,8 +4961,8 @@ async def parse_c5_endpoint(
         if new_fake_price is not None:
             if base_price is not None and float(base_price) > 0:
                 price_changed = float(new_fake_price) != float(base_price)
-                price_diff_percent = (abs(float(new_fake_price) - float(base_price)) / float(base_price)) * 100.0
-                if price_changed and price_diff_percent > 15.0:
+                price_diff_percent = ((float(new_fake_price) - float(base_price)) / float(base_price)) * 100.0
+                if price_changed and abs(price_diff_percent) > 15.0:
                     price_warning = True
                     steps = calculate_price_steps(float(base_price), float(new_fake_price), max_step_pct=0.15)
                     price_steps_count = len(steps)
@@ -4268,12 +4973,14 @@ async def parse_c5_endpoint(
 
         if price_changed:
             if price_warning:
+                direction_label = "Kenaikan" if price_diff_percent > 0 else "Penurunan"
+                pct_display = f"{price_diff_percent:+.1f}%"
                 if grab_price_limit_exceeded:
-                    price_note = f"(⚠️ Kenaikan {price_diff_percent:.1f}% butuh {price_steps_count} tahap, melebihi kuota 10 perubahan per 24 jam)"
+                    price_note = f"(⚠️ {direction_label} {pct_display} butuh {price_steps_count} tahap, melebihi kuota 10 perubahan per 24 jam)"
                 elif price_steps_count > 1:
-                    price_note = f"(⚠️ Perubahan {price_diff_percent:.1f}% >15% - Push Bertahap {price_steps_count} tahap)"
+                    price_note = f"(⚠️ {direction_label} {pct_display} >15% - Push Bertahap {price_steps_count} tahap)"
                 else:
-                    price_note = f"(⚠️ Perubahan {price_diff_percent:.1f}% >15% - Push Bertahap)"
+                    price_note = f"(⚠️ {direction_label} {pct_display} >15% - Push Bertahap)"
                 diff_details.append({
                     "column": "Price",
                     "old_val": f"Rp {float(base_price):,.0f}",
@@ -4301,18 +5008,67 @@ async def parse_c5_endpoint(
                         other_changed = True
                         diff_details.append({"column": col_k, "old_val": "", "new_val": v_str})
 
-        is_changed = is_new_item or is_new_category or name_changed or category_changed or photo_changed or description_changed or price_changed or other_changed or (not is_valid)
+        # 7. Check category order and item order within category
+        base_cat_weight = base_rec.get("category_weight") if base_rec else None
+        base_item_weight = base_rec.get("item_weight") if base_rec else None
+
+        cat_order_changed = bool(
+            base_rec is not None
+            and not is_new_category
+            and not is_new_item
+            and not category_changed
+            and base_cat_weight is not None
+            and cat_weight is not None
+            and int(cat_weight) != int(base_cat_weight)
+        )
+        item_order_changed = bool(
+            base_rec is not None
+            and not is_new_item
+            and not category_changed
+            and base_item_weight is not None
+            and item_weight is not None
+            and int(item_weight) != int(base_item_weight)
+        )
+        order_changed = cat_order_changed or item_order_changed
+
+        if cat_order_changed:
+            diff_details.append({
+                "column": "Urutan Kategori",
+                "old_val": f"Urutan ke-{base_cat_weight}",
+                "new_val": f"Urutan ke-{cat_weight}"
+            })
+        if item_order_changed:
+            diff_details.append({
+                "column": "Urutan Item",
+                "old_val": f"Posisi ke-{base_item_weight}",
+                "new_val": f"Posisi ke-{item_weight}"
+            })
+
+        is_changed = (
+            is_new_item or is_new_category or name_changed or category_changed
+            or photo_changed or description_changed or price_changed or order_changed
+            or other_changed or (not is_valid)
+        )
 
         change_types = []
         if not is_valid:
             if (sid, cat_id) in inconsistent_cat_ids:
                 change_types.append("INVALID_CATEGORY_CONSISTENCY")
+            if disc_info:
+                change_types.append("INVALID_CATEGORY_ORDER")
             if invalid_new_item_price:
                 change_types.append("INVALID_NEW_ITEM_PRICE")
+            if invalid_name_length:
+                change_types.append("INVALID_ITEM_NAME_LENGTH")
+            if invalid_cat_length:
+                change_types.append("INVALID_CATEGORY_LENGTH")
+            if invalid_desc_length:
+                change_types.append("INVALID_DESCRIPTION_LENGTH")
         if grab_price_limit_exceeded:
             is_valid = False
             validation_errors_count += 1
-            limit_error = f"Kenaikan harga Grab ({price_diff_percent:.1f}%) membutuhkan {price_steps_count} tahapan bertahap, melebihi kuota maksimal 10 perubahan per 24 jam. Item: '{display_name}' (Store ID: {sid}, baris {r_idx})."
+            direction_label = "Kenaikan" if price_diff_percent > 0 else "Penurunan"
+            limit_error = f"{direction_label} harga Grab ({price_diff_percent:+.1f}%) membutuhkan {price_steps_count} tahapan bertahap, melebihi kuota maksimal 10 perubahan per 24 jam. Item: '{display_name}' (Store ID: {sid}, baris {r_idx})."
             validation_error_messages.append(limit_error)
             validation_error = f"{validation_error} {limit_error}" if validation_error else limit_error
             change_types.append("GRAB_PRICE_LIMIT_EXCEEDED")
@@ -4331,6 +5087,12 @@ async def parse_c5_endpoint(
         if category_changed:
             change_types.append("CATEGORY_CHANGE")
             category_changes_count += 1
+        if cat_order_changed:
+            change_types.append("CATEGORY_ORDER_CHANGE")
+        if item_order_changed:
+            change_types.append("ITEM_ORDER_CHANGE")
+        if order_changed:
+            order_changes_count += 1
         if photo_changed:
             change_types.append("PHOTO_CHANGE")
             photo_changes_count += 1
@@ -4385,17 +5147,22 @@ async def parse_c5_endpoint(
             "price_warning": price_warning,
             "grab_price_limit_exceeded": grab_price_limit_exceeded,
             "price_diff_percent": round(price_diff_percent, 2),
+            "category_weight": cat_weight,
+            "item_weight": item_weight,
             "change_types": change_types,
             "diff_details": diff_details,
             "changes": {
                 "name_changed": name_changed,
                 "category_changed": category_changed,
                 "photo_changed": photo_changed,
-            "description_changed": description_changed,
-            "offline_price_changed": offline_price_changed,
-            "price_changed": price_changed,
+                "description_changed": description_changed,
+                "offline_price_changed": offline_price_changed,
+                "price_changed": price_changed,
                 "price_warning": price_warning,
                 "price_diff_percent": round(price_diff_percent, 2),
+                "order_changed": order_changed,
+                "cat_order_changed": cat_order_changed,
+                "item_order_changed": item_order_changed,
                 "other_changed": other_changed,
                 "is_new_item": is_new_item,
                 "is_new_category": is_new_category,
@@ -4410,9 +5177,14 @@ async def parse_c5_endpoint(
         parsed_ids = c5_parsed_ids_by_sid.get(sid, set())
         parsed_names = c5_parsed_names_by_sid.get(sid, set())
 
+        seen_base_ids = set()
         for base_iid, base_rec in baseline["by_id"].items():
+            primary_base_iid = str(base_rec.get("id") or base_iid).strip()
+            if primary_base_iid in seen_base_ids:
+                continue
+            seen_base_ids.add(primary_base_iid)
             norm_bname = norm_str(base_rec.get("name"))
-            if base_iid not in parsed_ids and norm_bname not in parsed_names:
+            if primary_base_iid not in parsed_ids and base_iid not in parsed_ids and norm_bname not in parsed_names:
                 deleted_items_count += 1
                 total_changes += 1
                 sinfo["changed_count"] += 1
@@ -4422,7 +5194,7 @@ async def parse_c5_endpoint(
                     "outlet_name": sinfo["name"],
                     "category_id": None,
                     "category": base_rec.get("category"),
-                    "item_id": base_iid,
+                    "item_id": primary_base_iid,
                     "item_name": base_rec.get("name"),
                     "item_name_new": None,
                     "photo_link": base_rec.get("image"),
@@ -4447,6 +5219,8 @@ async def parse_c5_endpoint(
                     "is_new_item": False,
                     "is_new_category": False,
                     "is_deleted_item": True,
+                    "category_weight": None,
+                    "item_weight": None,
                     "change_types": ["DELETE_ITEM"],
                     "diff_details": [{
                         "column": "Item Status",
@@ -4459,6 +5233,9 @@ async def parse_c5_endpoint(
                         "photo_changed": False,
                         "description_changed": False,
                         "price_changed": False,
+                        "order_changed": False,
+                        "cat_order_changed": False,
+                        "item_order_changed": False,
                         "other_changed": False,
                         "is_new_item": False,
                         "is_new_category": False,
@@ -4466,6 +5243,10 @@ async def parse_c5_endpoint(
                         "invalid": False,
                     }
                 })
+
+    for p_item in parsed_items:
+        p_sid = p_item.get("sid")
+        p_item["c5_categories"] = list(c5_active_categories_by_sid.get(p_sid, []))
 
     if offline_records_to_sync:
         try:
@@ -4487,6 +5268,7 @@ async def parse_c5_endpoint(
             "total_changes": total_changes,
             "name_changes": name_changes_count,
             "category_changes": category_changes_count,
+            "order_changes_count": order_changes_count,
             "photo_changes": photo_changes_count,
             "photo_resolution_errors_count": photo_resolution_errors_count,
             "description_changes": description_changes_count,
@@ -4500,6 +5282,15 @@ async def parse_c5_endpoint(
             "validation_errors_count": validation_errors_count,
             "invalid_new_item_prices_count": sum(
                 1 for item in parsed_items if "INVALID_NEW_ITEM_PRICE" in item.get("change_types", [])
+            ),
+            "invalid_name_length_count": sum(
+                1 for item in parsed_items if "INVALID_ITEM_NAME_LENGTH" in item.get("change_types", [])
+            ),
+            "invalid_category_length_count": sum(
+                1 for item in parsed_items if "INVALID_CATEGORY_LENGTH" in item.get("change_types", [])
+            ),
+            "invalid_description_length_count": sum(
+                1 for item in parsed_items if "INVALID_DESCRIPTION_LENGTH" in item.get("change_types", [])
             ),
             "has_validation_errors": len(validation_error_messages) > 0,
             "validation_error_messages": validation_error_messages,
@@ -4606,6 +5397,68 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
                 continue
             if _provision_grab_outlet_from_master(db, sid):
                 provisioned_grab_sids.add(sid)
+
+    # ── Category Order Contiguity Validation (All Platforms) ──
+    # Reject push if any update is marked with INVALID_CATEGORY_ORDER, or if the updates
+    # themselves have interleaved/fragmented categories for the same SID.
+    discontinuous_updates = {}
+    for item in request.updates:
+        changes = item.changes or []
+        if "INVALID_CATEGORY_ORDER" in changes:
+            sid = item.sid or "-"
+            c_name = item.category or "-"
+            discontinuous_updates.setdefault(sid, set()).add(c_name)
+
+    updates_by_sid = {}
+    for item in request.updates:
+        updates_by_sid.setdefault(item.sid or "STORE-DEFAULT", []).append(item)
+
+    for s_id, s_items in updates_by_sid.items():
+        seen_cats = set()
+        current_cat = None
+        for it in s_items:
+            c_name = (it.category or "").strip()
+            c_key = norm_str(c_name) or str(it.category_id or "").strip()
+            if not c_key:
+                continue
+            if c_key != current_cat:
+                if c_key in seen_cats:
+                    discontinuous_updates.setdefault(s_id, set()).add(c_name or c_key)
+                seen_cats.add(c_key)
+                current_cat = c_key
+
+    if discontinuous_updates:
+        details = []
+        for s_id, cat_names in discontinuous_updates.items():
+            cats_str = ", ".join([f"'{c}'" for c in sorted(cat_names)])
+            details.append(f"Store ID {s_id}: kategori {cats_str}")
+        full_detail = "; ".join(details)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Urutan kategori tidak valid: {full_detail}. Kategori yang sama terpecah / diselingi kategori lain. Semua item dalam kategori yang sama harus dikelompokkan bersama dalam baris yang berurutan. Perbaiki urutan di file C5 sebelum push."
+        )
+
+    # ── Field Character Length Validations (All Platforms) ──
+    # Nama item <= 60, Category <= 80, Description <= 250
+    invalid_length_errors = []
+    for item in request.updates:
+        target_name = (item.item_name_new or item.item_name or "").strip()
+        if len(target_name) > 60:
+            invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks 60)")
+        target_cat = (item.category or "").strip()
+        if len(target_cat) > 80:
+            invalid_length_errors.append(f"Kategori '{target_cat[:25]}...' ({len(target_cat)} karakter, maks 80)")
+        target_desc = (item.description or "").strip()
+        if len(target_desc) > 250:
+            invalid_length_errors.append(f"Deskripsi item '{target_name[:20]}' ({len(target_desc)} karakter, maks 250)")
+
+    if invalid_length_errors:
+        err_str = "; ".join(invalid_length_errors[:10])
+        more = f" dan {len(invalid_length_errors) - 10} lainnya" if len(invalid_length_errors) > 10 else ""
+        raise HTTPException(
+            status_code=422,
+            detail=f"Batas panjang karakter terlampaui: {err_str}{more}. Batas maksimal: Nama Item 60 karakter, Kategori 80 karakter, Deskripsi 250 karakter. Perbaiki di file C5 sebelum push."
+        )
 
     if target_platform == "gofood":
         import math
