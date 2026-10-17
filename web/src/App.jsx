@@ -48,7 +48,7 @@ export default function Home() {
 
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <div className={activeTab === "pull" ? "" : "hidden"}><MenuPullTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
-        <div className={activeTab === "push" ? "" : "hidden"}><MenuPushTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
+        <div className={activeTab === "push" ? "" : "hidden"}><MenuPushTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} onNavigateTab={handleTabChange} /></div>
         <div className={activeTab === "edit-harga" ? "" : "hidden"}><EditHargaTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
         <div className={activeTab === "shopee-edit-harga" ? "" : "hidden"}><ShopeeEditHargaTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
         <div className={activeTab === "session" ? "" : "hidden"}><SessionTab API_BASE_URL={API_BASE_URL} API_SECRET_KEY={API_SECRET_KEY} /></div>
