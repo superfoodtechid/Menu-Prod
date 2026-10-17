@@ -4401,11 +4401,13 @@ async def parse_c5_endpoint(
                 indexed = list(enumerate(entries))
                 def _get_key(pair):
                     idx, item = pair
-                    if isinstance(item, dict) and item.get("weight") is not None:
-                        try:
-                            return (0, int(item["weight"]))
-                        except (ValueError, TypeError):
-                            pass
+                    if isinstance(item, dict):
+                        w = item.get("weight") if item.get("weight") is not None else item.get("sortOrder")
+                        if w is not None:
+                            try:
+                                return (0, int(w))
+                            except (ValueError, TypeError):
+                                pass
                     return (1, idx)
                 indexed.sort(key=_get_key)
                 return [item for _, item in indexed]
@@ -4489,11 +4491,11 @@ async def parse_c5_endpoint(
                 raw_menus = data.get("menus") or data.get("categories") or []
                 sorted_menus = _sort_by_weight(raw_menus)
                 for cat_idx, menu in enumerate(sorted_menus):
-                    cat_name = menu.get("name") or menu.get("category_name") or ""
+                    cat_name = menu.get("name") or menu.get("category_name") or menu.get("categoryName") or ""
                     if cat_name:
                         categories.add(norm_str(cat_name))
-                    cat_id_str = str(menu.get("common_id") or menu.get("id") or "").strip()
-                    for cat_id in (menu.get("common_id"), menu.get("id")):
+                    cat_id_str = str(menu.get("categoryID") or menu.get("common_id") or menu.get("id") or "").strip()
+                    for cat_id in (menu.get("categoryID"), menu.get("common_id"), menu.get("id")):
                         if cat_id:
                             category_ids.add(str(cat_id).strip())
                     raw_items = menu.get("menu_items") or menu.get("items") or []
@@ -4501,22 +4503,34 @@ async def parse_c5_endpoint(
                     for it_idx, it in enumerate(sorted_items):
                         iid_common = str(it.get("common_id") or "").strip()
                         iid_v1 = str(it.get("id") or it.get("item_id") or "").strip()
-                        iid = iid_common or iid_v1
+                        iid_grab = str(it.get("itemID") or "").strip()
+                        iid = iid_common or iid_v1 or iid_grab
+                        raw_price = it.get("price")
+                        if raw_price is None and it.get("priceInMin") is not None:
+                            try:
+                                raw_price = float(it["priceInMin"]) / 100.0
+                            except (ValueError, TypeError):
+                                raw_price = None
+                        img_val = it.get("image") or it.get("photo_url") or it.get("imageURL") or (it.get("imageURLs") or [""])[0] if (it.get("image") or it.get("photo_url") or it.get("imageURL") or it.get("imageURLs")) else ""
+                        cat_w = int(menu.get("sortOrder")) if menu.get("sortOrder") is not None else (cat_idx + 1)
+                        it_w = int(it.get("sortOrder")) if it.get("sortOrder") is not None else (it_idx + 1)
                         rec = {
                             "id": iid,
                             "category_id": cat_id_str,
-                            "name": it.get("name") or it.get("item_name") or "",
-                            "price": parse_price(it.get("price")),
-                            "image": it.get("image") or it.get("photo_url") or "",
+                            "name": it.get("name") or it.get("item_name") or it.get("itemName") or "",
+                            "price": parse_price(raw_price),
+                            "image": img_val,
                             "category": cat_name,
                             "description": it.get("description") or "",
-                            "category_weight": cat_idx + 1,
-                            "item_weight": it_idx + 1,
+                            "category_weight": cat_w,
+                            "item_weight": it_w,
                         }
                         if iid_common:
                             by_id[iid_common] = rec
                         if iid_v1:
                             by_id[iid_v1] = rec
+                        if iid_grab:
+                            by_id[iid_grab] = rec
                         nn = norm_str(rec["name"])
                         if nn and nn not in by_name:
                             by_name[nn] = rec
