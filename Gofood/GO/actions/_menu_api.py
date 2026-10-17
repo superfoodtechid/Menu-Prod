@@ -168,6 +168,24 @@ def create_category(page, token, group_id, payload, passkey=None):
     return _post(page, token, f"{BASE_V2}/menu_groups/{group_id}/menus", payload, passkey=passkey)
 
 
+def update_category_weights(page, token, group_id, common_ids, passkey=None):
+    """
+    Urutkan kategori menu via V2 API.
+    Endpoint: PUT /v2/menu_groups/{group_id}/menus/weights
+    Payload: {"common_ids": ["<id1>", "<id2>", ...]}
+    """
+    return _put(page, token, f"{BASE_V2}/menu_groups/{group_id}/menus/weights", {"common_ids": common_ids}, passkey=passkey)
+
+
+def update_item_weights(page, token, group_id, category_id, common_ids, passkey=None):
+    """
+    Urutkan item di dalam suatu kategori via V2 API.
+    Endpoint: PUT /v2/menu_groups/{group_id}/menus/{category_id}/menu_items/weights
+    Payload: {"common_ids": ["<id1>", "<id2>", ...]}
+    """
+    return _put(page, token, f"{BASE_V2}/menu_groups/{group_id}/menus/{category_id}/menu_items/weights", {"common_ids": common_ids}, passkey=passkey)
+
+
 def create_menu_item(page, token, group_id, payload, passkey=None):
     """
     Buat item menu baru via V2 API.
