@@ -13,8 +13,8 @@ services:
       - SE_CACHE_PATH=/tmp/.cache/selenium
       - WDM_DIR=/tmp/.wdm
     ports:
-      - "8000:8000"
-      - "18800:8000"
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:18800:8000"
     volumes:
       - ./.env:/app/.env:ro
       - ./data:/app/data
@@ -36,7 +36,7 @@ services:
     container_name: foodmaster-frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "127.0.0.1:3000:80"
     depends_on:
       - backend
     networks:
