@@ -1070,6 +1070,66 @@ class GrabAPI:
             return True, None
         return False, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
 
+    async def upload_item_photo(self, group_id, store_id, photo_b64: str, photo_type: str = "jpeg", is_menu_group: bool = False, menu_group_id: str = None, force_store_level: bool = False):
+        """POST /food/merchant/v2/upload-file or /food/merchant/v1/upload-menu-group-file"""
+        if force_store_level:
+            mg_id = None
+            use_mg_ep = False
+        else:
+            mg_id = menu_group_id or (store_id if is_menu_group else None)
+            use_mg_ep = bool(is_menu_group or mg_id)
+
+        if use_mg_ep:
+            url = f"{self.api_base_url}/food/merchant/v1/upload-menu-group-file"
+        else:
+            url = f"{self.api_base_url}/food/merchant/v2/upload-file"
+
+        headers = {
+            "merchantgroupid": group_id,
+            "merchantid": mg_id or store_id,
+            "requestsource": "troyPortal",
+            "x-client-id": "GrabMerchant-Portal",
+            "x-grabkit-clientid": "grabmerchant-portal",
+            "x-api-source": "food-max-api"
+        }
+        body = {
+            "file": {
+                "data": photo_b64,
+                "type": photo_type
+            },
+            "category": "menu_item_img"
+        }
+        if use_mg_ep:
+            body["menuGroupID"] = mg_id or store_id
+
+        res = await self.call_api(url, method="POST", headers=headers, body=body)
+        if res.get("status") in (200, 201):
+            data = res.get("data") or {}
+            uploaded_url = data.get("url")
+            if uploaded_url:
+                return uploaded_url, None
+            return None, "Respons upload gambar Grab tidak memuat URL."
+
+        err_detail = str(res.get("error") or res.get("data") or "")
+        if "menu group" in err_detail.lower() or res.get("status") in (403, 404):
+            if use_mg_ep and not getattr(self, "_in_upload_fallback", False):
+                self._in_upload_fallback = True
+                try:
+                    logger.info("Retrying photo upload with standard store-level endpoint...")
+                    return await self.upload_item_photo(group_id, store_id, photo_b64, photo_type=photo_type, is_menu_group=False, menu_group_id=None, force_store_level=True)
+                finally:
+                    self._in_upload_fallback = False
+            elif not use_mg_ep and not getattr(self, "_in_upload_fallback", False):
+                self._in_upload_fallback = True
+                try:
+                    target_id = menu_group_id or store_id
+                    logger.info("Retrying photo upload with menu-group endpoint...")
+                    return await self.upload_item_photo(group_id, store_id, photo_b64, photo_type=photo_type, is_menu_group=True, menu_group_id=target_id)
+                finally:
+                    self._in_upload_fallback = False
+
+        return None, res.get("error") or f"Status {res.get('status')}: {res.get('data')}"
+
     async def get_advertiser_id(self):
         """Resolves advertiser ID for the active merchant from the portal context."""
         if getattr(self, "advertiser_id", None):

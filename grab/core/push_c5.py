@@ -3,11 +3,50 @@ import json
 import asyncio
 import logging
 import re
+import base64
+import requests
 from pathlib import Path
 from playwright.async_api import async_playwright
 from grab.core.grab_api_scraper import GrabAPI, perform_login, SESSION_DIR
 
 logger = logging.getLogger("GrabC5Push")
+
+
+def download_and_encode_image(photo_link: str) -> tuple[str, str]:
+    """Download image from HTTP URL or Google Drive link, returning base64 data and image type."""
+    target_url = str(photo_link or "").strip()
+    if not target_url.startswith(("http://", "https://")):
+        raise ValueError(f"URL gambar tidak valid: '{photo_link}'")
+
+    if "drive.google.com" in target_url.casefold():
+        m = re.search(r"/d/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", target_url)
+        if m:
+            file_id = m.group(1) or m.group(2)
+            target_url = f"https://lh3.googleusercontent.com/d/{file_id}=s0"
+
+    resp = requests.get(target_url, timeout=30)
+    if not resp.ok or not resp.content:
+        raise ValueError(f"Gagal mengunduh gambar (HTTP {resp.status_code}): '{photo_link}'")
+
+    content = resp.content
+    if content.startswith(b"\xff\xd8\xff"):
+        img_type = "jpeg"
+    elif content.startswith(b"\x89PNG\r\n\x1a\n"):
+        img_type = "png"
+    elif content.startswith(b"RIFF") and b"WEBP" in content[:16]:
+        img_type = "webp"
+    else:
+        ctype = resp.headers.get("content-type", "").lower()
+        if "png" in ctype:
+            img_type = "png"
+        elif "webp" in ctype:
+            img_type = "webp"
+        else:
+            img_type = "jpeg"
+
+    b64_data = base64.b64encode(content).decode("utf-8")
+    return b64_data, img_type
+
 
 def calculate_price_steps(current_price: float, target_price: float, max_step_pct: float = 0.15) -> list[int]:
     """Calculates intermediate prices to reach target_price without any single step exceeding max_step_pct change."""
@@ -404,6 +443,8 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
             except Exception as e_promos:
                 logger.warning(f"⚠️ [Grab C5 Push] Gagal memeriksa promo aktif sebelum push: {e_promos}")
 
+            uploaded_photo_cache = {}
+
             # Process each item update
             for idx, upd in enumerate(updates):
                 item_id = str(upd.get("item_id") or "").strip()
@@ -714,12 +755,47 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         "description": description if (is_new_item or "DESCRIPTION_CHANGE" in changes) else ((existing_it or {}).get("description") or ""),
                     })
                     if is_new_item or "PHOTO_CHANGE" in changes:
-                        item_payload["imageURL"] = photo_link
-                        item_payload["imageURLs"] = [photo_link] if photo_link else []
+                        final_photo_url = ""
+                        if photo_link:
+                            if photo_link.startswith("https://food-cms.grab.com/"):
+                                final_photo_url = photo_link
+                            elif photo_link in uploaded_photo_cache:
+                                final_photo_url = uploaded_photo_cache[photo_link]
+                            else:
+                                logger.info(f"Mengunggah foto untuk '{new_name or item_name}' ke Grab food-cms...")
+                                try:
+                                    b64_data, p_type = download_and_encode_image(photo_link)
+                                    upload_res, upload_err = await call_with_auth_recovery(
+                                        lambda: api.upload_item_photo(
+                                            group_id,
+                                            target_sid,
+                                            b64_data,
+                                            photo_type=p_type,
+                                            is_menu_group=is_menu_group,
+                                            menu_group_id=menu_group_id,
+                                        ),
+                                        "upload item photo",
+                                    )
+                                    if upload_err or not upload_res:
+                                        raise ValueError(f"Gagal mengunggah foto ke Grab: {upload_err}")
+                                    final_photo_url = upload_res
+                                    uploaded_photo_cache[photo_link] = final_photo_url
+                                    logger.info(f"Berhasil mengunggah foto Grab: {final_photo_url}")
+                                except Exception as e_up:
+                                    logger.warning(f"Gagal memproses foto untuk '{new_name or item_name}': {e_up}")
+                                    raise ValueError(f"Gagal upload foto item '{new_name or item_name}': {e_up}")
+
+                        item_payload["imageURL"] = final_photo_url
+                        item_payload["imageURLs"] = [final_photo_url] if final_photo_url else []
+                        res_item["new_photo"] = final_photo_url
                     else:
                         item_payload["imageURL"] = (
                             (existing_it or {}).get("imageURL")
                             or next(iter((existing_it or {}).get("imageURLs") or []), "")
+                        )
+                        item_payload["imageURLs"] = (
+                            (existing_it or {}).get("imageURLs")
+                            or ([item_payload["imageURL"]] if item_payload["imageURL"] else [])
                         )
                     item_payload.pop("name", None)
                     item_payload.pop("photoURL", None)
