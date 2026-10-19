@@ -783,6 +783,21 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
 
             # ── 1. Reorder Categories via PUT /food/merchant/categories-sort ──
             try:
+                # Build lookup helpers for resolving category IDs:
+                # 1. Direct valid Grab category ID
+                # 2. C5 category ID specified in updates
+                # 3. Normalized category name mapping (cat_map)
+                valid_grab_cat_ids = {str(c.get("categoryID") or c.get("id")) for c in categories if (c.get("categoryID") or c.get("id"))}
+                for cid in cat_obj_map.keys():
+                    valid_grab_cat_ids.add(str(cid))
+
+                c5_name_to_cid = {}
+                for upd in updates:
+                    c_name = (upd.get("category") or "").strip().casefold()
+                    c_id = str(upd.get("category_id") or "").strip()
+                    if c_name and c_id and c_id in valid_grab_cat_ids and c_name not in c5_name_to_cid:
+                        c5_name_to_cid[c_name] = c_id
+
                 ordered_c5_cat_names = []
                 category_weights = {}
                 for upd in updates:
@@ -801,18 +816,29 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     sorted_c = sorted(category_weights.items(), key=lambda x: x[1])
                     ordered_c5_cat_names = [x[0] for x in sorted_c]
 
+                if not ordered_c5_cat_names:
+                    for upd in updates:
+                        if "DELETE_ITEM" in (upd.get("changes") or upd.get("change_types") or []):
+                            continue
+                        c_name = (upd.get("category") or "").strip()
+                        if c_name and c_name not in ordered_c5_cat_names:
+                            ordered_c5_cat_names.append(c_name)
+
                 if ordered_c5_cat_names or category_weights:
                     target_cat_ids = []
                     seen_cat_ids = set()
                     for c_name in ordered_c5_cat_names:
                         c_key = (c_name or "").strip().casefold()
-                        cid = cat_map.get(c_key)
+                        cid = c5_name_to_cid.get(c_key) or cat_map.get(c_key)
+                        if not cid and c_name in valid_grab_cat_ids:
+                            cid = c_name
                         if cid and str(cid) not in seen_cat_ids:
                             target_cat_ids.append(str(cid))
                             seen_cat_ids.add(str(cid))
 
-                    # Append any remaining existing categories from Grab not mentioned in C5
-                    existing_sorted_cats = sorted(categories, key=lambda c: int(c.get("sortOrder") or 9999))
+                    # Append any remaining existing categories from Grab not mentioned in C5.
+                    # In Grab, higher sortOrder is at the top, so descending order reflects current top-to-bottom.
+                    existing_sorted_cats = sorted(categories, key=lambda c: int(c.get("sortOrder") or 0), reverse=True)
                     current_cat_ids = []
                     for c in existing_sorted_cats:
                         cid = str(c.get("categoryID") or c.get("id") or "")
@@ -825,8 +851,10 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     if target_cat_ids and target_cat_ids != current_cat_ids:
                         logger.info(f"📐 [Grab C5 Push] Updating Category Order via PUT /food/merchant/categories-sort...")
                         logger.info(f"   Urutan target kategori: {target_cat_ids}")
+                        total_cats = len(target_cat_ids)
+                        # Grab displays categories with higher sortOrder at the top, down to 1 at the bottom.
                         sort_payload = [
-                            {"resourceID": cid, "sortOrder": idx + 1}
+                            {"resourceID": cid, "sortOrder": total_cats - idx}
                             for idx, cid in enumerate(target_cat_ids)
                         ]
                         ok_sort, err_sort = await call_with_auth_recovery(
@@ -849,7 +877,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         target_cat_keys.add(c_name.casefold())
 
                 for cat_key in target_cat_keys:
-                    cat_id = cat_map.get(cat_key)
+                    cat_id = c5_name_to_cid.get(cat_key) or cat_map.get(cat_key)
                     if not cat_id:
                         continue
 
@@ -877,11 +905,13 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                             target_item_ids.append(final_iid)
                             seen_item_ids.add(final_iid)
 
-                    # Append existing items in this category not in C5
+                    # Append existing items in this category not in C5.
+                    # In Grab, higher sortOrder is at the top, so descending order reflects current top-to-bottom.
                     cat_obj = cat_obj_map.get(cat_id) or {}
                     existing_cat_items = sorted(
                         cat_obj.get("items") or cat_obj.get("menuItems") or [],
-                        key=lambda it: int(it.get("sortOrder") or 9999)
+                        key=lambda it: int(it.get("sortOrder") or 0),
+                        reverse=True
                     )
                     current_item_ids = []
                     for it in existing_cat_items:
@@ -895,8 +925,10 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     if target_item_ids and len(target_item_ids) > 1 and target_item_ids != current_item_ids:
                         logger.info(f"📐 [Grab C5 Push] Updating Item Order for category '{cat_key}' ({cat_id}) via PUT /food/merchant/items-sort...")
                         logger.info(f"   Urutan target item: {target_item_ids}")
+                        total_items = len(target_item_ids)
+                        # Grab displays items with higher sortOrder at the top, down to 1 at the bottom.
                         item_sort_payload = [
-                            {"resourceID": iid, "sortOrder": idx + 1}
+                            {"resourceID": iid, "sortOrder": total_items - idx}
                             for idx, iid in enumerate(target_item_ids)
                         ]
                         ok_isort, err_isort = await call_with_auth_recovery(
