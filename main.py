@@ -5431,6 +5431,10 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         seen_cats = set()
         current_cat = None
         for it in s_items:
+            # Skip deleted items: they are baseline items not present in C5,
+            # appended at the end of the update list, and do not represent C5 row ordering.
+            if "DELETE_ITEM" in (it.changes or []):
+                continue
             c_name = (it.category or "").strip()
             c_key = norm_str(c_name) or str(it.category_id or "").strip()
             if not c_key:
