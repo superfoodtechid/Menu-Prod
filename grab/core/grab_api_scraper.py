@@ -800,6 +800,7 @@ class GrabAPI:
             "content-type": "application/json"
         }
         sorts = []
+        total_cats = len(sorted_category_ids)
         for idx, cat_item in enumerate(sorted_category_ids):
             if isinstance(cat_item, dict) and "resourceID" in cat_item and "sortOrder" in cat_item:
                 sorts.append(cat_item)
@@ -808,7 +809,7 @@ class GrabAPI:
             else:
                 sorts.append({
                     "resourceID": str(cat_item),
-                    "sortOrder": idx + 1
+                    "sortOrder": total_cats - idx
                 })
         body = {
             "sectionSorts": [
@@ -835,6 +836,7 @@ class GrabAPI:
             "content-type": "application/json"
         }
         sorts = []
+        total_items = len(sorted_item_ids)
         for idx, it in enumerate(sorted_item_ids):
             if isinstance(it, dict) and "resourceID" in it and "sortOrder" in it:
                 sorts.append(it)
@@ -843,7 +845,7 @@ class GrabAPI:
             else:
                 sorts.append({
                     "resourceID": str(it),
-                    "sortOrder": idx + 1
+                    "sortOrder": total_items - idx
                 })
         body = {
             "categoryID": category_id,
@@ -1028,7 +1030,7 @@ class GrabAPI:
                 finally:
                     self._in_upsert_fallback = False
             elif not use_mg_ep and not getattr(self, "_in_upsert_fallback", False):
-                 self._in_upsert_fallback = True
+                self._in_upsert_fallback = True
                 try:
                     extracted_mg_id = item_data.get("menuGroupID")
                     if not extracted_mg_id and "-" in str(item_data.get("itemID", "")):
