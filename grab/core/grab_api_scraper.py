@@ -1028,7 +1028,7 @@ class GrabAPI:
                 finally:
                     self._in_upsert_fallback = False
             elif not use_mg_ep and not getattr(self, "_in_upsert_fallback", False):
-                 self._in_upsert_fallback = True
+                self._in_upsert_fallback = True
                 try:
                     extracted_mg_id = item_data.get("menuGroupID")
                     if not extracted_mg_id and "-" in str(item_data.get("itemID", "")):
