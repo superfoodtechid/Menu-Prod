@@ -148,7 +148,8 @@ def update_dish(
     available: bool = True,
     picture: str = "",
     opt_groups: list = None,
-    existing_dish: dict = None
+    existing_dish: dict = None,
+    rank: int = None
 ) -> bool:
     from .create import _build_dish_payload
     url = f"https://foody.shopee.co.id/api/seller/store/dish/update"
@@ -160,6 +161,7 @@ def update_dish(
         catalog_id=catalog_id,
         picture=picture,
         opt_groups=opt_groups,
+        rank=rank,
         existing_dish=existing_dish
     )
     payload["id"] = dish_id

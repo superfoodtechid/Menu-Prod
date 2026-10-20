@@ -222,7 +222,15 @@ class ShopeeModifyClient:
             self.last_error = str(e)
         return None
 
-    def _upload_image_binary(self, upload_domain: str, token: str, img_id: str, image_path: str) -> str | None:
+    def _upload_image_binary(
+        self,
+        upload_domain: str,
+        token: str,
+        img_id: str,
+        img_data: bytes,
+        filename: str = "dish.jpg",
+        content_type: str = "image/jpeg"
+    ) -> str | None:
         upload_url = f"{upload_domain}/file/upload"
         headers = {
             "Accept":         "application/json, text/plain, */*",
@@ -231,11 +239,9 @@ class ShopeeModifyClient:
             "Operate-Source": "partnerapp",
         }
         try:
-            with open(image_path, "rb") as f:
-                img_data = f.read()
             h = hashlib.md5(img_data).hexdigest()
             files = {
-                "file": (Path(image_path).name, img_data, "image/jpeg")
+                "file": (filename, img_data, content_type)
             }
             params = {
                 "token":  token,
@@ -245,11 +251,17 @@ class ShopeeModifyClient:
             resp = self.session.post(upload_url, files=files, params=params, headers=headers, timeout=30)
             if resp.status_code == 200:
                 return img_id
+            self.last_error = f"Binary upload failed: HTTP {resp.status_code} {resp.text}"
         except Exception as e:
             self.last_error = str(e)
         return None
 
-    def upload_image(self, image_path: str) -> str | None:
+    def upload_image_bytes(
+        self,
+        img_data: bytes,
+        filename: str = "dish.jpg",
+        content_type: str = "image/jpeg"
+    ) -> str | None:
         pre = self._preupload_image()
         if not pre:
             return None
@@ -257,5 +269,19 @@ class ShopeeModifyClient:
             upload_domain=pre["upload_domain"],
             token=pre["token"],
             img_id=pre["img_id"],
-            image_path=image_path
+            img_data=img_data,
+            filename=filename,
+            content_type=content_type
         )
+
+    def upload_image(self, image_path: str) -> str | None:
+        try:
+            p = Path(image_path)
+            with open(p, "rb") as f:
+                img_data = f.read()
+            ext = p.suffix.lower()
+            content_type = "image/png" if ext == ".png" else "image/webp" if ext == ".webp" else "image/jpeg"
+            return self.upload_image_bytes(img_data=img_data, filename=p.name, content_type=content_type)
+        except Exception as e:
+            self.last_error = str(e)
+            return None
