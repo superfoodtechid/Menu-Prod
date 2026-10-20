@@ -15,7 +15,7 @@ AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
 from core import browser
-from shopee.core.session_utils import get_fast_shopee_session, invalidate_shopee_session
+from shopee.core.session_utils import get_fast_shopee_session, invalidate_shopee_session, resolve_shopee_merchant_id
 
 IMG_BASE = "https://down-id.img.susercontent.com/file"
 
@@ -103,7 +103,11 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
 
     session_data = None
     if store_id:
-        fast_sess = get_fast_shopee_session({"username": master_user, "store_id": store_id}, base_dir=WORKSPACE_DIR)
+        fast_meta = dict(store_metadata)
+        fast_meta.setdefault("username", master_user)
+        fast_meta.setdefault("store_id", store_id)
+        fast_meta.setdefault("nama_portal", target_name)
+        fast_sess = get_fast_shopee_session(fast_meta, base_dir=WORKSPACE_DIR)
         if fast_sess and fast_sess.get("shopee_tob_token"):
             print(f"⚡ [FAST-PATH PULL] Menggunakan sesi master Shopee aktif untuk '{master_user}' (~0.2s).")
             session_data = fast_sess
@@ -161,29 +165,56 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         else:
             return False, "Gagal mendeteksi Store ID untuk merchant ini."
             
+    real_merchant_id = resolve_shopee_merchant_id(
+        store_metadata,
+        session_data=session_data,
+        tob_token=tob_token
+    )
+    if not real_merchant_id and session_data.get("merchant_id"):
+        real_merchant_id = str(session_data["merchant_id"]).strip()
+
+    extra_cookies = session_data.get("extra_cookies", {}).copy()
+    extra_cookies["shopee_user_name"] = username
+    extra_cookies["shopee_request_from"] = "partner_web"
+    if real_merchant_id:
+        extra_cookies["shopee_foody_mid"] = real_merchant_id
+    if store_id:
+        extra_cookies["shopee_tob_entity_id"] = str(store_id)
+
     print(f"[DEBUG PULL] tob_token: {tob_token[:30]}...")
     print(f"[DEBUG PULL] entity_id: {store_id}")
+    print(f"[DEBUG PULL] merchant_id: {real_merchant_id}")
     print(f"[DEBUG PULL] extra_cookies: {extra_cookies}")
     
     client = ShopeeClient(
         tob_token=tob_token,
         entity_id=store_id,
-        extra_cookies=extra_cookies
+        extra_cookies=extra_cookies,
+        merchant_id=real_merchant_id,
+        username=username
     )
         
     try:
         print(f"[*] Menarik data menu ShopeeFood untuk: {target_name} ({store_id})...")
         catalogs = client.get_store_dishes(store_id)
         if not catalogs:
-            print(f"[WARN] Sesi token Shopee kedaluwarsa atau invalid untuk '{username}'. Menghapus session cache dan membuka browser ulang...")
-            try:
-                if session_file.exists():
-                    session_file.unlink()
-                    print(f"[+] Session file cache '{session_file.name}' berhasil dihapus.")
-            except Exception as del_err:
-                print(f"[-] Gagal menghapus session file: {del_err}")
+            is_auth_error = (
+                client.last_code in (3004, 401, 1000002, 1000003)
+                or "unauthorized" in str(client.last_error).lower()
+                or "token" in str(client.last_error).lower()
+            )
+            if is_auth_error:
+                print(f"[WARN] Sesi token Shopee kedaluwarsa atau invalid untuk '{username}'. Menghapus session cache dan membuka browser ulang...")
+                try:
+                    if session_file.exists():
+                        session_file.unlink()
+                        print(f"[+] Session file cache '{session_file.name}' berhasil dihapus.")
+                except Exception as del_err:
+                    print(f"[-] Gagal menghapus session file: {del_err}")
 
-            invalidate_shopee_session({"username": master_user, "store_id": store_id})
+                invalidate_shopee_session({"username": master_user, "store_id": store_id})
+            else:
+                print(f"[WARN] Penarikan katalog gagal (code: {client.last_code}, msg: '{client.last_error}'). Merefresh sesi via browser dengan target '{target_name}'...")
 
             session_data = browser.get_session(
                 username=username,
@@ -196,17 +227,32 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
 
             if session_data and "shopee_tob_token" in session_data:
                 tob_token = session_data["shopee_tob_token"]
-                extra_cookies = session_data.get("extra_cookies", {})
+                new_mid = resolve_shopee_merchant_id(
+                    store_metadata,
+                    session_data=session_data,
+                    tob_token=tob_token
+                ) or real_merchant_id
+                extra_cookies = session_data.get("extra_cookies", {}).copy()
+                extra_cookies["shopee_user_name"] = username
+                extra_cookies["shopee_request_from"] = "partner_web"
+                if new_mid:
+                    extra_cookies["shopee_foody_mid"] = new_mid
+                if store_id:
+                    extra_cookies["shopee_tob_entity_id"] = str(store_id)
+
                 client = ShopeeClient(
                     tob_token=tob_token,
                     entity_id=store_id,
-                    extra_cookies=extra_cookies
+                    extra_cookies=extra_cookies,
+                    merchant_id=new_mid,
+                    username=username
                 )
                 print(f"[*] Mencoba ulang menarik data menu ShopeeFood dengan token baru...")
                 catalogs = client.get_store_dishes(store_id)
 
         if not catalogs:
-            return False, "Tidak ada data catalog/dishes yang ditemukan. Sesi token Shopee kedaluwarsa atau invalid."
+            err_details = f"code={client.last_code}, msg={client.last_error}" if client.last_code else "katalog kosong"
+            return False, f"Tidak ada data catalog/dishes yang ditemukan ({err_details})."
             
         print(f"[*] Ditemukan {len(catalogs)} kategori menu.")
 

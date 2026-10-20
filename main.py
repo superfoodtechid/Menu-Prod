@@ -845,6 +845,13 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "password": master_pass,
                 "portal": account.portal
             }
+            try:
+                from shopee.core.session_utils import resolve_shopee_merchant_id
+                resolved_mid = resolve_shopee_merchant_id(store_metadata)
+                if resolved_mid:
+                    store_metadata["merchant_id"] = resolved_mid
+            except Exception:
+                pass
             
             # Shopee runs with a visible browser when HEADLESS_SHOPEE=false.
             # This is useful for the allvbadmin profile, which may require an

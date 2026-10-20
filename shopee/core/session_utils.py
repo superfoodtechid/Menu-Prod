@@ -45,6 +45,98 @@ def get_cached_phone_map(cache_path: Path) -> dict:
     return phone_map
 
 
+def get_cached_merchant_id_maps(cache_path: Path = None) -> tuple[dict, dict]:
+    """
+    Membaca master_merchants_cache.csv dan menghasilkan dua dictionary pemetaan:
+    1. store_to_mid: store_id -> Group ID (merchant_id)
+    2. portal_to_mid: lower(nama_portal / outlet) -> Group ID (merchant_id)
+    """
+    cf = cache_path or (WORKSPACE_DIR / "master_merchants_cache.csv")
+    store_to_mid = {}
+    portal_to_mid = {}
+    if not cf.exists():
+        return store_to_mid, portal_to_mid
+
+    try:
+        import csv
+        with open(cf, mode="r", encoding="utf-8-sig", errors="ignore") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                app = (row.get("Aplikator") or "").strip().lower()
+                if app in ("shopeefood", "shopee"):
+                    sid = (row.get("Store ID") or row.get("store_id") or "").strip()
+                    gid = (row.get("Group ID") or row.get("merchant_id") or "").strip()
+                    portal = (row.get("Nama Portal") or row.get("nama_portal") or row.get("Outlet") or "").strip().lower()
+                    if gid and gid.isdigit():
+                        if sid:
+                            store_to_mid[sid] = gid
+                        if portal and portal not in portal_to_mid:
+                            portal_to_mid[portal] = gid
+    except Exception as e:
+        log.debug(f"Gagal membaca merchant_id maps dari CSV cache: {e}")
+
+    return store_to_mid, portal_to_mid
+
+
+def resolve_shopee_merchant_id(store_metadata: dict, session_data: dict = None, tob_token: str = None) -> str:
+    """
+    Resolusi bertingkat untuk menemukan Shopee Merchant ID (Group ID / foody_mid):
+    1. Dari store_metadata['merchant_id'] atau ['group_id']
+    2. Dari master_merchants_cache.csv via Store ID
+    3. Dari master_merchants_cache.csv via Nama Portal / Nama Outlet
+    4. Dari session_data['merchant_id'] atau extra_cookies['shopee_foody_mid']
+    5. Dari GetUserInfo API menggunakan active tob_token
+    """
+    # 1. Dari metadata langsung
+    mid = str(store_metadata.get("merchant_id") or store_metadata.get("group_id") or "").strip()
+    if mid and mid.isdigit():
+        return mid
+
+    # 2 & 3. Dari CSV cache
+    store_id = str(store_metadata.get("store_id") or "").strip()
+    if not store_id and session_data:
+        store_id = str(session_data.get("shopee_tob_entity_id") or "").strip()
+
+    portal_name = (
+        store_metadata.get("nama_portal")
+        or store_metadata.get("merchant_name")
+        or store_metadata.get("nama_resto_final")
+        or store_metadata.get("nama_outlet")
+        or ""
+    ).strip().lower()
+
+    store_to_mid, portal_to_mid = get_cached_merchant_id_maps()
+
+    if store_id and store_id in store_to_mid:
+        return store_to_mid[store_id]
+
+    if portal_name and portal_name in portal_to_mid:
+        return portal_to_mid[portal_name]
+
+    # Partial match portal name jika ada prefix seperti [SR]
+    for p_key, p_mid in portal_to_mid.items():
+        if portal_name and (portal_name in p_key or p_key in portal_name):
+            return p_mid
+
+    # 4. Dari session_data
+    if session_data:
+        s_mid = str(session_data.get("merchant_id") or session_data.get("extra_cookies", {}).get("shopee_foody_mid") or "").strip()
+        if s_mid and s_mid.isdigit() and s_mid != store_id:
+            return s_mid
+
+    # 5. Dari GetUserInfo API
+    token = tob_token or (session_data.get("shopee_tob_token") if session_data else "")
+    if token:
+        try:
+            is_valid, u_data = validate_shopee_token(token, timeout=2.5)
+            if is_valid and u_data and u_data.get("merchantId"):
+                return str(u_data["merchantId"])
+        except Exception:
+            pass
+
+    return ""
+
+
 def to_canonical_phone(raw: str) -> str:
     """Mengubah format nomor HP ke standar tunggal kanonikal 628xxx."""
     digits = re.sub(r'[^0-9]', '', str(raw or ""))
@@ -281,6 +373,10 @@ def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout
         real_store_id = str(raw_data["shopee_tob_entity_id"])
 
     real_merchant_id = str(user_data.get("merchantId") or raw_data.get("merchant_id") or "")
+    if not real_merchant_id or (real_store_id and real_merchant_id == real_store_id):
+        resolved_mid = resolve_shopee_merchant_id(store_metadata, session_data=raw_data, tob_token=tob_token)
+        if resolved_mid:
+            real_merchant_id = resolved_mid
 
     extra_cookies = (raw_data.get("extra_cookies") or {}).copy()
     extra_cookies["shopee_user_name"] = username or user_data.get("userName") or ""
