@@ -236,7 +236,15 @@ class ShopeeModifyClient:
         payload = {"app_id": 10051}
         try:
             resp = self.session.post(MMS_PREUPLOAD, json=payload, headers=self._mms_headers(), timeout=15)
-            data = resp.json()
+            if resp.status_code != 200:
+                self.last_error = f"MMS preupload failed with HTTP {resp.status_code}: {resp.text[:200]}"
+                return None
+            try:
+                data = resp.json()
+            except Exception as je:
+                self.last_error = f"MMS preupload JSON decode error: {je}"
+                return None
+
             if data.get("code") == 0:
                 services = data.get("data", {}).get("upload_services", [])
                 if services:
@@ -246,6 +254,8 @@ class ShopeeModifyClient:
                         "img_id":        data["data"]["img_id"],
                         "upload_domain": upload_domain,
                     }
+            else:
+                self.last_error = f"MMS preupload API error: code={data.get('code')} msg={data.get('msg')}"
         except Exception as e:
             self.last_error = str(e)
         return None
@@ -276,7 +286,12 @@ class ShopeeModifyClient:
                 "img_id": img_id,
                 "md5":    h
             }
-            resp = self.session.post(upload_url, files=files, params=params, headers=headers, timeout=30)
+            data = {
+                "token":    token,
+                "key":      img_id,
+                "mimeType": content_type
+            }
+            resp = self.session.post(upload_url, files=files, data=data, params=params, headers=headers, timeout=30)
             if resp.status_code == 200:
                 return img_id
             self.last_error = f"Binary upload failed: HTTP {resp.status_code} {resp.text}"

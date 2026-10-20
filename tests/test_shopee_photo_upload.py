@@ -9,6 +9,7 @@ from shopee.core.push_c5 import (
     download_image_bytes,
     resolve_shopee_photo,
     push_c5_shopee_for_merchant,
+    _process_photo_fallback_queue,
 )
 
 
@@ -237,6 +238,116 @@ class TestShopeePhotoUpload(unittest.TestCase):
 
         outlet_fallback = Outlet(store_id="22459819", merchant_name="Bakso Solo")
         self.assertEqual(outlet_fallback.outlet_name, "Bakso Solo")
+
+    @patch("shopee.core.push_c5._process_photo_fallback_queue")
+    @patch("shopee.core.push_c5.resolve_shopee_photo")
+    @patch("shopee.core.push_c5.create_dish")
+    @patch("shopee.core.push_c5.update_dish")
+    @patch("shopee.core.push_c5._boot_push_client")
+    def test_push_c5_queues_fallback_when_api_photo_fails(
+        self, mock_boot, mock_update, mock_create, mock_resolve_photo, mock_process_queue
+    ):
+        mock_client = MagicMock()
+        mock_client.entity_id = "STORE_888"
+        mock_client.get_store_dishes.return_value = [
+            {
+                "id": 101,
+                "name": "Makanan",
+                "rank": 1,
+                "dishes": [
+                    {
+                        "id": 601,
+                        "name": "Nasi Goreng",
+                        "price": 2000000000,
+                        "list_price": 2000000000,
+                        "picture": "id-old-pic",
+                        "catalog_id": 101,
+                        "available": True,
+                        "discount_percentage": 0,
+                    }
+                ]
+            }
+        ]
+        mock_boot.return_value = (mock_client, None)
+        mock_resolve_photo.side_effect = ValueError("MMS upload failed: HTTP 400")
+        mock_create.return_value = {"id": 602, "name": "Mie Goreng"}
+        mock_update.return_value = True
+
+        updates = [
+            {
+                "item_id": "NEW_ITEM",
+                "item_name": "Mie Goreng",
+                "new_fake_price": 18000,
+                "category": "Makanan",
+                "photo_link": "https://external.cdn/miegoreng.jpg",
+                "changes": ["NEW_ITEM", "PHOTO_CHANGE"]
+            },
+            {
+                "item_id": "601",
+                "item_name": "Nasi Goreng Spesial",
+                "item_name_new": "Nasi Goreng Spesial",
+                "new_fake_price": 22000,
+                "category": "Makanan",
+                "photo_link": "https://external.cdn/nasgor.jpg",
+                "changes": ["NAME_CHANGE", "PHOTO_CHANGE"]
+            }
+        ]
+
+        results = push_c5_shopee_for_merchant(
+            store_metadata={"store_id": "STORE_888", "username": "user888"},
+            updates=updates,
+            headless=True
+        )
+
+        self.assertEqual(len(results), 2)
+        mock_process_queue.assert_called_once()
+        queued_items = mock_process_queue.call_args[0][1]
+        self.assertEqual(len(queued_items), 2)
+        self.assertEqual(queued_items[0]["dish_id"], "602")
+        self.assertEqual(queued_items[0]["photo_link"], "https://external.cdn/miegoreng.jpg")
+        self.assertEqual(queued_items[1]["dish_id"], "601")
+        self.assertEqual(queued_items[1]["photo_link"], "https://external.cdn/nasgor.jpg")
+
+    @patch("shopee.core.push_c5.edit_dish_upload_image")
+    @patch("shopee.core.push_c5.download_image_bytes")
+    @patch("shopee.core.push_c5._sync_store_session")
+    @patch("shopee.core.push_c5.browser.get_session")
+    @patch("shopee.core.push_c5.resolve_shopee_session")
+    def test_process_photo_fallback_queue_success(
+        self, mock_resolve_session, mock_get_session, mock_sync_session, mock_download, mock_upload_image
+    ):
+        mock_driver = MagicMock()
+        mock_get_session.return_value = {"driver": mock_driver}
+        mock_download.return_value = (b"\xff\xd8fakejpeg", "dish.jpg", "image/jpeg")
+        mock_upload_image.return_value = True
+
+        res_item = {"item_id": "701", "status": "SUCCESS", "note": "Foto ditandai untuk fallback portal"}
+        queue = [
+            {
+                "dish_id": "701",
+                "photo_link": "https://external.cdn/dish.jpg",
+                "res_item": res_item,
+                "target_name": "Sate Ayam",
+                "update_payload": {"item_id": "701"}
+            }
+        ]
+
+        _process_photo_fallback_queue(
+            store_metadata={"store_id": "STORE_777", "username": "user777"},
+            queue=queue,
+            headless=True
+        )
+
+        mock_sync_session.assert_called_once_with(mock_driver, "STORE_777")
+        mock_upload_image.assert_called_once()
+        upload_call = mock_upload_image.call_args[1]
+        self.assertEqual(upload_call["dish_id"], "701")
+        self.assertEqual(upload_call["driver"], mock_driver)
+        self.assertFalse(upload_call["sync_session"])
+
+        self.assertEqual(res_item["new_photo"], "Uploaded via portal")
+        self.assertIn("Foto berhasil diunggah via portal", res_item["note"])
+        mock_driver.quit.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import logging
 import sys
 import json
 import time
@@ -8,6 +9,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from .client import ShopeeModifyClient
 from shopee.core.session_utils import resolve_shopee_session, get_fast_shopee_session, invalidate_shopee_session
+
+logger = logging.getLogger("ShopeeEdit")
 
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent
 AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
@@ -73,6 +76,40 @@ def _boot_client(store_metadata: dict, headless: bool = True, force_browser: boo
     )
     return client, ""
 
+def _sync_store_session(driver, store_id: str) -> None:
+    """
+    Menyinkronkan sesi browser ke target store ID menggunakan CDP cookie injection
+    dan memicu halaman Business Hours.
+    """
+    try:
+        store_str = str(store_id)
+        existing_cookie = driver.get_cookie("shopee_tob_entity_id")
+        if existing_cookie and str(existing_cookie.get("value")) == store_str:
+            return
+
+        curr_url = driver.current_url
+        if "partner.shopee.co.id" not in curr_url:
+            driver.get("https://partner.shopee.co.id/")
+            time.sleep(2)
+
+        def set_cdp_cookie(name, val, domain):
+            driver.execute_cdp_cmd('Network.setCookie', {
+                'name': name,
+                'value': val,
+                'domain': domain,
+                'path': '/'
+            })
+
+        for domain in [".shopee.co.id", "partner.shopee.co.id"]:
+            set_cdp_cookie("shopee_tob_entity_id", store_str, domain)
+        time.sleep(1)
+
+        business_hours_url = "https://partner.shopee.co.id/settings/shopee-food/business-hours-settings"
+        driver.get(business_hours_url)
+        time.sleep(4)
+    except Exception as e:
+        logger.warning(f"Gagal menyinkronkan sesi store di browser: {e}")
+
 def _dismiss_popups(driver) -> None:
     """
     Mencari dan mengklik tombol penutup pop-up (seperti 'Got it', 'Mengerti', dll)
@@ -108,52 +145,83 @@ def _dismiss_popups(driver) -> None:
     except Exception as e:
         pass
 
-def edit_dish_upload_image(store_metadata: dict, dish_id: str, image_path: str, headless: bool = True) -> bool:
-    store_id = store_metadata["store_id"]
+def edit_dish_upload_image(
+    store_metadata: dict,
+    dish_id: str,
+    image_path: str,
+    headless: bool = True,
+    driver=None,
+    sync_session: bool = True
+) -> bool:
+    store_id = store_metadata.get("store_id")
     username = store_metadata.get("username") or "superfoodapp"
     password = store_metadata.get("password") or "Master@00@"
 
     target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
     
-    session_file = WORKSPACE_DIR / "shopee" / "data" / f"session_{username}.json"
+    session_file = resolve_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
     browser.set_session_file(session_file)
+    active_account = session_file.stem.replace("session_", "") if session_file.stem.startswith("session_") else username
     
-    session_data = browser.get_session(
-        username=username,
-        password=password,
-        headless=headless,
-        close_browser=False,
-        target_name=target_name,
-        interactive=False
-    )
-    if not session_data or "driver" not in session_data:
-        return False
-        
-    driver = session_data["driver"]
+    own_driver = False
+    if driver is None:
+        session_data = browser.get_session(
+            username=active_account,
+            password=password,
+            headless=headless,
+            close_browser=False,
+            target_name=target_name,
+            interactive=False
+        )
+        if not session_data or "driver" not in session_data:
+            logger.error(f"Gagal menginisialisasi browser session untuk upload gambar item {dish_id}")
+            return False
+        driver = session_data["driver"]
+        own_driver = True
+
     try:
-        _sync_store_session(driver, store_id)
+        if sync_session and store_id:
+            _sync_store_session(driver, str(store_id))
+
         edit_url = f"https://partner.shopee.co.id/shopee-pos/menu-management/dish/edit?id={dish_id}&storeId={store_id}&defaultTab=sf"
         driver.get(edit_url)
-        time.sleep(6)
+        time.sleep(5)
         _dismiss_popups(driver)
         
         wait = WebDriverWait(driver, 15)
         file_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
         driver.execute_script("arguments[0].style.display='block'; arguments[0].style.opacity='1';", file_input)
         file_input.send_keys(str(Path(image_path).resolve()))
-        time.sleep(5)
+        time.sleep(3)
         
+        # Cek jika ada dialog crop/konfirmasi gambar
+        try:
+            crop_btn = WebDriverWait(driver, 4).until(
+                EC.element_to_be_clickable((By.XPATH, (
+                    "//div[contains(@class, 'modal') or contains(@class, 'cropper')]//button["
+                    "span[contains(text(), 'Konfirmasi') or contains(text(), 'Confirm') or "
+                    "contains(text(), 'Simpan') or contains(text(), 'Save') or contains(text(), 'Apply')]] | "
+                    "//div[contains(@class, 'ant-modal-footer')]//button[contains(@class, 'ant-btn-primary')]"
+                )))
+            )
+            crop_btn.click()
+            time.sleep(2)
+        except Exception:
+            pass
+
         save_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[span[contains(text(), 'Save') or contains(text(), 'Simpan')]]")))
         save_btn.click()
-        time.sleep(5)
-        driver.quit()
+        time.sleep(4)
         return True
     except Exception as e:
-        try:
-            driver.quit()
-        except:
-            pass
+        logger.error(f"Gagal mengunggah gambar ke dish ID {dish_id} via portal: {e}")
         return False
+    finally:
+        if own_driver and driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 def update_dish(
     client: ShopeeModifyClient,
