@@ -140,8 +140,8 @@ def edit_dish_upload_image(store_metadata: dict, dish_id: str, image_path: str, 
 def update_dish(
     client: ShopeeModifyClient,
     store_id: str,
-    catalog_id: int,
-    dish_id: int,
+    catalog_id: int | str,
+    dish_id: int | str,
     name: str,
     price: float,
     description: str = "",
@@ -149,11 +149,13 @@ def update_dish(
     picture: str = "",
     opt_groups: list = None,
     existing_dish: dict = None,
-    rank: int = None
+    rank: int = None,
+    list_price: float = None
 ) -> bool:
     from .create import _build_dish_payload
-    url = f"https://foody.shopee.co.id/api/seller/store/dish/update"
-    payload = _build_dish_payload(
+    dish_str_id = str(dish_id)
+    url = f"https://foody.shopee.co.id/api/seller/store/dishes/{dish_str_id}"
+    payload_raw = _build_dish_payload(
         name=name,
         price=price,
         description=description,
@@ -162,9 +164,21 @@ def update_dish(
         picture=picture,
         opt_groups=opt_groups,
         rank=rank,
-        existing_dish=existing_dish
+        existing_dish=existing_dish,
+        list_price=list_price
     )
-    payload["id"] = dish_id
+    if isinstance(payload_raw, dict) and "dish" in payload_raw:
+        payload = payload_raw
+    else:
+        payload = {"dish": payload_raw}
+
+    dish_data = payload.get("dish") or {}
+    dish_data["id"] = dish_str_id
+    if store_id:
+        dish_data["store_id"] = str(store_id)
+    if catalog_id:
+        dish_data["catalog_id"] = str(catalog_id)
+
     try:
         resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
         data = resp.json()

@@ -1361,6 +1361,8 @@ class GrabAPI:
                     soc_map[it_id] = parse_numeric_price(delivery_val)
 
             scope = info.get("scope") or {}
+            scope_type = str(scope.get("type") or "").strip().lower()
+
             items_in_camp = scope.get("items") or []
             for it_obj in items_in_camp:
                 it_id = str(it_obj.get("itemID") or "").strip()
@@ -1396,16 +1398,59 @@ class GrabAPI:
                     "campaign_id": c_id,
                     "campaign_name": camp_name,
                     "discount_type": disc_type,
+                    "discount_value": float(disc_val) if disc_val else 0.0,
+                    "discount_display": disc_disp,
                     "original_price": orig_price,
                     "discounted_price": disc_price,
                     "slash_pct": slash_pct,
                     "slash_rp": slash_rp,
+                    "scope_type": scope_type or "items",
                     "store_id": camp_store_id or sid_str
                 }
                 if it_id:
                     promo_map[it_id] = p_entry
                 if it_name:
                     promo_map[it_name.lower()] = p_entry
+
+            category_objs = scope.get("objects") or scope.get("categories") or []
+            for cat_obj in category_objs:
+                if isinstance(cat_obj, dict):
+                    c_obj_id = str(cat_obj.get("objectID") or cat_obj.get("id") or cat_obj.get("categoryID") or "").strip()
+                    c_obj_name = str(cat_obj.get("objectName") or cat_obj.get("name") or cat_obj.get("categoryName") or "").strip()
+                else:
+                    c_obj_id = str(cat_obj).strip()
+                    c_obj_name = ""
+
+                cat_pct = disc_disp if ("%" in disc_disp) else (f"{int(disc_val)}%" if "percentage" in disc_type and disc_val else "0%")
+                p_cat_entry = {
+                    "campaign_id": c_id,
+                    "campaign_name": camp_name,
+                    "discount_type": disc_type,
+                    "discount_value": float(disc_val) if disc_val else 0.0,
+                    "discount_display": disc_disp,
+                    "slash_pct": cat_pct,
+                    "scope_type": "category",
+                    "store_id": camp_store_id or sid_str
+                }
+                if c_obj_id:
+                    promo_map[f"category:{c_obj_id}"] = p_cat_entry
+                    promo_map[f"category:{c_obj_id.lower()}"] = p_cat_entry
+                if c_obj_name:
+                    promo_map[f"category:{c_obj_name.lower()}"] = p_cat_entry
+
+            if scope_type in ("all", "entire_store", "store", "all_store") or (not items_in_camp and not category_objs and disc_val):
+                store_pct = disc_disp if ("%" in disc_disp) else (f"{int(disc_val)}%" if "percentage" in disc_type and disc_val else "0%")
+                p_store_entry = {
+                    "campaign_id": c_id,
+                    "campaign_name": camp_name,
+                    "discount_type": disc_type,
+                    "discount_value": float(disc_val) if disc_val else 0.0,
+                    "discount_display": disc_disp,
+                    "slash_pct": store_pct,
+                    "scope_type": "store",
+                    "store_id": camp_store_id or sid_str
+                }
+                promo_map["store:all"] = p_store_entry
 
         return promo_map
 
@@ -1666,7 +1711,18 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name, campaign_pro
             campaign = item.get("itemCampaignInfo")
             promo_lookup = None
             if campaign_promos_map:
-                promo_lookup = campaign_promos_map.get(str(item_id).strip()) or campaign_promos_map.get(str(item_name).strip().lower())
+                clean_cat_id = str(cat_id or "").strip()
+                clean_cat_name = str(cat_name or "").strip().lower()
+                clean_item_id = str(item_id or "").strip()
+                clean_item_name = str(item_name or "").strip().lower()
+                promo_lookup = (
+                    campaign_promos_map.get(clean_item_id)
+                    or campaign_promos_map.get(clean_item_name)
+                    or campaign_promos_map.get(f"category:{clean_cat_id}")
+                    or campaign_promos_map.get(f"category:{clean_cat_id.lower()}")
+                    or campaign_promos_map.get(f"category:{clean_cat_name}")
+                    or campaign_promos_map.get("store:all")
+                )
 
             if campaign and isinstance(campaign, dict):
                 promo_price = campaign.get("campaignPrice") or campaign.get("discountedPrice") or campaign.get("price")
@@ -1688,11 +1744,19 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name, campaign_pro
                 p_disc = promo_lookup.get("discounted_price")
                 if p_orig and p_orig > 0:
                     original_price = float(p_orig)
-                elif discounted_price > 0:
-                    original_price = discounted_price
-
-                if p_disc and p_disc > 0:
-                    discounted_price = float(p_disc)
+                    if p_disc and p_disc > 0:
+                        discounted_price = float(p_disc)
+                else:
+                    base_price = original_price if original_price > 0 else discounted_price
+                    disc_type = str(promo_lookup.get("discount_type") or "").lower()
+                    disc_val = float(promo_lookup.get("discount_value") or 0.0)
+                    original_price = base_price
+                    if "percentage" in disc_type and disc_val > 0:
+                        discounted_price = round(base_price * (1.0 - (disc_val / 100.0)))
+                    elif disc_val > 0:
+                        discounted_price = max(0.0, base_price - disc_val)
+                    else:
+                        discounted_price = base_price
             
             promo_val = original_price - discounted_price
             if promo_val < 0:
@@ -1773,7 +1837,15 @@ def parse_menu(menu_data, store_id, outlet_name, shopee_short_name, campaign_pro
             )
 
             slash_pct_val = (promo_lookup or {}).get("slash_pct")
-            slash_rp_val = (promo_lookup or {}).get("slash_rp") if promo_lookup else promo_val
+            if not slash_pct_val or slash_pct_val == "0%":
+                if promo_val > 0 and original_price > 0:
+                    slash_pct_val = f"{round((promo_val / original_price) * 100)}%"
+                else:
+                    slash_pct_val = ""
+
+            slash_rp_val = (promo_lookup or {}).get("slash_rp")
+            if slash_rp_val is None or slash_rp_val == 0:
+                slash_rp_val = int(promo_val) if promo_val > 0 else 0
 
             items_list.append({
                 "Link outlet": f"https://food.grab.com/id/en/restaurant/{store_id}",

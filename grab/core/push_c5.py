@@ -661,7 +661,15 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         if active_camp_promos:
                             it_check_id = str((existing_it or {}).get("itemID") or item_id).strip()
                             it_check_name = (new_name or item_name).strip().lower()
-                            c_info = active_camp_promos.get(it_check_id) or active_camp_promos.get(it_check_name)
+                            it_cat_id = str((existing_it or {}).get("_c5CategoryID") or target_cat_id or "").strip()
+                            it_cat_name = (new_cat_name or "").strip().lower()
+                            c_info = (
+                                active_camp_promos.get(it_check_id)
+                                or active_camp_promos.get(it_check_name)
+                                or (active_camp_promos.get(f"category:{it_cat_id}") if it_cat_id else None)
+                                or (active_camp_promos.get(f"category:{it_cat_name}") if it_cat_name else None)
+                                or active_camp_promos.get("store:all")
+                            )
                             if c_info:
                                 has_campaign = True
 

@@ -16,40 +16,63 @@ def _build_dish_payload(
     price: float,
     description: str,
     available: bool,
-    catalog_id: int,
+    catalog_id: int | str,
     picture: str = "",
     opt_groups: list = None,
     rank: int = None,
-    existing_dish: dict = None
+    existing_dish: dict = None,
+    list_price: float = None
 ) -> dict:
     price_cents = int(price * 100000)
+    list_price_cents = int(list_price * 100000) if list_price is not None else price_cents
     time_for_sales = [{"sale_start_time": 0, "sale_end_time": 86399}]
     
     if existing_dish:
-        time_for_sales = existing_dish.get("time_for_sales", time_for_sales)
-        if rank is None:
-            rank = existing_dish.get("rank", 1)
+        dish_copy = existing_dish.copy()
+        dish_copy["price"] = str(price_cents)
+        dish_copy["list_price"] = list_price_cents
+        dish_copy["available"] = available
+        if rank is not None:
+            dish_copy["rank"] = rank
+        elif "rank" not in dish_copy:
+            dish_copy["rank"] = 1
+        if name:
+            dish_copy["name"] = name
+        if description is not None:
+            dish_copy["description"] = description
+        if picture is not None:
+            dish_copy["picture"] = picture
+        if catalog_id:
+            dish_copy["catalog_id"] = str(catalog_id)
+        if "id" in dish_copy:
+            dish_copy["id"] = str(dish_copy["id"])
+        if "store_id" in dish_copy:
+            dish_copy["store_id"] = str(dish_copy["store_id"])
+        if "item_discount" in dish_copy and isinstance(dish_copy["item_discount"], dict):
+            it_disc = dish_copy["item_discount"].copy()
+            if price_cents < list_price_cents:
+                it_disc["discount_price"] = str(price_cents)
+            dish_copy["item_discount"] = it_disc
+        return dish_copy
+
     if rank is None:
         rank = 1
 
     payload = {
         "name":           name,
         "price":          str(price_cents),
-        "list_price":     str(price_cents),
+        "list_price":     list_price_cents,
         "picture":        picture,
         "description":    description,
         "available":      available,
         "listing_status": 1,
         "sale_status":    1,
+        "sale_week_bit":  127,
         "time_for_sales": time_for_sales,
         "rank":           rank,
-        "catalog_id":     catalog_id,
+        "catalog_id":     str(catalog_id),
         "option_groups":  opt_groups or []
     }
-    
-    if existing_dish and "id" in existing_dish:
-        payload["id"] = existing_dish["id"]
-        
     return payload
 
 def create_dish(
@@ -75,8 +98,9 @@ def create_dish(
         opt_groups=opt_groups,
         rank=rank
     )
+    dish_payload = payload if (isinstance(payload, dict) and "dish" in payload) else {"dish": payload}
     try:
-        resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
+        resp = client.session.post(url, json=dish_payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
         data = resp.json()
         if data.get("code") == 0:
             return data.get("data", {}).get("dish")
