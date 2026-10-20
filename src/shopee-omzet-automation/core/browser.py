@@ -686,6 +686,12 @@ def get_all_cookies_dict(driver) -> dict:
     return {c["name"]: c["value"] for c in driver.get_cookies()}
 
 def _trigger_and_extract_tokens(driver) -> tuple:
+    # 1. Cek langsung dari sesi aktif browser (hindari page reload jika token sudah ada)
+    tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
+    if tob_token:
+        log.info(f"⚡ [SESSION] Token fresh sudah tersedia di cookies browser (entity_id: {entity_id}). Melewati trigger page.")
+        return tob_token, entity_id
+
     log.info("🔄 [SESSION] Navigating to business hours settings to trigger fresh token...")
     try:
         try:
@@ -694,7 +700,7 @@ def _trigger_and_extract_tokens(driver) -> tuple:
             pass
         driver.get(TOKEN_TRIGGER_PAGE)
         for _ in range(15):
-            time.sleep(1)
+            time.sleep(0.5)
             tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
             if tob_token:
                 log.info(f"✅ Fresh token extracted successfully from business-hours. (entity_id: {entity_id})")
@@ -1578,6 +1584,11 @@ def _init_driver(headless: bool = True):
     options.add_argument("--disable-component-update")
     options.add_argument("--mute-audio")
     options.add_argument("--disable-background-networking")
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
     options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     if headless:
@@ -2948,7 +2959,16 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
         try:
             # ── Step 1: Check browser state first (Profile session) ──
             driver.get(PARTNER_DASHBOARD)
-            time.sleep(4)
+            try:
+                WebDriverWait(driver, 4).until(
+                    lambda d: d.get_cookie("shopee_tob_token") is not None
+                    or "dashboard" in d.current_url.lower()
+                    or "merchant-selector" in d.current_url.lower()
+                    or "login" in d.current_url.lower()
+                    or "onboarding" in d.current_url.lower()
+                )
+            except Exception:
+                time.sleep(1)
             
             is_logged_in = False
             current_url = driver.current_url.lower()

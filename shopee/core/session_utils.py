@@ -8,8 +8,10 @@ dan menyinkronkan profil Chrome yang cocok.
 import os
 import re
 import json
+import time
 import shutil
 import logging
+import requests
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -18,6 +20,10 @@ WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent
 AUTOMATION_DATA_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation" / "data"
 SHOPEE_DATA_DIR = WORKSPACE_DIR / "shopee" / "data"
 ROOT_DATA_DIR = WORKSPACE_DIR / "data"
+
+_IN_MEMORY_SESSION_CACHE: dict[str, dict] = {}
+CACHE_VALID_TTL_SECONDS = 1800  # 30 minutes
+CACHE_PING_INTERVAL_SECONDS = 300  # Re-ping every 5 minutes
 
 
 def get_cached_phone_map(cache_path: Path) -> dict:
@@ -185,3 +191,136 @@ def resolve_shopee_session(store_metadata: dict, base_dir: Path = None) -> Path:
 
     log.info(f"ℹ️ [SESSION] Tidak ditemukan sesi tersimpan untuk kunci {sorted(list(search_keys))}. Menggunakan default: {target_session_file}")
     return target_session_file
+
+
+def validate_shopee_token(tob_token: str, timeout: float = 2.5) -> tuple[bool, dict]:
+    """
+    Validasi cepat keaktifan token Shopee Partner via GetUserInfo API tanpa browser.
+    Mengembalikan (is_valid: bool, user_data: dict).
+    """
+    if not tob_token or not isinstance(tob_token, str):
+        return False, {}
+
+    url = "https://api.partner.shopee.co.id/nb/mss/web-api/PartnerAccountServer/GetUserInfo"
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "content-type": "application/json",
+        "origin": "https://partner.shopee.co.id",
+        "referer": "https://partner.shopee.co.id/",
+        "x-merchant-token": tob_token.strip(),
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json={}, timeout=timeout)
+        if resp.status_code == 200:
+            body = resp.json()
+            if body.get("code") == 0 and body.get("data"):
+                return True, body.get("data") or {}
+    except Exception as e:
+        log.debug(f"Pemeriksaan cepat token Shopee gagal: {e}")
+
+    return False, {}
+
+
+def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout: float = 2.5) -> dict | None:
+    """
+    Mencari dan memvalidasi sesi Shopee aktif dari memory cache atau file session.
+    Jika valid, mengembalikan data sesi lengkap siap pakai dalam hitungan milidetik (~0.2s),
+    menghilangkan kebutuhan membuka browser headless.
+    """
+    now = time.time()
+    username = (store_metadata.get("username") or "").strip()
+    store_id = str(store_metadata.get("store_id") or "").strip()
+    cache_key = username or store_id or "default"
+
+    # 1. Cek In-Memory Cache
+    mem_entry = _IN_MEMORY_SESSION_CACHE.get(cache_key)
+    if mem_entry:
+        validated_at = mem_entry.get("validated_at", 0)
+        age = now - validated_at
+        if age < CACHE_PING_INTERVAL_SECONDS:
+            return mem_entry.get("session_data")
+        elif age < CACHE_VALID_TTL_SECONDS:
+            sess_candidate = mem_entry.get("session_data") or {}
+            tok = sess_candidate.get("shopee_tob_token")
+            if tok:
+                is_valid, u_data = validate_shopee_token(tok, timeout=timeout)
+                if is_valid:
+                    mem_entry["validated_at"] = now
+                    if u_data:
+                        mem_entry["user_data"] = u_data
+                    return sess_candidate
+            _IN_MEMORY_SESSION_CACHE.pop(cache_key, None)
+
+    # 2. Cek File Sesi di Disk
+    session_file = resolve_shopee_session(store_metadata, base_dir=base_dir)
+    if not session_file or not session_file.exists():
+        return None
+
+    try:
+        raw_data = json.loads(session_file.read_text(encoding="utf-8"))
+    except Exception as read_err:
+        log.debug(f"Gagal membaca file sesi {session_file}: {read_err}")
+        return None
+
+    tob_token = (raw_data.get("shopee_tob_token") or "").strip()
+    if not tob_token:
+        return None
+
+    # 3. Validasi token via HTTP GetUserInfo
+    is_valid, user_data = validate_shopee_token(tob_token, timeout=timeout)
+    if not is_valid:
+        log.info(f"⚠️ [SESSION] Token tersimpan di {session_file.name} sudah kedaluwarsa. Memerlukan refresh via browser.")
+        return None
+
+    real_store_id = str(store_id) if (store_id and store_id != "-" and store_id.lower() != "nan") else ""
+    if not real_store_id and user_data.get("store_id"):
+        real_store_id = str(user_data["store_id"])
+    if not real_store_id and raw_data.get("shopee_tob_entity_id"):
+        real_store_id = str(raw_data["shopee_tob_entity_id"])
+
+    real_merchant_id = str(user_data.get("merchantId") or raw_data.get("merchant_id") or "")
+
+    extra_cookies = (raw_data.get("extra_cookies") or {}).copy()
+    extra_cookies["shopee_user_name"] = username or user_data.get("userName") or ""
+    extra_cookies["shopee_request_from"] = "partner_web"
+    if real_merchant_id:
+        extra_cookies["shopee_foody_mid"] = real_merchant_id
+    if real_store_id:
+        extra_cookies["shopee_tob_entity_id"] = real_store_id
+
+    fast_session = {
+        "shopee_tob_token": tob_token,
+        "shopee_tob_entity_id": real_store_id,
+        "merchant_id": real_merchant_id,
+        "extra_cookies": extra_cookies,
+        "source": "fast_cache"
+    }
+
+    _IN_MEMORY_SESSION_CACHE[cache_key] = {
+        "session_data": fast_session,
+        "validated_at": now,
+        "user_data": user_data
+    }
+    if username and username != cache_key:
+        _IN_MEMORY_SESSION_CACHE[username] = _IN_MEMORY_SESSION_CACHE[cache_key]
+    if real_store_id and real_store_id != cache_key:
+        _IN_MEMORY_SESSION_CACHE[real_store_id] = _IN_MEMORY_SESSION_CACHE[cache_key]
+
+    log.info(f"⚡ [FAST-PATH] Berhasil memvalidasi sesi Shopee untuk '{username or real_store_id}' tanpa browser.")
+    return fast_session
+
+
+def invalidate_shopee_session(store_metadata: dict, base_dir: Path = None) -> None:
+    """
+    Menghapus sesi dari in-memory cache jika pemanggilan API mengembalikan error autentikasi.
+    """
+    username = (store_metadata.get("username") or "").strip()
+    store_id = str(store_metadata.get("store_id") or "").strip()
+
+    for k in [username, store_id, "default"]:
+        if k:
+            _IN_MEMORY_SESSION_CACHE.pop(k, None)
+
+    log.info(f"🗑️ [SESSION] In-memory session cache dibersihkan untuk '{username or store_id}'.")

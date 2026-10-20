@@ -15,6 +15,7 @@ AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
 from core import browser
+from shopee.core.session_utils import get_fast_shopee_session, invalidate_shopee_session
 
 IMG_BASE = "https://down-id.img.susercontent.com/file"
 
@@ -100,20 +101,28 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         print(f"[!] Shopee job {job_id} telah dibatalkan oleh pengguna.")
         return False, "user membatalkan otp"
 
-    print(f"[*] Membuka browser (headless={headless}) untuk akun '{active_account}' (target: '{username}'), merchant: '{target_name}', session: '{session_file.name}'...")
-    try:
-        session_data = browser.get_session(
-            username=active_account,
-            password=password,
-            headless=headless,
-            close_browser=True,
-            target_name=target_name,
-            interactive=True
-        )
-    except Exception as e:
-        if "user membatalkan otp" in str(e).lower() or _is_cancelled():
-            return False, "user membatalkan otp"
-        return False, f"Gagal menginisialisasi browser: {e}"
+    session_data = None
+    if store_id:
+        fast_sess = get_fast_shopee_session({"username": master_user, "store_id": store_id}, base_dir=WORKSPACE_DIR)
+        if fast_sess and fast_sess.get("shopee_tob_token"):
+            print(f"⚡ [FAST-PATH PULL] Menggunakan sesi master Shopee aktif untuk '{master_user}' (~0.2s).")
+            session_data = fast_sess
+
+    if not session_data:
+        print(f"[*] Membuka browser (headless={headless}) untuk akun '{active_account}' (target: '{username}'), merchant: '{target_name}', session: '{session_file.name}'...")
+        try:
+            session_data = browser.get_session(
+                username=active_account,
+                password=password,
+                headless=headless,
+                close_browser=True,
+                target_name=target_name,
+                interactive=True
+            )
+        except Exception as e:
+            if "user membatalkan otp" in str(e).lower() or _is_cancelled():
+                return False, "user membatalkan otp"
+            return False, f"Gagal menginisialisasi browser: {e}"
 
     if _is_cancelled():
         print(f"[!] Shopee job {job_id} telah dibatalkan setelah inisialisasi browser.")
@@ -173,6 +182,8 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     print(f"[+] Session file cache '{session_file.name}' berhasil dihapus.")
             except Exception as del_err:
                 print(f"[-] Gagal menghapus session file: {del_err}")
+
+            invalidate_shopee_session({"username": master_user, "store_id": store_id})
 
             session_data = browser.get_session(
                 username=username,
