@@ -197,21 +197,52 @@ def edit_dish_upload_image(
         
         # Cek jika ada dialog crop/konfirmasi gambar
         try:
-            crop_btn = WebDriverWait(driver, 4).until(
-                EC.element_to_be_clickable((By.XPATH, (
-                    "//div[contains(@class, 'modal') or contains(@class, 'cropper')]//button["
-                    "span[contains(text(), 'Konfirmasi') or contains(text(), 'Confirm') or "
-                    "contains(text(), 'Simpan') or contains(text(), 'Save') or contains(text(), 'Apply')]] | "
-                    "//div[contains(@class, 'ant-modal-footer')]//button[contains(@class, 'ant-btn-primary')]"
-                )))
-            )
-            crop_btn.click()
             time.sleep(2)
-        except Exception:
-            pass
+            crop_selectors = [
+                "//div[contains(@class, 'crop_modal') or contains(@class, 'cropper')]//button[contains(@class, 'shopee-pos-btn-primary') or contains(@class, 'primary')]",
+                "//div[contains(@class, 'crop_modal') or contains(@class, 'cropper')]//button[contains(., 'Konfirmasi') or contains(., 'Confirm') or contains(., 'Simpan') or contains(., 'Save') or contains(., 'Apply') or contains(., 'Selesai') or contains(., 'OK') or contains(., 'Ok')]",
+                "//div[contains(@class, 'shopee-pos-modal-wrap') or contains(@class, 'modal-wrap')]//div[contains(@class, 'footer') or contains(@class, 'modal-footer')]//button[contains(@class, 'primary') or contains(., 'Konfirmasi') or contains(., 'Simpan') or contains(., 'Confirm') or contains(., 'Save')]",
+                "//div[contains(@class, 'crop_modal')]//button[last()]"
+            ]
+            crop_btn = None
+            for sel in crop_selectors:
+                btns = driver.find_elements(By.XPATH, sel)
+                for b in btns:
+                    if b.is_displayed():
+                        crop_btn = b
+                        break
+                if crop_btn:
+                    break
 
-        save_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[span[contains(text(), 'Save') or contains(text(), 'Simpan')]]")))
-        save_btn.click()
+            if crop_btn:
+                driver.execute_script("arguments[0].click();", crop_btn)
+                time.sleep(2)
+                try:
+                    WebDriverWait(driver, 5).until(
+                        EC.invisibility_of_element_located((By.CSS_SELECTOR, ".crop_modal___oSzv_, .crop_modal, div.crop_modal___oSzv_"))
+                    )
+                except Exception:
+                    pass
+        except Exception as ex_crop:
+            logger.info(f"Info dialog crop: {ex_crop}")
+
+        time.sleep(1)
+
+        # Klik tombol Save / Simpan
+        save_btn_xpath = (
+            "//button[contains(@class, 'shopee-pos-btn-primary') and "
+            "(contains(., 'Save') or contains(., 'Simpan') or .//span[contains(text(), 'Save') or contains(text(), 'Simpan')])]"
+            " | //button[span[contains(text(), 'Save') or contains(text(), 'Simpan')]]"
+            " | //button[contains(., 'Save') or contains(., 'Simpan')]"
+        )
+        save_btn = wait.until(EC.presence_of_element_located((By.XPATH, save_btn_xpath)))
+        driver.execute_script("arguments[0].scrollIntoView(true);", save_btn)
+        time.sleep(0.5)
+        try:
+            save_btn.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", save_btn)
+
         time.sleep(4)
         return True
     except Exception as e:
