@@ -151,9 +151,10 @@ def edit_dish_upload_image(
     image_path: str,
     headless: bool = True,
     driver=None,
-    sync_session: bool = True
+    sync_session: bool = True,
+    store_id: str = None
 ) -> bool:
-    store_id = store_metadata.get("store_id")
+    target_store_id = str(store_id or store_metadata.get("store_id") or "")
     username = store_metadata.get("username") or "superfoodapp"
     password = store_metadata.get("password") or "Master@00@"
 
@@ -180,10 +181,10 @@ def edit_dish_upload_image(
         own_driver = True
 
     try:
-        if sync_session and store_id:
-            _sync_store_session(driver, str(store_id))
+        if sync_session and target_store_id:
+            _sync_store_session(driver, str(target_store_id))
 
-        edit_url = f"https://partner.shopee.co.id/shopee-pos/menu-management/dish/edit?id={dish_id}&storeId={store_id}&defaultTab=sf"
+        edit_url = f"https://partner.shopee.co.id/shopee-pos/menu-management/dish/edit?id={dish_id}&storeId={target_store_id}&defaultTab=sf"
         driver.get(edit_url)
         time.sleep(5)
         _dismiss_popups(driver)

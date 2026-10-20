@@ -343,11 +343,67 @@ class TestShopeePhotoUpload(unittest.TestCase):
         upload_call = mock_upload_image.call_args[1]
         self.assertEqual(upload_call["dish_id"], "701")
         self.assertEqual(upload_call["driver"], mock_driver)
+        self.assertEqual(upload_call["store_id"], "STORE_777")
         self.assertFalse(upload_call["sync_session"])
 
+        self.assertEqual(res_item["status"], "SUCCESS")
+        self.assertIsNone(res_item["error"])
         self.assertEqual(res_item["new_photo"], "Uploaded via portal")
         self.assertIn("Foto berhasil diunggah via portal", res_item["note"])
         mock_driver.quit.assert_called_once()
+
+    @patch("shopee.core.push_c5._process_photo_fallback_queue")
+    @patch("shopee.core.push_c5.resolve_shopee_photo")
+    @patch("shopee.core.push_c5.update_dish")
+    @patch("shopee.core.push_c5._boot_push_client")
+    def test_push_c5_queues_fallback_even_when_api_update_fails(
+        self, mock_boot, mock_update, mock_resolve_photo, mock_process_queue
+    ):
+        mock_client = MagicMock()
+        mock_client.entity_id = "11511947"
+        mock_client.last_error = "merchant authority invalid"
+        mock_client.get_store_dishes.return_value = [
+            {
+                "id": 101,
+                "name": "Makanan",
+                "dishes": [
+                    {
+                        "id": 801,
+                        "name": "New Item",
+                        "price": 2000000000,
+                        "list_price": 2000000000,
+                        "picture": "id-old-pic",
+                        "catalog_id": 101,
+                        "available": True,
+                    }
+                ]
+            }
+        ]
+        mock_boot.return_value = (mock_client, None)
+        mock_resolve_photo.side_effect = ValueError("Upload foto ke Shopee MMS gagal: Gagal tanpa pesan error")
+        mock_update.return_value = False
+
+        updates = [
+            {
+                "item_id": "801",
+                "item_name": "New Item",
+                "photo_link": "https://external.cdn/newitem.jpg",
+                "changes": ["PHOTO_CHANGE"]
+            }
+        ]
+
+        results = push_c5_shopee_for_merchant(
+            store_metadata={"store_id": "20093460", "username": "superfoodapp"},
+            updates=updates,
+            headless=True
+        )
+
+        self.assertEqual(mock_client.entity_id, "20093460")
+        mock_process_queue.assert_called_once()
+        queued_items = mock_process_queue.call_args[0][1]
+        self.assertEqual(len(queued_items), 1)
+        self.assertEqual(queued_items[0]["dish_id"], "801")
+        self.assertEqual(mock_process_queue.call_args[1]["store_id"], "20093460")
 
 
 if __name__ == "__main__":

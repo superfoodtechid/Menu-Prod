@@ -176,7 +176,7 @@ class TestShopeePushFlags(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["status"], "SUCCESS")
         self.assertEqual(results[0]["item_id"], "9999")
-        self.assertIn("Foto gagal diunggah", results[0]["note"])
+        self.assertIn("fallback portal", results[0]["note"])
 
         mock_create.assert_called_once()
         _, kwargs = mock_create.call_args

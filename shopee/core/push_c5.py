@@ -128,13 +128,15 @@ def _process_photo_fallback_queue(
     store_metadata: dict,
     queue: list[dict],
     headless: bool = True,
-    item_result_cb=None
+    item_result_cb=None,
+    store_id: str = None
 ) -> None:
     """Mengunggah foto yang gagal via API langsung menggunakan otomasi browser Selenium."""
     if not queue:
         return
 
-    store_id = store_metadata.get("store_id")
+    meta_sid = store_metadata.get("store_id")
+    target_store_id = str(store_id or meta_sid or "")
     username = store_metadata.get("username") or "superfoodapp"
     password = store_metadata.get("password") or "Master@00@"
     target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
@@ -160,8 +162,8 @@ def _process_photo_fallback_queue(
             return
 
         driver = session_data["driver"]
-        if store_id:
-            _sync_store_session(driver, str(store_id))
+        if target_store_id:
+            _sync_store_session(driver, str(target_store_id))
 
         for entry in queue:
             dish_id = entry["dish_id"]
@@ -184,9 +186,12 @@ def _process_photo_fallback_queue(
                     image_path=temp_path,
                     headless=headless,
                     driver=driver,
-                    sync_session=False
+                    sync_session=False,
+                    store_id=target_store_id
                 )
                 if upload_ok:
+                    res_item["status"] = "SUCCESS"
+                    res_item["error"] = None
                     res_item["new_photo"] = "Uploaded via portal"
                     prev_note = res_item.get("note", "")
                     if "Foto gagal diunggah:" in prev_note or "fallback" in prev_note:
@@ -248,7 +253,15 @@ def push_c5_shopee_for_merchant(
             })
         return results
 
-    store_id = str(client.entity_id or store_metadata.get("store_id") or "")
+    meta_sid = store_metadata.get("store_id")
+    if meta_sid and str(meta_sid).strip() and str(meta_sid).strip().lower() not in ("-", "nan", "none"):
+        store_id = str(meta_sid).strip()
+    else:
+        store_id = str(client.entity_id or "")
+
+    if client and store_id:
+        client.entity_id = store_id
+
     if not store_id:
         for upd in updates:
             results.append({
@@ -373,6 +386,7 @@ def push_c5_shopee_for_merchant(
                     res_item["status"] = "SUCCESS"
                     dish_map[new_did] = created_dish
                     if new_item_photo_fallback and photo_link and new_did != "NEW_ITEM":
+                        logger.info(f"📌 [PHOTO FALLBACK] Mendaftarkan item baru '{new_name or item_name}' (ID: {new_did}) ke antrean upload portal.")
                         photo_fallback_queue.append({
                             "dish_id": new_did,
                             "photo_link": photo_link,
@@ -381,6 +395,7 @@ def push_c5_shopee_for_merchant(
                             "update_payload": upd,
                         })
                 else:
+                    logger.error(f"❌ [PUSH_C5] create_dish gagal untuk '{new_name or item_name}': {client.last_error}")
                     res_item["status"] = "FAILED"
                     res_item["error"] = f"Gagal membuat item di Shopee: {client.last_error}"
             except Exception as ex_create:
@@ -531,6 +546,7 @@ def push_c5_shopee_for_merchant(
             if not ok:
                 update_success = False
                 last_err = client.last_error or "Update dish API returned error."
+                logger.error(f"❌ [PUSH_C5] update_dish via API gagal untuk '{target_name}' (ID: {item_id}): {last_err}")
                 break
             time.sleep(0.2)
 
@@ -539,14 +555,6 @@ def push_c5_shopee_for_merchant(
             res_item["new_price"] = final_list_price
             if promo_note:
                 res_item["note"] = promo_note.strip()
-            if photo_fallback_needed and photo_link:
-                photo_fallback_queue.append({
-                    "dish_id": str(item_id),
-                    "photo_link": photo_link,
-                    "res_item": res_item,
-                    "target_name": target_name,
-                    "update_payload": upd,
-                })
             if item_id in dish_map:
                 dish_map[item_id].update({
                     "name": target_name,
@@ -560,6 +568,16 @@ def push_c5_shopee_for_merchant(
             res_item["status"] = "FAILED"
             res_item["error"] = last_err
 
+        if photo_fallback_needed and photo_link:
+            logger.info(f"📌 [PHOTO FALLBACK] Mendaftarkan item '{target_name}' (ID: {item_id}) ke antrean upload portal.")
+            photo_fallback_queue.append({
+                "dish_id": str(item_id),
+                "photo_link": photo_link,
+                "res_item": res_item,
+                "target_name": target_name,
+                "update_payload": upd,
+            })
+
         results.append(res_item)
         if item_result_cb:
             try:
@@ -570,7 +588,13 @@ def push_c5_shopee_for_merchant(
 
     if photo_fallback_queue:
         logger.info(f"📸 [PHOTO FALLBACK] Memproses upload foto untuk {len(photo_fallback_queue)} item via portal Selenium...")
-        _process_photo_fallback_queue(store_metadata, photo_fallback_queue, headless=headless, item_result_cb=item_result_cb)
+        _process_photo_fallback_queue(
+            store_metadata,
+            photo_fallback_queue,
+            headless=headless,
+            item_result_cb=item_result_cb,
+            store_id=store_id
+        )
 
     has_any_cat_changes = any(
         ("CATEGORY_CHANGE" in (u.get("changes") or u.get("change_types") or []))
