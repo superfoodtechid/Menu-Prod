@@ -3701,9 +3701,9 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
                         "store_id": outlet.store_id,
                         "username": account.username,
                         "password": account.password,
-                        "merchant_name": outlet.merchant_name or outlet.outlet_name,
-                        "nama_resto_final": outlet.outlet_name,
-                        "nama_outlet": outlet.outlet_name,
+                        "merchant_name": outlet.merchant_name or outlet.nama_resto_final or outlet.nama_outlet or "",
+                        "nama_resto_final": outlet.nama_resto_final or outlet.nama_outlet or outlet.merchant_name or "",
+                        "nama_outlet": outlet.nama_outlet or outlet.nama_resto_final or outlet.merchant_name or "",
                         "nama_portal": getattr(outlet, 'nama_portal', None),
                     }
                     results = push_c5_shopee_for_merchant(
