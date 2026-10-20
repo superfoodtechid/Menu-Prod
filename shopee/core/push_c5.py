@@ -9,6 +9,7 @@ import re
 import json
 import time
 import logging
+import tempfile
 from pathlib import Path
 
 import requests
@@ -17,10 +18,19 @@ WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent
 AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
+from core import browser
 
 from shopee.core.client import ShopeeModifyClient
 from shopee.core.push import _boot_push_client
-from shopee.core.item.edit import update_dish, update_category, reorder_categories
+from shopee.core.session_utils import resolve_shopee_session
+from shopee.core.item.edit import (
+    update_dish,
+    update_category,
+    reorder_categories,
+    edit_dish_upload_image,
+    _sync_store_session,
+    _resolve_target_merchant_name,
+)
 from shopee.core.item.create import create_dish, create_category
 
 logger = logging.getLogger("ShopeeC5Push")
@@ -114,6 +124,103 @@ def resolve_shopee_photo(client: ShopeeModifyClient, photo_link: str, photo_cach
     return uploaded_hash
 
 
+def _process_photo_fallback_queue(
+    store_metadata: dict,
+    queue: list[dict],
+    headless: bool = True,
+    item_result_cb=None
+) -> None:
+    """Mengunggah foto yang gagal via API langsung menggunakan otomasi browser Selenium."""
+    if not queue:
+        return
+
+    store_id = store_metadata.get("store_id")
+    username = store_metadata.get("username") or "superfoodapp"
+    password = store_metadata.get("password") or "Master@00@"
+    target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
+
+    session_file = resolve_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
+    browser.set_session_file(session_file)
+    active_account = session_file.stem.replace("session_", "") if session_file.stem.startswith("session_") else username
+
+    driver = None
+    try:
+        session_data = browser.get_session(
+            username=active_account,
+            password=password,
+            headless=headless,
+            close_browser=False,
+            target_name=target_name,
+            interactive=False
+        )
+        if not session_data or "driver" not in session_data:
+            logger.warning("Gagal menginisialisasi browser untuk fallback upload foto.")
+            for entry in queue:
+                entry["res_item"]["note"] = (entry["res_item"].get("note", "") + " Gagal init browser fallback foto.").strip()
+            return
+
+        driver = session_data["driver"]
+        if store_id:
+            _sync_store_session(driver, str(store_id))
+
+        for entry in queue:
+            dish_id = entry["dish_id"]
+            photo_link = entry["photo_link"]
+            res_item = entry["res_item"]
+            tname = entry.get("target_name", dish_id)
+            upd = entry.get("update_payload")
+
+            temp_path = None
+            try:
+                img_data, filename, _ = download_image_bytes(photo_link)
+                ext = Path(filename).suffix or ".jpg"
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+                    tf.write(img_data)
+                    temp_path = tf.name
+
+                upload_ok = edit_dish_upload_image(
+                    store_metadata=store_metadata,
+                    dish_id=str(dish_id),
+                    image_path=temp_path,
+                    headless=headless,
+                    driver=driver,
+                    sync_session=False
+                )
+                if upload_ok:
+                    res_item["new_photo"] = "Uploaded via portal"
+                    prev_note = res_item.get("note", "")
+                    if "Foto gagal diunggah:" in prev_note or "fallback" in prev_note:
+                        res_item["note"] = "Foto berhasil diunggah via portal"
+                    else:
+                        res_item["note"] = (prev_note + " Foto berhasil diunggah via portal.").strip()
+                    logger.info(f"✅ Foto untuk item '{tname}' (ID {dish_id}) berhasil diunggah via portal.")
+                    if item_result_cb and upd:
+                        try:
+                            item_result_cb(upd, "SUCCESS", None, applied=res_item)
+                        except Exception:
+                            pass
+                else:
+                    logger.warning(f"❌ Foto untuk item '{tname}' (ID {dish_id}) gagal diunggah via portal.")
+                    res_item["note"] = (res_item.get("note", "") + " Foto gagal diunggah via portal.").strip()
+            except Exception as ex:
+                logger.warning(f"Error memproses fallback upload foto item '{tname}': {ex}")
+                res_item["note"] = (res_item.get("note", "") + f" Error fallback foto: {ex}").strip()
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.error(f"Kesalahan fatal pada worker fallback foto: {e}")
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
 def push_c5_shopee_for_merchant(
     store_metadata: dict,
     updates: list,
@@ -125,6 +232,7 @@ def push_c5_shopee_for_merchant(
     results = []
     total = len(updates)
     photo_cache = {}
+    photo_fallback_queue = []
 
     client, err = _boot_push_client(store_metadata, headless=headless)
     if not client:
@@ -177,9 +285,28 @@ def push_c5_shopee_for_merchant(
         photo_link = upd.get("photo_link") or ""
         description = upd.get("description") or ""
 
-        changes = upd.get("changes") or upd.get("change_types") or []
-        if isinstance(changes, dict):
-            changes = [k for k, v in changes.items() if v]
+        raw_changes = upd.get("changes") if upd.get("changes") is not None else upd.get("change_types")
+        if isinstance(raw_changes, dict):
+            change_set = {k for k, v in raw_changes.items() if v}
+            is_dict_changes = True
+            has_change_metadata = True
+        elif isinstance(raw_changes, (list, set, tuple)):
+            change_set = set(raw_changes)
+            is_dict_changes = False
+            has_change_metadata = True
+        else:
+            change_set = set()
+            is_dict_changes = False
+            has_change_metadata = False
+
+        is_new_item = (not item_id) or item_id in ("NEW_ITEM", "TAMBAH_ITEM", "-") or ("NEW_ITEM" in change_set)
+        allow_fallback = is_new_item or not has_change_metadata
+
+        want_name = is_new_item or ("NAME_CHANGE" in change_set) or (is_dict_changes and upd.get("changes", {}).get("name_changed")) or (allow_fallback and bool(new_name))
+        want_category = is_new_item or ("CATEGORY_CHANGE" in change_set) or (is_dict_changes and upd.get("changes", {}).get("category_changed")) or (allow_fallback and bool(new_cat_name))
+        want_photo = is_new_item or ("PHOTO_CHANGE" in change_set) or (is_dict_changes and upd.get("changes", {}).get("photo_changed")) or (allow_fallback and bool(photo_link))
+        want_desc = is_new_item or ("DESCRIPTION_CHANGE" in change_set) or (is_dict_changes and upd.get("changes", {}).get("description_changed")) or (allow_fallback and bool(description))
+        want_price = is_new_item or ("PRICE_CHANGE" in change_set) or (is_dict_changes and upd.get("changes", {}).get("price_changed")) or (allow_fallback and raw_price is not None)
 
         if progress_cb:
             try:
@@ -195,8 +322,6 @@ def push_c5_shopee_for_merchant(
         }
         if idx > 0:
             time.sleep(0.3)
-
-        is_new_item = (not item_id) or item_id in ("NEW_ITEM", "TAMBAH_ITEM", "-") or ("NEW_ITEM" in changes)
 
         if is_new_item:
             target_catalog_id = None
@@ -225,21 +350,15 @@ def push_c5_shopee_for_merchant(
                 continue
 
             target_pic = ""
-            if photo_link:
+            new_item_photo_fallback = False
+            if photo_link and want_photo:
                 try:
                     target_pic = resolve_shopee_photo(client, photo_link, photo_cache) or ""
                     res_item["new_photo"] = target_pic
                 except Exception as ex_photo:
                     logger.warning(f"Gagal memproses foto item baru '{new_name or item_name}': {ex_photo}")
-                    res_item["status"] = "FAILED"
-                    res_item["error"] = f"Gagal upload foto: {ex_photo}"
-                    results.append(res_item)
-                    if item_result_cb:
-                        try:
-                            item_result_cb(upd, "FAILED", res_item["error"], applied=res_item)
-                        except Exception:
-                            pass
-                    continue
+                    res_item["note"] = f"Foto ditandai untuk fallback portal: {ex_photo}"
+                    new_item_photo_fallback = True
 
             try:
                 final_price = float(raw_price or 0)
@@ -253,6 +372,14 @@ def push_c5_shopee_for_merchant(
                     res_item["item_id"] = new_did
                     res_item["status"] = "SUCCESS"
                     dish_map[new_did] = created_dish
+                    if new_item_photo_fallback and photo_link and new_did != "NEW_ITEM":
+                        photo_fallback_queue.append({
+                            "dish_id": new_did,
+                            "photo_link": photo_link,
+                            "res_item": res_item,
+                            "target_name": new_name or item_name,
+                            "update_payload": upd,
+                        })
                 else:
                     res_item["status"] = "FAILED"
                     res_item["error"] = f"Gagal membuat item di Shopee: {client.last_error}"
@@ -269,6 +396,24 @@ def push_c5_shopee_for_merchant(
                     pass
             continue
 
+        has_item_mutation = (
+            want_name
+            or want_category
+            or want_photo
+            or want_desc
+            or want_price
+        )
+        if not has_item_mutation:
+            res_item["status"] = "SUCCESS"
+            res_item["note"] = "Tidak ada perubahan atribut yang dipilih (dilewati)"
+            results.append(res_item)
+            if item_result_cb:
+                try:
+                    item_result_cb(upd, "SUCCESS", None, applied=res_item)
+                except Exception:
+                    pass
+            continue
+
         existing_dish = dish_map.get(item_id) or client.get_dish_detail(item_id, store_id)
         if not existing_dish:
             res_item["status"] = "FAILED"
@@ -281,8 +426,9 @@ def push_c5_shopee_for_merchant(
                     pass
             continue
 
-        catalog_id = int(existing_dish.get("catalog_id") or 0)
-        if new_cat_name:
+        orig_catalog_id = int(existing_dish.get("catalog_id") or 0)
+        catalog_id = orig_catalog_id
+        if want_category and new_cat_name:
             norm_cname = new_cat_name.lower()
             if norm_cname in cat_map:
                 catalog_id = int(cat_map[norm_cname])
@@ -293,14 +439,14 @@ def push_c5_shopee_for_merchant(
                     cat_map[norm_cname] = str(catalog_id)
                     cat_obj_map[str(catalog_id)] = new_cat
 
-        target_name = new_name if new_name else existing_dish.get("name", item_name)
-        target_desc = description if description else existing_dish.get("description", "")
+        target_name = new_name if (want_name and new_name) else existing_dish.get("name", item_name)
+        target_desc = description if (want_desc and description) else existing_dish.get("description", "")
         target_avail = existing_dish.get("available", True)
         opt_groups = existing_dish.get("option_groups", [])
 
         target_pic = existing_dish.get("picture", "")
-        has_photo_change = ("PHOTO_CHANGE" in changes) or (photo_link and photo_link != target_pic)
-        if has_photo_change and photo_link:
+        photo_fallback_needed = False
+        if want_photo and photo_link and photo_link != target_pic:
             try:
                 resolved_pic = resolve_shopee_photo(client, photo_link, photo_cache)
                 if resolved_pic:
@@ -308,52 +454,52 @@ def push_c5_shopee_for_merchant(
                     res_item["new_photo"] = target_pic
             except Exception as ex_photo:
                 logger.warning(f"Gagal memproses foto untuk '{target_name}': {ex_photo}")
-                res_item["status"] = "FAILED"
-                res_item["error"] = f"Gagal upload foto: {ex_photo}"
-                results.append(res_item)
-                if item_result_cb:
-                    try:
-                        item_result_cb(upd, "FAILED", res_item["error"], applied=res_item)
-                    except Exception:
-                        pass
-                continue
+                res_item["note"] = f"Foto ditandai untuk fallback portal: {ex_photo}"
+                photo_fallback_needed = True
 
         orig_price = float(existing_dish.get("price", 0)) / 100000.0 if existing_dish.get("price") else 0.0
         list_price = float(existing_dish.get("list_price", 0)) / 100000.0 if existing_dish.get("list_price") else orig_price
         disc_pct = float(existing_dish.get("discount_percentage", 0))
         is_promo = (list_price > orig_price > 0) or (disc_pct > 0) or (existing_dish.get("discount_status") == 1)
 
-        target_list_price = float(raw_price) if raw_price is not None else list_price
-        new_real_price = upd.get("new_real_price")
+        if want_price and raw_price is not None:
+            target_list_price = float(raw_price)
+            new_real_price = upd.get("new_real_price")
 
-        if is_promo:
-            if new_real_price is not None and float(new_real_price) > 0:
-                target_selling_price = float(new_real_price)
-            elif list_price > orig_price > 0:
-                disc_ratio = (list_price - orig_price) / list_price
-                target_selling_price = round(target_list_price * (1.0 - disc_ratio))
-            elif disc_pct > 0:
-                disc_ratio = (disc_pct / 10000.0) if disc_pct > 100 else (disc_pct / 100.0)
-                target_selling_price = round(target_list_price * (1.0 - disc_ratio))
+            if is_promo:
+                if new_real_price is not None and float(new_real_price) > 0:
+                    target_selling_price = float(new_real_price)
+                elif list_price > orig_price > 0:
+                    disc_ratio = (list_price - orig_price) / list_price
+                    target_selling_price = round(target_list_price * (1.0 - disc_ratio))
+                elif disc_pct > 0:
+                    disc_ratio = (disc_pct / 10000.0) if disc_pct > 100 else (disc_pct / 100.0)
+                    target_selling_price = round(target_list_price * (1.0 - disc_ratio))
+                else:
+                    target_selling_price = target_list_price
+
+                if target_selling_price > target_list_price:
+                    target_selling_price = target_list_price
+
+                logger.info(
+                    f"Item '{target_name}' (ID: {item_id}) sedang promo. "
+                    f"Mengubah harga sebelum coret (list_price) dari Rp{list_price:,.0f} ke Rp{target_list_price:,.0f} "
+                    f"(harga promo disesuaikan ke Rp{target_selling_price:,.0f})."
+                )
+                final_price = target_selling_price
+                final_list_price = target_list_price
+                price_steps = calculate_price_steps(list_price, target_list_price) if list_price > 0 else [target_list_price]
+                promo_note = f" (Promo aktif: list_price Rp{target_list_price:,.0f}, promo Rp{target_selling_price:,.0f})"
             else:
-                target_selling_price = target_list_price
-
-            if target_selling_price > target_list_price:
-                target_selling_price = target_list_price
-
-            logger.info(
-                f"Item '{target_name}' (ID: {item_id}) sedang promo. "
-                f"Mengubah harga sebelum coret (list_price) dari Rp{list_price:,.0f} ke Rp{target_list_price:,.0f} "
-                f"(harga promo disesuaikan ke Rp{target_selling_price:,.0f})."
-            )
-            final_price = target_selling_price
-            final_list_price = target_list_price
-            price_steps = calculate_price_steps(list_price, target_list_price) if list_price > 0 else [target_list_price]
-            promo_note = f" (Promo aktif: list_price Rp{target_list_price:,.0f}, promo Rp{target_selling_price:,.0f})"
+                final_price = float(raw_price)
+                final_list_price = final_price
+                price_steps = calculate_price_steps(orig_price, final_price) if orig_price > 0 else [final_price]
+                promo_note = ""
         else:
-            final_price = float(raw_price) if raw_price is not None else orig_price
-            final_list_price = final_price
-            price_steps = calculate_price_steps(orig_price, final_price) if orig_price > 0 else [final_price]
+            # Tidak ada perubahan harga: pertahankan harga dan list_price yang sudah ada di Shopee
+            final_price = orig_price
+            final_list_price = list_price
+            price_steps = [list_price]
             promo_note = ""
 
         update_success, last_err = True, ""
@@ -393,6 +539,14 @@ def push_c5_shopee_for_merchant(
             res_item["new_price"] = final_list_price
             if promo_note:
                 res_item["note"] = promo_note.strip()
+            if photo_fallback_needed and photo_link:
+                photo_fallback_queue.append({
+                    "dish_id": str(item_id),
+                    "photo_link": photo_link,
+                    "res_item": res_item,
+                    "target_name": target_name,
+                    "update_payload": upd,
+                })
             if item_id in dish_map:
                 dish_map[item_id].update({
                     "name": target_name,
@@ -413,6 +567,20 @@ def push_c5_shopee_for_merchant(
                 item_result_cb(upd, res_item.get("status", "FAILED"), err_cb, applied=res_item)
             except Exception:
                 pass
+
+    if photo_fallback_queue:
+        logger.info(f"📸 [PHOTO FALLBACK] Memproses upload foto untuk {len(photo_fallback_queue)} item via portal Selenium...")
+        _process_photo_fallback_queue(store_metadata, photo_fallback_queue, headless=headless, item_result_cb=item_result_cb)
+
+    has_any_cat_changes = any(
+        ("CATEGORY_CHANGE" in (u.get("changes") or u.get("change_types") or []))
+        or ("CATEGORY_ORDER_CHANGE" in (u.get("changes") or u.get("change_types") or []))
+        or ("NEW_CATEGORY" in (u.get("changes") or u.get("change_types") or []))
+        or (not (u.get("changes") or u.get("change_types")))
+        for u in updates
+    )
+    if not has_any_cat_changes:
+        return results
 
     try:
         valid_cat_ids = {str(cid) for cid in cat_obj_map.keys()}
