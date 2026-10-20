@@ -17,21 +17,33 @@ USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Ge
 # Options monkeypatch removed to allow dynamic browser profiles to resolve correctly.
 
 class ShopeeClient:
-    def __init__(self, tob_token: str, entity_id: str, extra_cookies: dict = None):
+    def __init__(self, tob_token: str, entity_id: str, extra_cookies: dict = None, merchant_id: str = None, username: str = None):
         self.tob_token     = tob_token
         self.extra_cookies = extra_cookies or {}
-        self.entity_id     = entity_id or self.extra_cookies.get("shopee_foody_mid", "")
+        self.entity_id     = str(entity_id or "")
+        self.merchant_id   = str(merchant_id or self.extra_cookies.get("shopee_foody_mid") or entity_id or "")
+        self.username      = str(username or self.extra_cookies.get("shopee_user_name") or "")
         self.session       = requests.Session()
         self.user_agent    = USER_AGENT
+        self.last_code     = None
+        self.last_error    = ""
 
     def _seller_headers(self, override_entity_id: str = None) -> dict:
-        eid = override_entity_id or self.entity_id
+        eid = str(override_entity_id or self.entity_id or "")
+        mid = str(self.merchant_id or eid)
         cookies = self.extra_cookies.copy()
-        cookies["shopee_tob_token"]     = self.tob_token
-        cookies["shopee_tob_entity_id"] = eid
-        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        if self.tob_token:
+            cookies["shopee_tob_token"] = self.tob_token
+        if self.username:
+            cookies["shopee_user_name"] = self.username
+        cookies["shopee_request_from"] = "partner_web"
+        if mid:
+            cookies["shopee_foody_mid"] = mid
+        if eid:
+            cookies["shopee_tob_entity_id"] = eid
+        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items() if v)
 
-        return {
+        headers = {
             "Host":           "foody.shopee.co.id",
             "Accept":         "application/json, text/plain, */*",
             "Content-Type":   "application/json",
@@ -42,6 +54,13 @@ class ShopeeClient:
             "Origin":         "https://partner.shopee.co.id",
             "Referer":        "https://partner.shopee.co.id/",
         }
+        if self.tob_token:
+            headers["x-merchant-token"] = self.tob_token
+        if mid:
+            headers["x-merchant-id"] = mid
+        if eid:
+            headers["shopee_tob_entity_id"] = eid
+        return headers
 
     def get_store_dishes(self, store_id: str) -> list[dict]:
         url = f"{SELLER_BASE}/api/seller/store/dishes"
@@ -50,11 +69,14 @@ class ShopeeClient:
             print(f"[DEBUG] get_store_dishes response status: {resp.status_code}")
             print(f"[DEBUG] get_store_dishes response text: {resp.text[:500]}")
             data = resp.json()
-            if data.get("code") == 0:
+            self.last_code = data.get("code")
+            self.last_error = data.get("msg", "")
+            if self.last_code == 0:
                 return data.get("data", {}).get("catalogs", [])
             else:
-                print(f"[DEBUG] API error code: {data.get('code')}, msg: {data.get('msg')}")
+                print(f"[DEBUG] API error code: {self.last_code}, msg: {self.last_error}")
         except Exception as e:
+            self.last_error = str(e)
             print(f"[Shopee API] get_store_dishes error: {e}")
         return []
 
@@ -66,9 +88,14 @@ class ShopeeClient:
         try:
             resp = self.session.post(url, json=payload, headers=self._seller_headers(override_entity_id=store_id), timeout=15)
             data = resp.json()
-            if data.get("code") == 0:
+            self.last_code = data.get("code")
+            self.last_error = data.get("msg", "")
+            if self.last_code == 0:
                 return data.get("data", {}).get("option_groups", [])
+            else:
+                print(f"[DEBUG] API error code: {self.last_code}, msg: {self.last_error}")
         except Exception as e:
+            self.last_error = str(e)
             print(f"[Shopee API] get_store_option_groups error: {e}")
         return []
 
@@ -81,6 +108,7 @@ class ShopeeModifyClient:
         self.extra_cookies = extra_cookies or {}
         self.session       = requests.Session()
         self.uploaded_image_hash = ""
+        self.last_code = None
         self.last_error = ""
 
     def _seller_headers(self, override_entity_id: str = None) -> dict:

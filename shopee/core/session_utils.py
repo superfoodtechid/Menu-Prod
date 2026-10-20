@@ -8,8 +8,10 @@ dan menyinkronkan profil Chrome yang cocok.
 import os
 import re
 import json
+import time
 import shutil
 import logging
+import requests
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -18,6 +20,10 @@ WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent
 AUTOMATION_DATA_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation" / "data"
 SHOPEE_DATA_DIR = WORKSPACE_DIR / "shopee" / "data"
 ROOT_DATA_DIR = WORKSPACE_DIR / "data"
+
+_IN_MEMORY_SESSION_CACHE: dict[str, dict] = {}
+CACHE_VALID_TTL_SECONDS = 1800  # 30 minutes
+CACHE_PING_INTERVAL_SECONDS = 300  # Re-ping every 5 minutes
 
 
 def get_cached_phone_map(cache_path: Path) -> dict:
@@ -37,6 +43,129 @@ def get_cached_phone_map(cache_path: Path) -> dict:
     except Exception as e:
         log.debug(f"Gagal membaca phone map cache: {e}")
     return phone_map
+
+
+def get_cached_shopee_catalog_maps(cache_path: Path = None) -> tuple[dict, dict, dict]:
+    """
+    Membaca master_merchants_cache.csv dan menghasilkan tiga dictionary pemetaan:
+    1. store_to_gid: store_id -> Group ID (merchant_id)
+    2. gid_to_sid: Group ID (merchant_id) -> Store ID
+    3. portal_to_info: lower(nama_portal / outlet) -> (Store ID, Group ID)
+    """
+    cf = cache_path or (WORKSPACE_DIR / "master_merchants_cache.csv")
+    store_to_gid = {}
+    gid_to_sid = {}
+    portal_to_info = {}
+    if not cf.exists():
+        return store_to_gid, gid_to_sid, portal_to_info
+
+    try:
+        import csv
+        with open(cf, mode="r", encoding="utf-8-sig", errors="ignore") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                app = (row.get("Aplikator") or "").strip().lower()
+                if app in ("shopeefood", "shopee"):
+                    sid = (row.get("Store ID") or row.get("store_id") or "").strip()
+                    gid = (row.get("Group ID") or row.get("merchant_id") or "").strip()
+                    portal = (row.get("Nama Portal") or row.get("nama_portal") or row.get("Outlet") or "").strip().lower()
+                    if sid and gid:
+                        store_to_gid[sid] = gid
+                        if gid not in gid_to_sid:
+                            gid_to_sid[gid] = sid
+                    if portal and sid:
+                        if portal not in portal_to_info:
+                            portal_to_info[portal] = (sid, gid)
+                        elif not portal_to_info[portal][1] and gid:
+                            portal_to_info[portal] = (sid, gid)
+    except Exception as e:
+        log.debug(f"Gagal membaca katalog Shopee maps dari CSV cache: {e}")
+
+    return store_to_gid, gid_to_sid, portal_to_info
+
+
+def resolve_shopee_outlet_context(store_metadata: dict, session_data: dict = None) -> tuple[str, str]:
+    """
+    Resolusi menyeluruh Store ID fisik dan Group ID (Merchant ID) ShopeeFood.
+    Mencegah error 1130014 (merchant authority invalid) akibat tertukarnya Store ID dengan Group ID.
+    Mengembalikan (store_id, merchant_id).
+    """
+    sid = str(store_metadata.get("store_id") or "").strip()
+    mid = str(store_metadata.get("merchant_id") or store_metadata.get("group_id") or "").strip()
+    portal = (
+        store_metadata.get("nama_portal")
+        or store_metadata.get("merchant_name")
+        or store_metadata.get("nama_resto_final")
+        or store_metadata.get("nama_outlet")
+        or ""
+    ).strip().lower()
+
+    store_to_gid, gid_to_sid, portal_to_info = get_cached_shopee_catalog_maps()
+
+    if not sid and session_data:
+        sess_eid = str(session_data.get("shopee_tob_entity_id") or "").strip()
+        if sess_eid:
+            sid = sess_eid
+
+    # Kasus: sid yang diinput sebenarnya adalah Group ID / Merchant ID (misal: 23988560)
+    if sid and sid in gid_to_sid and sid not in store_to_gid:
+        if not mid:
+            mid = sid
+        sid = gid_to_sid[sid]
+    elif sid and sid in store_to_gid:
+        if not mid:
+            mid = store_to_gid[sid]
+
+    # Resolusi Store ID & Merchant ID via Nama Portal / Nama Outlet
+    if (not sid or not mid) and portal:
+        if portal in portal_to_info:
+            p_sid, p_gid = portal_to_info[portal]
+            sid = sid or p_sid
+            mid = mid or p_gid
+        else:
+            for k, (p_sid, p_gid) in portal_to_info.items():
+                if portal in k or k in portal:
+                    sid = sid or p_sid
+                    mid = mid or p_gid
+                    break
+
+    # Jika mid masih kosong namun sid fisik valid
+    if not mid and sid in store_to_gid:
+        mid = store_to_gid[sid]
+
+    return sid, mid
+
+
+def get_cached_merchant_id_maps(cache_path: Path = None) -> tuple[dict, dict]:
+    """
+    Membaca master_merchants_cache.csv dan menghasilkan dua dictionary pemetaan:
+    1. store_to_mid: store_id -> Group ID (merchant_id)
+    2. portal_to_mid: lower(nama_portal / outlet) -> Group ID (merchant_id)
+    """
+    store_to_gid, _, portal_to_info = get_cached_shopee_catalog_maps(cache_path)
+    portal_to_mid = {k: v[1] for k, v in portal_to_info.items() if v[1]}
+    return store_to_gid, portal_to_mid
+
+
+def resolve_shopee_merchant_id(store_metadata: dict, session_data: dict = None, tob_token: str = None) -> str:
+    """
+    Resolusi bertingkat untuk menemukan Shopee Merchant ID (Group ID / foody_mid).
+    """
+    _, mid = resolve_shopee_outlet_context(store_metadata, session_data=session_data)
+    if mid and mid.isdigit():
+        return mid
+
+    # Fallback GetUserInfo jika token tersedia
+    token = tob_token or (session_data.get("shopee_tob_token") if session_data else "")
+    if token:
+        try:
+            is_valid, u_data = validate_shopee_token(token, timeout=2.5)
+            if is_valid and u_data and u_data.get("merchantId"):
+                return str(u_data["merchantId"])
+        except Exception:
+            pass
+
+    return ""
 
 
 def to_canonical_phone(raw: str) -> str:
@@ -185,3 +314,140 @@ def resolve_shopee_session(store_metadata: dict, base_dir: Path = None) -> Path:
 
     log.info(f"ℹ️ [SESSION] Tidak ditemukan sesi tersimpan untuk kunci {sorted(list(search_keys))}. Menggunakan default: {target_session_file}")
     return target_session_file
+
+
+def validate_shopee_token(tob_token: str, timeout: float = 2.5) -> tuple[bool, dict]:
+    """
+    Validasi cepat keaktifan token Shopee Partner via GetUserInfo API tanpa browser.
+    Mengembalikan (is_valid: bool, user_data: dict).
+    """
+    if not tob_token or not isinstance(tob_token, str):
+        return False, {}
+
+    url = "https://api.partner.shopee.co.id/nb/mss/web-api/PartnerAccountServer/GetUserInfo"
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "content-type": "application/json",
+        "origin": "https://partner.shopee.co.id",
+        "referer": "https://partner.shopee.co.id/",
+        "x-merchant-token": tob_token.strip(),
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json={}, timeout=timeout)
+        if resp.status_code == 200:
+            body = resp.json()
+            if body.get("code") == 0 and body.get("data"):
+                return True, body.get("data") or {}
+    except Exception as e:
+        log.debug(f"Pemeriksaan cepat token Shopee gagal: {e}")
+
+    return False, {}
+
+
+def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout: float = 2.5) -> dict | None:
+    """
+    Mencari dan memvalidasi sesi Shopee aktif dari memory cache atau file session.
+    Jika valid, mengembalikan data sesi lengkap siap pakai dalam hitungan milidetik (~0.2s),
+    menghilangkan kebutuhan membuka browser headless.
+    """
+    now = time.time()
+    username = (store_metadata.get("username") or "").strip()
+    store_id = str(store_metadata.get("store_id") or "").strip()
+    cache_key = username or store_id or "default"
+
+    # 1. Cek In-Memory Cache
+    mem_entry = _IN_MEMORY_SESSION_CACHE.get(cache_key)
+    if mem_entry:
+        validated_at = mem_entry.get("validated_at", 0)
+        age = now - validated_at
+        if age < CACHE_PING_INTERVAL_SECONDS:
+            return mem_entry.get("session_data")
+        elif age < CACHE_VALID_TTL_SECONDS:
+            sess_candidate = mem_entry.get("session_data") or {}
+            tok = sess_candidate.get("shopee_tob_token")
+            if tok:
+                is_valid, u_data = validate_shopee_token(tok, timeout=timeout)
+                if is_valid:
+                    mem_entry["validated_at"] = now
+                    if u_data:
+                        mem_entry["user_data"] = u_data
+                    return sess_candidate
+            _IN_MEMORY_SESSION_CACHE.pop(cache_key, None)
+
+    # 2. Cek File Sesi di Disk
+    session_file = resolve_shopee_session(store_metadata, base_dir=base_dir)
+    if not session_file or not session_file.exists():
+        return None
+
+    try:
+        raw_data = json.loads(session_file.read_text(encoding="utf-8"))
+    except Exception as read_err:
+        log.debug(f"Gagal membaca file sesi {session_file}: {read_err}")
+        return None
+
+    tob_token = (raw_data.get("shopee_tob_token") or "").strip()
+    if not tob_token:
+        return None
+
+    # 3. Validasi token via HTTP GetUserInfo
+    is_valid, user_data = validate_shopee_token(tob_token, timeout=timeout)
+    if not is_valid:
+        log.info(f"⚠️ [SESSION] Token tersimpan di {session_file.name} sudah kedaluwarsa. Memerlukan refresh via browser.")
+        return None
+
+    real_store_id = str(store_id) if (store_id and store_id != "-" and store_id.lower() != "nan") else ""
+    if not real_store_id and user_data.get("store_id"):
+        real_store_id = str(user_data["store_id"])
+    if not real_store_id and raw_data.get("shopee_tob_entity_id"):
+        real_store_id = str(raw_data["shopee_tob_entity_id"])
+
+    real_merchant_id = str(user_data.get("merchantId") or raw_data.get("merchant_id") or "")
+    if not real_merchant_id or (real_store_id and real_merchant_id == real_store_id):
+        resolved_mid = resolve_shopee_merchant_id(store_metadata, session_data=raw_data, tob_token=tob_token)
+        if resolved_mid:
+            real_merchant_id = resolved_mid
+
+    extra_cookies = (raw_data.get("extra_cookies") or {}).copy()
+    extra_cookies["shopee_user_name"] = username or user_data.get("userName") or ""
+    extra_cookies["shopee_request_from"] = "partner_web"
+    if real_merchant_id:
+        extra_cookies["shopee_foody_mid"] = real_merchant_id
+    if real_store_id:
+        extra_cookies["shopee_tob_entity_id"] = real_store_id
+
+    fast_session = {
+        "shopee_tob_token": tob_token,
+        "shopee_tob_entity_id": real_store_id,
+        "merchant_id": real_merchant_id,
+        "extra_cookies": extra_cookies,
+        "source": "fast_cache"
+    }
+
+    _IN_MEMORY_SESSION_CACHE[cache_key] = {
+        "session_data": fast_session,
+        "validated_at": now,
+        "user_data": user_data
+    }
+    if username and username != cache_key:
+        _IN_MEMORY_SESSION_CACHE[username] = _IN_MEMORY_SESSION_CACHE[cache_key]
+    if real_store_id and real_store_id != cache_key:
+        _IN_MEMORY_SESSION_CACHE[real_store_id] = _IN_MEMORY_SESSION_CACHE[cache_key]
+
+    log.info(f"⚡ [FAST-PATH] Berhasil memvalidasi sesi Shopee untuk '{username or real_store_id}' tanpa browser.")
+    return fast_session
+
+
+def invalidate_shopee_session(store_metadata: dict, base_dir: Path = None) -> None:
+    """
+    Menghapus sesi dari in-memory cache jika pemanggilan API mengembalikan error autentikasi.
+    """
+    username = (store_metadata.get("username") or "").strip()
+    store_id = str(store_metadata.get("store_id") or "").strip()
+
+    for k in [username, store_id, "default"]:
+        if k:
+            _IN_MEMORY_SESSION_CACHE.pop(k, None)
+
+    log.info(f"🗑️ [SESSION] In-memory session cache dibersihkan untuk '{username or store_id}'.")

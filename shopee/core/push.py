@@ -18,9 +18,9 @@ AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
 from core import browser
-from shopee.core.session_utils import resolve_shopee_session
+from shopee.core.session_utils import resolve_shopee_session, get_fast_shopee_session, invalidate_shopee_session
 
-def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeModifyClient | None, str]:
+def _boot_push_client(store_metadata: dict, headless: bool = True, force_browser: bool = False) -> tuple[ShopeeModifyClient | None, str]:
     store_id = store_metadata.get("store_id")
     if isinstance(store_id, str):
         store_id = store_id.strip().split('.')[0]
@@ -29,6 +29,25 @@ def _boot_push_client(store_metadata: dict, headless: bool = True) -> tuple[Shop
 
     username = store_metadata.get("username") or "superfoodapp"
     password = store_metadata.get("password") or "Master@00@"
+    
+    # ── Fast-Path Pre-flight: Check cached session before launching browser ──
+    if not force_browser:
+        fast_session = get_fast_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
+        if fast_session and fast_session.get("shopee_tob_token"):
+            tob_token = fast_session["shopee_tob_token"]
+            real_store_id = str(store_id) if store_id else str(fast_session.get("shopee_tob_entity_id") or "")
+            real_merchant_id = str(fast_session.get("merchant_id") or "")
+            extra_cookies = fast_session.get("extra_cookies") or {}
+
+            print(f"⚡ [FAST-PATH] Menggunakan sesi Shopee aktif untuk '{username}' (Skip browser init, ~0.2s).")
+            client = ShopeeModifyClient(
+                tob_token=tob_token,
+                entity_id=real_store_id or str(store_id or ""),
+                merchant_id=real_merchant_id,
+                username=username,
+                extra_cookies=extra_cookies
+            )
+            return client, ""
     
     m_name = store_metadata.get('merchant_name', '')
     if not m_name or m_name.lower() == 'nan' or m_name == '-':
@@ -229,8 +248,9 @@ def push_price_update_batch(
                     "error_message": "user membatalkan otp"
                 })
                 continue
-            print(f"[PUSH_BATCH] Retrying _boot_push_client for item {item_name}...")
-            client, err = _boot_push_client(store_metadata, headless=headless)
+            print(f"[PUSH_BATCH] Retrying _boot_push_client for item {item_name} with forced browser refresh...")
+            invalidate_shopee_session(store_metadata)
+            client, err = _boot_push_client(store_metadata, headless=headless, force_browser=True)
 
         if not client:
             err_msg = "user membatalkan otp" if (err and "user membatalkan otp" in str(err).lower()) else f"Boot client failed: {err}"

@@ -560,12 +560,13 @@ def build_img_url(img_id: str) -> str:
 
 # ── Session Persistence ────────────────────────────────────────────────────────
 
-def save_session(tob_token: str, entity_id: str, extra_cookies: dict = None, username: str = None):
+def save_session(tob_token: str, entity_id: str, extra_cookies: dict = None, username: str = None, merchant_id: str = None):
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "username": username,
         "shopee_tob_token": tob_token,
         "shopee_tob_entity_id": entity_id,
+        "merchant_id": merchant_id or entity_id or "",
         "saved_at": datetime.now().isoformat(),
         "extra_cookies": extra_cookies or {},
     }
@@ -686,6 +687,12 @@ def get_all_cookies_dict(driver) -> dict:
     return {c["name"]: c["value"] for c in driver.get_cookies()}
 
 def _trigger_and_extract_tokens(driver) -> tuple:
+    # 1. Cek langsung dari sesi aktif browser (hindari page reload jika token sudah ada)
+    tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
+    if tob_token:
+        log.info(f"⚡ [SESSION] Token fresh sudah tersedia di cookies browser (entity_id: {entity_id}). Melewati trigger page.")
+        return tob_token, entity_id
+
     log.info("🔄 [SESSION] Navigating to business hours settings to trigger fresh token...")
     try:
         try:
@@ -694,7 +701,7 @@ def _trigger_and_extract_tokens(driver) -> tuple:
             pass
         driver.get(TOKEN_TRIGGER_PAGE)
         for _ in range(15):
-            time.sleep(1)
+            time.sleep(0.5)
             tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
             if tob_token:
                 log.info(f"✅ Fresh token extracted successfully from business-hours. (entity_id: {entity_id})")
@@ -1578,6 +1585,11 @@ def _init_driver(headless: bool = True):
     options.add_argument("--disable-component-update")
     options.add_argument("--mute-audio")
     options.add_argument("--disable-background-networking")
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
     options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     if headless:
@@ -2948,7 +2960,16 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
         try:
             # ── Step 1: Check browser state first (Profile session) ──
             driver.get(PARTNER_DASHBOARD)
-            time.sleep(4)
+            try:
+                WebDriverWait(driver, 4).until(
+                    lambda d: d.get_cookie("shopee_tob_token") is not None
+                    or "dashboard" in d.current_url.lower()
+                    or "merchant-selector" in d.current_url.lower()
+                    or "login" in d.current_url.lower()
+                    or "onboarding" in d.current_url.lower()
+                )
+            except Exception:
+                time.sleep(1)
             
             is_logged_in = False
             current_url = driver.current_url.lower()
@@ -3236,6 +3257,15 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                     log.error("❌ Merchant selection failed.")
                     driver.quit()
                     continue
+
+                try:
+                    new_u_data = driver.execute_async_script(api_js)
+                    if new_u_data:
+                        active_id = str(new_u_data.get("merchantId") or "")
+                        active_name = new_u_data.get("merchantName") or (target_name or "Unknown Merchant")
+                        log.info(f"📍 [MERCHANT] Active merchant after switch: {active_name} (ID: {active_id})")
+                except Exception as refresh_err:
+                    log.debug(f"Could not refresh active_id after switch: {refresh_err}")
             else:
                 if "/food/dashboard" not in driver.current_url:
                     driver.get(PARTNER_DASHBOARD)
@@ -3243,9 +3273,9 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
 
             # ── Step 6: Final Token Extraction ──
             t, eid = _trigger_and_extract_tokens(driver)
-            if not eid and active_id and active_id != "None":
-                log.info(f"⚠️ [SESSION] Token extraction returned empty entity_id. Using fallback active_id: {active_id}")
-                eid = active_id
+            if active_id and active_id != "None":
+                if not eid or do_switch:
+                    eid = active_id
                 
             if not t:
                 log.warning("⚠️ Token extraction failed.")
@@ -3253,8 +3283,13 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                 continue
                 
             all_c = get_all_cookies_dict(driver)
-            save_session(t, eid or "", extra_cookies=all_c, username=username)
-            res = {"shopee_tob_token": t, "shopee_tob_entity_id": eid or "", "extra_cookies": all_c}
+            save_session(t, eid or "", extra_cookies=all_c, username=username, merchant_id=active_id or eid or "")
+            res = {
+                "shopee_tob_token": t,
+                "shopee_tob_entity_id": eid or "",
+                "merchant_id": active_id or eid or "",
+                "extra_cookies": all_c
+            }
             if not close_browser: res["driver"] = driver
             session_success = True
             return res

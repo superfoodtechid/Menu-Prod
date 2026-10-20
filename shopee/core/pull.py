@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from pathlib import Path
 from shopee.core.client import ShopeeClient, ShopeeModifyClient
@@ -15,6 +16,12 @@ AUTOMATION_DIR = WORKSPACE_DIR / "src" / "shopee-omzet-automation"
 if str(AUTOMATION_DIR) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_DIR))
 from core import browser
+from shopee.core.session_utils import (
+    get_fast_shopee_session,
+    invalidate_shopee_session,
+    resolve_shopee_merchant_id,
+    resolve_shopee_outlet_context,
+)
 
 IMG_BASE = "https://down-id.img.susercontent.com/file"
 
@@ -55,6 +62,13 @@ def get_shopee_master_credentials() -> tuple[str, str]:
 
 
 def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = True):
+    # Resolusi Store ID fisik dan Group ID (Merchant ID) secara presisi di awal
+    resolved_sid, resolved_mid = resolve_shopee_outlet_context(store_metadata)
+    if resolved_sid:
+        store_metadata['store_id'] = resolved_sid
+    if resolved_mid:
+        store_metadata['merchant_id'] = resolved_mid
+
     store_id = store_metadata.get('store_id', '')
     if isinstance(store_id, str):
         store_id = store_id.strip().split('.')[0]
@@ -100,20 +114,32 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         print(f"[!] Shopee job {job_id} telah dibatalkan oleh pengguna.")
         return False, "user membatalkan otp"
 
-    print(f"[*] Membuka browser (headless={headless}) untuk akun '{active_account}' (target: '{username}'), merchant: '{target_name}', session: '{session_file.name}'...")
-    try:
-        session_data = browser.get_session(
-            username=active_account,
-            password=password,
-            headless=headless,
-            close_browser=True,
-            target_name=target_name,
-            interactive=True
-        )
-    except Exception as e:
-        if "user membatalkan otp" in str(e).lower() or _is_cancelled():
-            return False, "user membatalkan otp"
-        return False, f"Gagal menginisialisasi browser: {e}"
+    session_data = None
+    if store_id:
+        fast_meta = dict(store_metadata)
+        fast_meta.setdefault("username", master_user)
+        fast_meta.setdefault("store_id", store_id)
+        fast_meta.setdefault("nama_portal", target_name)
+        fast_sess = get_fast_shopee_session(fast_meta, base_dir=WORKSPACE_DIR)
+        if fast_sess and fast_sess.get("shopee_tob_token"):
+            print(f"⚡ [FAST-PATH PULL] Menggunakan sesi master Shopee aktif untuk '{master_user}' (~0.2s).")
+            session_data = fast_sess
+
+    if not session_data:
+        print(f"[*] Membuka browser (headless={headless}) untuk akun '{active_account}' (target: '{username}'), merchant: '{target_name}', session: '{session_file.name}'...")
+        try:
+            session_data = browser.get_session(
+                username=active_account,
+                password=password,
+                headless=headless,
+                close_browser=True,
+                target_name=target_name,
+                interactive=True
+            )
+        except Exception as e:
+            if "user membatalkan otp" in str(e).lower() or _is_cancelled():
+                return False, "user membatalkan otp"
+            return False, f"Gagal menginisialisasi browser: {e}"
 
     if _is_cancelled():
         print(f"[!] Shopee job {job_id} telah dibatalkan setelah inisialisasi browser.")
@@ -152,27 +178,70 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         else:
             return False, "Gagal mendeteksi Store ID untuk merchant ini."
             
+    real_merchant_id = resolve_shopee_merchant_id(
+        store_metadata,
+        session_data=session_data,
+        tob_token=tob_token
+    )
+    if not real_merchant_id and session_data.get("merchant_id"):
+        real_merchant_id = str(session_data["merchant_id"]).strip()
+
+    extra_cookies = session_data.get("extra_cookies", {}).copy()
+    extra_cookies["shopee_user_name"] = username
+    extra_cookies["shopee_request_from"] = "partner_web"
+    if real_merchant_id:
+        extra_cookies["shopee_foody_mid"] = real_merchant_id
+    if store_id:
+        extra_cookies["shopee_tob_entity_id"] = str(store_id)
+
     print(f"[DEBUG PULL] tob_token: {tob_token[:30]}...")
     print(f"[DEBUG PULL] entity_id: {store_id}")
+    print(f"[DEBUG PULL] merchant_id: {real_merchant_id}")
     print(f"[DEBUG PULL] extra_cookies: {extra_cookies}")
     
     client = ShopeeClient(
         tob_token=tob_token,
         entity_id=store_id,
-        extra_cookies=extra_cookies
+        extra_cookies=extra_cookies,
+        merchant_id=real_merchant_id,
+        username=username
     )
         
     try:
         print(f"[*] Menarik data menu ShopeeFood untuk: {target_name} ({store_id})...")
         catalogs = client.get_store_dishes(store_id)
+        if not catalogs and client.last_code in (1130014, 1130002):
+            rec_sid, rec_mid = resolve_shopee_outlet_context(
+                {"store_id": store_id, "merchant_id": real_merchant_id, "nama_portal": target_name}
+            )
+            if rec_sid and (rec_sid != store_id or rec_mid != real_merchant_id):
+                print(f"[RECOVERY] Mengoreksi store context: sid={store_id}->{rec_sid}, mid={real_merchant_id}->{rec_mid} (error code {client.last_code})")
+                store_id = rec_sid
+                real_merchant_id = rec_mid
+                extra_cookies["shopee_foody_mid"] = real_merchant_id
+                extra_cookies["shopee_tob_entity_id"] = str(store_id)
+                client.entity_id = store_id
+                client.merchant_id = real_merchant_id
+                catalogs = client.get_store_dishes(store_id)
+
         if not catalogs:
-            print(f"[WARN] Sesi token Shopee kedaluwarsa atau invalid untuk '{username}'. Menghapus session cache dan membuka browser ulang...")
-            try:
-                if session_file.exists():
-                    session_file.unlink()
-                    print(f"[+] Session file cache '{session_file.name}' berhasil dihapus.")
-            except Exception as del_err:
-                print(f"[-] Gagal menghapus session file: {del_err}")
+            is_auth_error = (
+                client.last_code in (3004, 401, 1000002, 1000003)
+                or "unauthorized" in str(client.last_error).lower()
+                or "token" in str(client.last_error).lower()
+            )
+            if is_auth_error:
+                print(f"[WARN] Sesi token Shopee kedaluwarsa atau invalid untuk '{username}'. Menghapus session cache dan membuka browser ulang...")
+                try:
+                    if session_file.exists():
+                        session_file.unlink()
+                        print(f"[+] Session file cache '{session_file.name}' berhasil dihapus.")
+                except Exception as del_err:
+                    print(f"[-] Gagal menghapus session file: {del_err}")
+
+                invalidate_shopee_session({"username": master_user, "store_id": store_id})
+            else:
+                print(f"[WARN] Penarikan katalog gagal (code: {client.last_code}, msg: '{client.last_error}'). Merefresh sesi via browser dengan target '{target_name}'...")
 
             session_data = browser.get_session(
                 username=username,
@@ -185,17 +254,46 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
 
             if session_data and "shopee_tob_token" in session_data:
                 tob_token = session_data["shopee_tob_token"]
-                extra_cookies = session_data.get("extra_cookies", {})
+                resolved_sid, resolved_mid = resolve_shopee_outlet_context(
+                    store_metadata,
+                    session_data=session_data
+                )
+                if resolved_sid:
+                    store_id = resolved_sid
+                new_mid = resolved_mid or real_merchant_id
+                extra_cookies = session_data.get("extra_cookies", {}).copy()
+                extra_cookies["shopee_user_name"] = username
+                extra_cookies["shopee_request_from"] = "partner_web"
+                if new_mid:
+                    extra_cookies["shopee_foody_mid"] = new_mid
+                if store_id:
+                    extra_cookies["shopee_tob_entity_id"] = str(store_id)
+
                 client = ShopeeClient(
                     tob_token=tob_token,
                     entity_id=store_id,
-                    extra_cookies=extra_cookies
+                    extra_cookies=extra_cookies,
+                    merchant_id=new_mid,
+                    username=username
                 )
                 print(f"[*] Mencoba ulang menarik data menu ShopeeFood dengan token baru...")
                 catalogs = client.get_store_dishes(store_id)
+                if not catalogs and client.last_code in (1130014, 1130002):
+                    rec_sid, rec_mid = resolve_shopee_outlet_context(
+                        {"store_id": store_id, "merchant_id": new_mid, "nama_portal": target_name}
+                    )
+                    if rec_sid and (rec_sid != store_id or rec_mid != new_mid):
+                        print(f"[RECOVERY RETRY] Mengoreksi store context: sid={store_id}->{rec_sid}, mid={new_mid}->{rec_mid}")
+                        store_id = rec_sid
+                        client.entity_id = store_id
+                        client.merchant_id = rec_mid
+                        client.extra_cookies["shopee_foody_mid"] = rec_mid
+                        client.extra_cookies["shopee_tob_entity_id"] = str(store_id)
+                        catalogs = client.get_store_dishes(store_id)
 
         if not catalogs:
-            return False, "Tidak ada data catalog/dishes yang ditemukan. Sesi token Shopee kedaluwarsa atau invalid."
+            err_details = f"code={client.last_code}, msg={client.last_error}" if client.last_code else "katalog kosong"
+            return False, f"Tidak ada data catalog/dishes yang ditemukan ({err_details})."
             
         print(f"[*] Ditemukan {len(catalogs)} kategori menu.")
 
@@ -281,13 +379,29 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         print(f"[*] Total {len(all_dishes)} item ditemukan.")
         print(f"[*] Menarik modifier untuk {len(dish_ids_with_modifiers)} item yang memiliki topping/opsi...")
         
+        dish_to_opt_groups = {}
+        if dish_ids_with_modifiers:
+            def _fetch_group(did):
+                try:
+                    return did, client.get_store_option_groups(store_id, dish_ids=[did])
+                except Exception as e:
+                    print(f"[!] Error fetching option groups for dish {did}: {e}")
+                    return did, []
+
+            max_workers = min(10, len(dish_ids_with_modifiers))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_fetch_group, did): did for did in dish_ids_with_modifiers}
+                for f in as_completed(futures):
+                    did, res = f.result()
+                    dish_to_opt_groups[did] = res
+
         modifier_rows = []
         for dish_id in dish_ids_with_modifiers:
             dish_obj = next((d for d in all_dishes if d['dish_id'] == dish_id), None)
             if not dish_obj:
                 continue
                 
-            opt_groups = client.get_store_option_groups(store_id, dish_ids=[dish_id])
+            opt_groups = dish_to_opt_groups.get(dish_id, [])
             dish_obj['jumlah_modifier_group'] = len(opt_groups)
             total_modifiers_count = 0
             

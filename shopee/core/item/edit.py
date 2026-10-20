@@ -7,6 +7,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from shopee.core.client import ShopeeModifyClient
+from shopee.core.session_utils import resolve_shopee_session, get_fast_shopee_session, invalidate_shopee_session
 
 MENU_DIR = Path(__file__).resolve().parent.parent.parent
 AUTOMATION_DIR = MENU_DIR.parent / "src" / "shopee-omzet-automation"
@@ -22,7 +23,7 @@ def _resolve_target_merchant_name(username: str, merchant_name: str, store_metad
         return merchant_name
     return store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or ''
 
-def _boot_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeModifyClient | None, str]:
+def _boot_client(store_metadata: dict, headless: bool = True, force_browser: bool = False) -> tuple[ShopeeModifyClient | None, str]:
     store_id = store_metadata["store_id"]
     username = store_metadata.get("username")
     password = store_metadata.get("password")
@@ -31,12 +32,30 @@ def _boot_client(store_metadata: dict, headless: bool = True) -> tuple[ShopeeMod
         return None, "Username Shopee tidak ditemukan pada store_metadata outlet"
         
     target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
-    
-    session_file = MENU_DIR / "data" / f"session_{username}.json"
+
+    # ── Fast-Path Pre-flight: Check cached session before launching browser ──
+    if not force_browser:
+        fast_session = get_fast_shopee_session(store_metadata, base_dir=MENU_DIR)
+        if fast_session and fast_session.get("shopee_tob_token"):
+            tob_token = fast_session["shopee_tob_token"]
+            real_store_id = str(store_id) if store_id else str(fast_session.get("shopee_tob_entity_id") or "")
+            real_merchant_id = str(fast_session.get("merchant_id") or "")
+            extra_cookies = fast_session.get("extra_cookies") or {}
+            client = ShopeeModifyClient(
+                tob_token=tob_token,
+                entity_id=real_store_id or str(store_id),
+                merchant_id=real_merchant_id,
+                username=username,
+                extra_cookies=extra_cookies
+            )
+            return client, ""
+
+    session_file = resolve_shopee_session(store_metadata, base_dir=MENU_DIR)
     browser.set_session_file(session_file)
+    active_account = session_file.stem.replace("session_", "") if session_file.stem.startswith("session_") else username
     
     session_data = browser.get_session(
-        username=username,
+        username=active_account,
         password=password,
         headless=headless,
         close_browser=True,
