@@ -147,7 +147,9 @@ def update_dish(
     available: bool = True,
     picture: str = "",
     opt_groups: list = None,
-    existing_dish: dict = None
+    existing_dish: dict = None,
+    list_price: float = None,
+    rank: int = None
 ) -> bool:
     from .create import _build_dish_payload
     dish_str_id = str(dish_id)
@@ -160,7 +162,9 @@ def update_dish(
         catalog_id=catalog_id,
         picture=picture,
         opt_groups=opt_groups,
-        existing_dish=existing_dish
+        existing_dish=existing_dish,
+        list_price=list_price,
+        rank=rank or 1
     )
     try:
         resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)

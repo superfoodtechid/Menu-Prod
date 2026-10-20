@@ -323,24 +323,64 @@ def push_c5_shopee_for_merchant(
         disc_pct = float(existing_dish.get("discount_percentage", 0))
         is_promo = (list_price > orig_price > 0) or (disc_pct > 0) or (existing_dish.get("discount_status") == 1)
 
-        if is_promo and raw_price is not None and float(raw_price) != orig_price:
-            logger.info(f"Item '{target_name}' (ID: {item_id}) sedang promo. Mempertahankan harga asli Rp{orig_price:,.0f} dan tetap mengupdate atribut non-harga.")
-            final_price = orig_price
-            price_steps = [orig_price]
-            promo_note = " (Harga tidak diubah karena promo aktif)"
+        target_list_price = float(raw_price) if raw_price is not None else list_price
+        new_real_price = upd.get("new_real_price")
+
+        if is_promo:
+            if new_real_price is not None and float(new_real_price) > 0:
+                target_selling_price = float(new_real_price)
+            elif list_price > orig_price > 0:
+                disc_ratio = (list_price - orig_price) / list_price
+                target_selling_price = round(target_list_price * (1.0 - disc_ratio))
+            elif disc_pct > 0:
+                disc_ratio = (disc_pct / 10000.0) if disc_pct > 100 else (disc_pct / 100.0)
+                target_selling_price = round(target_list_price * (1.0 - disc_ratio))
+            else:
+                target_selling_price = target_list_price
+
+            if target_selling_price > target_list_price:
+                target_selling_price = target_list_price
+
+            logger.info(
+                f"Item '{target_name}' (ID: {item_id}) sedang promo. "
+                f"Mengubah harga sebelum coret (list_price) dari Rp{list_price:,.0f} ke Rp{target_list_price:,.0f} "
+                f"(harga promo disesuaikan ke Rp{target_selling_price:,.0f})."
+            )
+            final_price = target_selling_price
+            final_list_price = target_list_price
+            price_steps = calculate_price_steps(list_price, target_list_price) if list_price > 0 else [target_list_price]
+            promo_note = f" (Promo aktif: list_price Rp{target_list_price:,.0f}, promo Rp{target_selling_price:,.0f})"
         else:
             final_price = float(raw_price) if raw_price is not None else orig_price
+            final_list_price = final_price
             price_steps = calculate_price_steps(orig_price, final_price) if orig_price > 0 else [final_price]
             promo_note = ""
 
         update_success, last_err = True, ""
 
-        for step_price in price_steps:
+        for step_val in price_steps:
+            if is_promo:
+                step_list = step_val
+                if list_price > orig_price > 0:
+                    d_rat = (list_price - orig_price) / list_price
+                    step_sell = round(step_list * (1.0 - d_rat))
+                elif disc_pct > 0:
+                    d_rat = (disc_pct / 10000.0) if disc_pct > 100 else (disc_pct / 100.0)
+                    step_sell = round(step_list * (1.0 - d_rat))
+                else:
+                    step_sell = step_list
+                if step_sell > step_list:
+                    step_sell = step_list
+            else:
+                step_list = step_val
+                step_sell = step_val
+
             ok = update_dish(
                 client=client, store_id=store_id, catalog_id=catalog_id,
-                dish_id=int(item_id), name=target_name, price=step_price,
+                dish_id=int(item_id), name=target_name, price=step_sell,
                 description=target_desc, available=target_avail,
-                picture=target_pic, opt_groups=opt_groups, existing_dish=existing_dish
+                picture=target_pic, opt_groups=opt_groups, existing_dish=existing_dish,
+                list_price=step_list
             )
             if not ok:
                 update_success = False
@@ -350,6 +390,7 @@ def push_c5_shopee_for_merchant(
 
         if update_success:
             res_item["status"] = "SUCCESS"
+            res_item["new_price"] = final_list_price
             if promo_note:
                 res_item["note"] = promo_note.strip()
             if item_id in dish_map:
@@ -358,7 +399,8 @@ def push_c5_shopee_for_merchant(
                     "description": target_desc,
                     "picture": target_pic,
                     "catalog_id": catalog_id,
-                    "price": int(final_price * 100000)
+                    "price": str(int(final_price * 100000)),
+                    "list_price": int(final_list_price * 100000)
                 })
         else:
             res_item["status"] = "FAILED"

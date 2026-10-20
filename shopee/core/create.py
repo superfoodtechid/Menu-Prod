@@ -20,28 +20,37 @@ def _build_dish_payload(
     picture: str = "",
     opt_groups: list = None,
     rank: int = 1,
-    existing_dish: dict = None
+    existing_dish: dict = None,
+    list_price: float = None
 ) -> dict:
     price_cents = int(price * 100000)
+    list_price_cents = int(list_price * 100000) if list_price is not None else price_cents
     time_for_sales = [{"sale_start_time": 0, "sale_end_time": 86399}]
     
     if existing_dish:
         dish_copy = existing_dish.copy()
         dish_copy["price"] = str(price_cents)
-        dish_copy["list_price"] = price_cents
+        dish_copy["list_price"] = list_price_cents
         dish_copy["available"] = available
+        if rank is not None:
+            dish_copy["rank"] = rank
         if name: dish_copy["name"] = name
         if description is not None: dish_copy["description"] = description
         if picture is not None: dish_copy["picture"] = picture
         if catalog_id: dish_copy["catalog_id"] = str(catalog_id)
         if "id" in dish_copy: dish_copy["id"] = str(dish_copy["id"])
         if "store_id" in dish_copy: dish_copy["store_id"] = str(dish_copy["store_id"])
+        if "item_discount" in dish_copy and isinstance(dish_copy["item_discount"], dict):
+            it_disc = dish_copy["item_discount"].copy()
+            if price_cents < list_price_cents:
+                it_disc["discount_price"] = str(price_cents)
+            dish_copy["item_discount"] = it_disc
         return {"dish": {k: v for k, v in dish_copy.items() if v is not None}}
 
     payload = {
         "name":           name,
         "price":          str(price_cents),
-        "list_price":     price_cents,
+        "list_price":     list_price_cents,
         "picture":        picture,
         "description":    description,
         "available":      available,
