@@ -19,7 +19,7 @@ def _build_dish_payload(
     catalog_id: int,
     picture: str = "",
     opt_groups: list = None,
-    rank: int = 1,
+    rank: int = None,
     existing_dish: dict = None
 ) -> dict:
     price_cents = int(price * 100000)
@@ -27,7 +27,10 @@ def _build_dish_payload(
     
     if existing_dish:
         time_for_sales = existing_dish.get("time_for_sales", time_for_sales)
-        rank = existing_dish.get("rank", rank)
+        if rank is None:
+            rank = existing_dish.get("rank", 1)
+    if rank is None:
+        rank = 1
 
     payload = {
         "name":           name,
@@ -58,7 +61,8 @@ def create_dish(
     description: str = "",
     available: bool = True,
     picture: str = "",
-    opt_groups: list = None
+    opt_groups: list = None,
+    rank: int = None
 ) -> dict | None:
     url = f"https://foody.shopee.co.id/api/seller/store/dish/create"
     payload = _build_dish_payload(
@@ -68,7 +72,8 @@ def create_dish(
         available=available,
         catalog_id=catalog_id,
         picture=picture,
-        opt_groups=opt_groups
+        opt_groups=opt_groups,
+        rank=rank
     )
     try:
         resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
