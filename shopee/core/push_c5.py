@@ -96,6 +96,14 @@ def download_image_bytes(photo_link: str) -> tuple[bytes, str, str]:
     return content, f"dish{ext}", mime
 
 
+def is_valid_shopee_image_hash(val: str) -> bool:
+    """Memeriksa apakah string adalah hash gambar Shopee yang valid."""
+    val = str(val or "").strip()
+    if not val:
+        return False
+    return bool(re.match(r"^[a-z]{2}-[a-zA-Z0-9_-]{10,}$", val) or re.match(r"^[a-fA-F0-9]{32}$", val))
+
+
 def resolve_shopee_photo(client: ShopeeModifyClient, photo_link: str, photo_cache: dict) -> str | None:
     """Mengubah photo_link menjadi hash gambar Shopee, mengunggah ke MMS jika diperlukan."""
     raw_link = str(photo_link or "").strip()
@@ -111,9 +119,13 @@ def resolve_shopee_photo(client: ShopeeModifyClient, photo_link: str, photo_cach
             photo_cache[raw_link] = pic_hash
             return pic_hash
 
-    if not raw_link.startswith(("http://", "https://")):
+    if is_valid_shopee_image_hash(raw_link):
         photo_cache[raw_link] = raw_link
         return raw_link
+
+    if not raw_link.startswith(("http://", "https://")):
+        logger.warning(f"Nilai foto '{raw_link}' bukan URL maupun hash Shopee yang valid. Dilewati agar tidak merusak data gambar.")
+        raise ValueError(f"Nilai foto '{raw_link}' tidak valid (harus berupa URL atau hash gambar Shopee).")
 
     img_data, filename, mime_type = download_image_bytes(raw_link)
     uploaded_hash = client.upload_image_bytes(img_data=img_data, filename=filename, content_type=mime_type)
@@ -159,6 +171,13 @@ def _process_photo_fallback_queue(
             logger.warning("Gagal menginisialisasi browser untuk fallback upload foto.")
             for entry in queue:
                 entry["res_item"]["note"] = (entry["res_item"].get("note", "") + " Gagal init browser fallback foto.").strip()
+                upd = entry.get("update_payload")
+                if item_result_cb and upd:
+                    try:
+                        cb_status = entry["res_item"].get("status", "FAILED")
+                        item_result_cb(upd, cb_status, "Gagal init browser fallback foto", applied=entry["res_item"])
+                    except Exception:
+                        pass
             return
 
         driver = session_data["driver"]
@@ -207,9 +226,22 @@ def _process_photo_fallback_queue(
                 else:
                     logger.warning(f"❌ Foto untuk item '{tname}' (ID {dish_id}) gagal diunggah via portal.")
                     res_item["note"] = (res_item.get("note", "") + " Foto gagal diunggah via portal.").strip()
+                    if item_result_cb and upd:
+                        try:
+                            cb_status = res_item.get("status", "FAILED")
+                            cb_err = res_item.get("error") or "Foto gagal diunggah via portal"
+                            item_result_cb(upd, cb_status, cb_err, applied=res_item)
+                        except Exception:
+                            pass
             except Exception as ex:
                 logger.warning(f"Error memproses fallback upload foto item '{tname}': {ex}")
                 res_item["note"] = (res_item.get("note", "") + f" Error fallback foto: {ex}").strip()
+                if item_result_cb and upd:
+                    try:
+                        cb_status = res_item.get("status", "FAILED")
+                        item_result_cb(upd, cb_status, f"Error fallback foto: {ex}", applied=res_item)
+                    except Exception:
+                        pass
             finally:
                 if temp_path and os.path.exists(temp_path):
                     try:
@@ -218,6 +250,14 @@ def _process_photo_fallback_queue(
                         pass
     except Exception as e:
         logger.error(f"Kesalahan fatal pada worker fallback foto: {e}")
+        for entry in queue:
+            upd = entry.get("update_payload")
+            if item_result_cb and upd:
+                try:
+                    cb_status = entry["res_item"].get("status", "FAILED")
+                    item_result_cb(upd, cb_status, f"Fatal fallback error: {e}", applied=entry["res_item"])
+                except Exception:
+                    pass
     finally:
         if driver:
             try:
@@ -370,8 +410,11 @@ def push_c5_shopee_for_merchant(
                     res_item["new_photo"] = target_pic
                 except Exception as ex_photo:
                     logger.warning(f"Gagal memproses foto item baru '{new_name or item_name}': {ex_photo}")
-                    res_item["note"] = f"Foto ditandai untuk fallback portal: {ex_photo}"
-                    new_item_photo_fallback = True
+                    if photo_link.startswith(("http://", "https://")):
+                        res_item["note"] = f"Foto ditandai untuk fallback portal: {ex_photo}"
+                        new_item_photo_fallback = True
+                    else:
+                        res_item["note"] = f"Foto dilewati: {ex_photo}"
 
             try:
                 final_price = float(raw_price or 0)
@@ -403,7 +446,8 @@ def push_c5_shopee_for_merchant(
                 res_item["error"] = str(ex_create)
 
             results.append(res_item)
-            if item_result_cb:
+            queued_for_portal = bool(new_item_photo_fallback and photo_link and res_item.get("item_id") not in (None, "", "NEW_ITEM"))
+            if not queued_for_portal and item_result_cb:
                 try:
                     err_cb = res_item.get("error") if res_item.get("status") == "FAILED" else None
                     item_result_cb(upd, res_item.get("status", "FAILED"), err_cb, applied=res_item)
@@ -469,8 +513,11 @@ def push_c5_shopee_for_merchant(
                     res_item["new_photo"] = target_pic
             except Exception as ex_photo:
                 logger.warning(f"Gagal memproses foto untuk '{target_name}': {ex_photo}")
-                res_item["note"] = f"Foto ditandai untuk fallback portal: {ex_photo}"
-                photo_fallback_needed = True
+                if photo_link.startswith(("http://", "https://")):
+                    res_item["note"] = f"Foto ditandai untuk fallback portal: {ex_photo}"
+                    photo_fallback_needed = True
+                else:
+                    res_item["note"] = f"Foto dilewati: {ex_photo}"
 
         orig_price = float(existing_dish.get("price", 0)) / 100000.0 if existing_dish.get("price") else 0.0
         list_price = float(existing_dish.get("list_price", 0)) / 100000.0 if existing_dish.get("list_price") else orig_price
@@ -568,7 +615,8 @@ def push_c5_shopee_for_merchant(
             res_item["status"] = "FAILED"
             res_item["error"] = last_err
 
-        if photo_fallback_needed and photo_link:
+        queued_for_portal = bool(photo_fallback_needed and photo_link)
+        if queued_for_portal:
             logger.info(f"📌 [PHOTO FALLBACK] Mendaftarkan item '{target_name}' (ID: {item_id}) ke antrean upload portal.")
             photo_fallback_queue.append({
                 "dish_id": str(item_id),
@@ -579,7 +627,7 @@ def push_c5_shopee_for_merchant(
             })
 
         results.append(res_item)
-        if item_result_cb:
+        if not queued_for_portal and item_result_cb:
             try:
                 err_cb = res_item.get("error") if res_item.get("status") == "FAILED" else None
                 item_result_cb(upd, res_item.get("status", "FAILED"), err_cb, applied=res_item)
