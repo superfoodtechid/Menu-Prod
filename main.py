@@ -4669,7 +4669,9 @@ async def parse_c5_endpoint(
 
     def is_drive_folder_link(value):
         value = str(value or "").strip()
-        return "drive.google.com" in value.casefold() and bool(re.search(r"/folders/[a-zA-Z0-9_-]+", value))
+        return "drive.google.com" in value.casefold() and bool(
+            re.search(r"/folders/[a-zA-Z0-9_-]+|[?&]id=[a-zA-Z0-9_-]+", value)
+        )
 
     for r_idx, row in enumerate(rows[1:], start=2):
         if not row or all(v is None for v in row):
