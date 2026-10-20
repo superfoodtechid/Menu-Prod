@@ -45,17 +45,19 @@ def get_cached_phone_map(cache_path: Path) -> dict:
     return phone_map
 
 
-def get_cached_merchant_id_maps(cache_path: Path = None) -> tuple[dict, dict]:
+def get_cached_shopee_catalog_maps(cache_path: Path = None) -> tuple[dict, dict, dict]:
     """
-    Membaca master_merchants_cache.csv dan menghasilkan dua dictionary pemetaan:
-    1. store_to_mid: store_id -> Group ID (merchant_id)
-    2. portal_to_mid: lower(nama_portal / outlet) -> Group ID (merchant_id)
+    Membaca master_merchants_cache.csv dan menghasilkan tiga dictionary pemetaan:
+    1. store_to_gid: store_id -> Group ID (merchant_id)
+    2. gid_to_sid: Group ID (merchant_id) -> Store ID
+    3. portal_to_info: lower(nama_portal / outlet) -> (Store ID, Group ID)
     """
     cf = cache_path or (WORKSPACE_DIR / "master_merchants_cache.csv")
-    store_to_mid = {}
-    portal_to_mid = {}
+    store_to_gid = {}
+    gid_to_sid = {}
+    portal_to_info = {}
     if not cf.exists():
-        return store_to_mid, portal_to_mid
+        return store_to_gid, gid_to_sid, portal_to_info
 
     try:
         import csv
@@ -67,37 +69,30 @@ def get_cached_merchant_id_maps(cache_path: Path = None) -> tuple[dict, dict]:
                     sid = (row.get("Store ID") or row.get("store_id") or "").strip()
                     gid = (row.get("Group ID") or row.get("merchant_id") or "").strip()
                     portal = (row.get("Nama Portal") or row.get("nama_portal") or row.get("Outlet") or "").strip().lower()
-                    if gid and gid.isdigit():
-                        if sid:
-                            store_to_mid[sid] = gid
-                        if portal and portal not in portal_to_mid:
-                            portal_to_mid[portal] = gid
+                    if sid and gid:
+                        store_to_gid[sid] = gid
+                        if gid not in gid_to_sid:
+                            gid_to_sid[gid] = sid
+                    if portal and sid:
+                        if portal not in portal_to_info:
+                            portal_to_info[portal] = (sid, gid)
+                        elif not portal_to_info[portal][1] and gid:
+                            portal_to_info[portal] = (sid, gid)
     except Exception as e:
-        log.debug(f"Gagal membaca merchant_id maps dari CSV cache: {e}")
+        log.debug(f"Gagal membaca katalog Shopee maps dari CSV cache: {e}")
 
-    return store_to_mid, portal_to_mid
+    return store_to_gid, gid_to_sid, portal_to_info
 
 
-def resolve_shopee_merchant_id(store_metadata: dict, session_data: dict = None, tob_token: str = None) -> str:
+def resolve_shopee_outlet_context(store_metadata: dict, session_data: dict = None) -> tuple[str, str]:
     """
-    Resolusi bertingkat untuk menemukan Shopee Merchant ID (Group ID / foody_mid):
-    1. Dari store_metadata['merchant_id'] atau ['group_id']
-    2. Dari master_merchants_cache.csv via Store ID
-    3. Dari master_merchants_cache.csv via Nama Portal / Nama Outlet
-    4. Dari session_data['merchant_id'] atau extra_cookies['shopee_foody_mid']
-    5. Dari GetUserInfo API menggunakan active tob_token
+    Resolusi menyeluruh Store ID fisik dan Group ID (Merchant ID) ShopeeFood.
+    Mencegah error 1130014 (merchant authority invalid) akibat tertukarnya Store ID dengan Group ID.
+    Mengembalikan (store_id, merchant_id).
     """
-    # 1. Dari metadata langsung
+    sid = str(store_metadata.get("store_id") or "").strip()
     mid = str(store_metadata.get("merchant_id") or store_metadata.get("group_id") or "").strip()
-    if mid and mid.isdigit():
-        return mid
-
-    # 2 & 3. Dari CSV cache
-    store_id = str(store_metadata.get("store_id") or "").strip()
-    if not store_id and session_data:
-        store_id = str(session_data.get("shopee_tob_entity_id") or "").strip()
-
-    portal_name = (
+    portal = (
         store_metadata.get("nama_portal")
         or store_metadata.get("merchant_name")
         or store_metadata.get("nama_resto_final")
@@ -105,26 +100,62 @@ def resolve_shopee_merchant_id(store_metadata: dict, session_data: dict = None, 
         or ""
     ).strip().lower()
 
-    store_to_mid, portal_to_mid = get_cached_merchant_id_maps()
+    store_to_gid, gid_to_sid, portal_to_info = get_cached_shopee_catalog_maps()
 
-    if store_id and store_id in store_to_mid:
-        return store_to_mid[store_id]
+    if not sid and session_data:
+        sess_eid = str(session_data.get("shopee_tob_entity_id") or "").strip()
+        if sess_eid:
+            sid = sess_eid
 
-    if portal_name and portal_name in portal_to_mid:
-        return portal_to_mid[portal_name]
+    # Kasus: sid yang diinput sebenarnya adalah Group ID / Merchant ID (misal: 23988560)
+    if sid and sid in gid_to_sid and sid not in store_to_gid:
+        if not mid:
+            mid = sid
+        sid = gid_to_sid[sid]
+    elif sid and sid in store_to_gid:
+        if not mid:
+            mid = store_to_gid[sid]
 
-    # Partial match portal name jika ada prefix seperti [SR]
-    for p_key, p_mid in portal_to_mid.items():
-        if portal_name and (portal_name in p_key or p_key in portal_name):
-            return p_mid
+    # Resolusi Store ID & Merchant ID via Nama Portal / Nama Outlet
+    if (not sid or not mid) and portal:
+        if portal in portal_to_info:
+            p_sid, p_gid = portal_to_info[portal]
+            sid = sid or p_sid
+            mid = mid or p_gid
+        else:
+            for k, (p_sid, p_gid) in portal_to_info.items():
+                if portal in k or k in portal:
+                    sid = sid or p_sid
+                    mid = mid or p_gid
+                    break
 
-    # 4. Dari session_data
-    if session_data:
-        s_mid = str(session_data.get("merchant_id") or session_data.get("extra_cookies", {}).get("shopee_foody_mid") or "").strip()
-        if s_mid and s_mid.isdigit() and s_mid != store_id:
-            return s_mid
+    # Jika mid masih kosong namun sid fisik valid
+    if not mid and sid in store_to_gid:
+        mid = store_to_gid[sid]
 
-    # 5. Dari GetUserInfo API
+    return sid, mid
+
+
+def get_cached_merchant_id_maps(cache_path: Path = None) -> tuple[dict, dict]:
+    """
+    Membaca master_merchants_cache.csv dan menghasilkan dua dictionary pemetaan:
+    1. store_to_mid: store_id -> Group ID (merchant_id)
+    2. portal_to_mid: lower(nama_portal / outlet) -> Group ID (merchant_id)
+    """
+    store_to_gid, _, portal_to_info = get_cached_shopee_catalog_maps(cache_path)
+    portal_to_mid = {k: v[1] for k, v in portal_to_info.items() if v[1]}
+    return store_to_gid, portal_to_mid
+
+
+def resolve_shopee_merchant_id(store_metadata: dict, session_data: dict = None, tob_token: str = None) -> str:
+    """
+    Resolusi bertingkat untuk menemukan Shopee Merchant ID (Group ID / foody_mid).
+    """
+    _, mid = resolve_shopee_outlet_context(store_metadata, session_data=session_data)
+    if mid and mid.isdigit():
+        return mid
+
+    # Fallback GetUserInfo jika token tersedia
     token = tob_token or (session_data.get("shopee_tob_token") if session_data else "")
     if token:
         try:

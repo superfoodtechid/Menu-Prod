@@ -9,6 +9,7 @@ from shopee.core.session_utils import (
     get_fast_shopee_session,
     invalidate_shopee_session,
     resolve_shopee_merchant_id,
+    resolve_shopee_outlet_context,
     _IN_MEMORY_SESSION_CACHE,
 )
 from shopee.core.client import ShopeeClient
@@ -217,6 +218,135 @@ class TestShopeeFastSession(unittest.TestCase):
                 extract_shopee_menu(store_metadata, output_dir="/tmp/test_shopee_out")
                 # Ensure unlink was NOT called for code 1130002
                 mock_unlink.assert_not_called()
+
+    def test_resolve_shopee_outlet_context(self):
+        # 1. Store ID is actually Group ID 23988560 (Bebek Bumbu Hitam Penyetan Rizqna)
+        sid, mid = resolve_shopee_outlet_context({"store_id": "23988560"})
+        self.assertEqual(sid, "23836720")
+        self.assertEqual(mid, "23988560")
+
+        # 2. Store ID is physical store 1456964 (Ayam Geprek Cinta)
+        sid, mid = resolve_shopee_outlet_context({"store_id": "1456964"})
+        self.assertEqual(sid, "1456964")
+        self.assertEqual(mid, "1455780")
+
+        # 3. By Portal Name when store_id is empty
+        sid, mid = resolve_shopee_outlet_context({"nama_portal": "[SR] Ayam geprek cinta_"})
+        self.assertEqual(sid, "1456964")
+        self.assertEqual(mid, "1455780")
+
+    @patch("shopee.core.pull.pd.DataFrame.to_excel")
+    @patch("shopee.core.pull.browser.get_session")
+    @patch("shopee.core.pull.ShopeeClient")
+    def test_extract_shopee_menu_auto_recovery_on_code_1130014(self, mock_client_cls, mock_get_session, mock_to_excel):
+        from shopee.core.pull import extract_shopee_menu
+        mock_client = MagicMock()
+        mock_client.last_code = 1130014
+        mock_client.last_error = "merchant authority invalid"
+
+        sample_catalog = [
+            {
+                "id": "111",
+                "name": "Makanan",
+                "dishes": [
+                    {
+                        "id": "222",
+                        "name": "Bebek Goreng",
+                        "price": "3000000000",
+                        "list_price": "3500000000",
+                        "available": True,
+                        "option_group_count": 0,
+                    }
+                ]
+            }
+        ]
+
+        def side_effect_get_dishes(sid):
+            if str(sid) == "23988560":
+                mock_client.last_code = 1130014
+                mock_client.last_error = "merchant authority invalid"
+                return []
+            mock_client.last_code = 0
+            mock_client.last_error = ""
+            return sample_catalog
+
+        mock_client.get_store_dishes.side_effect = side_effect_get_dishes
+        mock_client_cls.return_value = mock_client
+
+        store_metadata = {
+            "store_id": "23988560",
+            "nama_portal": "[SR] Bebek bumbu hitam & Ayam crispy rizqna"
+        }
+
+        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}):
+            success, res_path = extract_shopee_menu(store_metadata, output_dir="/tmp/test_shopee_out")
+            self.assertTrue(success)
+            self.assertEqual(store_metadata["store_id"], "23836720")
+            self.assertEqual(store_metadata["merchant_id"], "23988560")
+
+    @patch("shopee.core.pull.pd.DataFrame.to_excel")
+    @patch("shopee.core.pull.ShopeeClient")
+    def test_extract_shopee_menu_parallel_modifiers(self, mock_client_cls, mock_to_excel):
+        from shopee.core.pull import extract_shopee_menu
+        mock_client = MagicMock()
+        mock_client.last_code = 0
+        mock_client.last_error = ""
+
+        sample_catalog = [
+            {
+                "id": "100",
+                "name": "Kategori A",
+                "dishes": [
+                    {
+                        "id": "dish_1",
+                        "name": "Nasi Goreng",
+                        "price": "2000000000",
+                        "list_price": "2000000000",
+                        "available": True,
+                        "option_group_count": 1,
+                    },
+                    {
+                        "id": "dish_2",
+                        "name": "Mie Goreng",
+                        "price": "2500000000",
+                        "list_price": "2500000000",
+                        "available": True,
+                        "option_group_count": 1,
+                    }
+                ]
+            }
+        ]
+        mock_client.get_store_dishes.return_value = sample_catalog
+
+        def mock_get_option_groups(store_id, dish_ids=None):
+            did = dish_ids[0] if dish_ids else ""
+            return [
+                {
+                    "option_group": {
+                        "id": f"group_{did}",
+                        "name": f"Level Pedas {did}",
+                        "select_min": 1,
+                        "select_max": 1
+                    },
+                    "options": [
+                        {"id": f"opt_{did}_1", "name": "Sedang", "price": "0", "available": True},
+                        {"id": f"opt_{did}_2", "name": "Pedas", "price": "200000000", "available": True}
+                    ]
+                }
+            ]
+
+        mock_client.get_store_option_groups.side_effect = mock_get_option_groups
+        mock_client_cls.return_value = mock_client
+
+        store_metadata = {
+            "store_id": "1456964",
+            "nama_portal": "[SR] Ayam geprek cinta_"
+        }
+
+        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}):
+            success, res_path = extract_shopee_menu(store_metadata, output_dir="/tmp/test_shopee_out")
+            self.assertTrue(success)
+            self.assertEqual(mock_client.get_store_option_groups.call_count, 2)
 
 
 if __name__ == "__main__":

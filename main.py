@@ -846,8 +846,10 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "portal": account.portal
             }
             try:
-                from shopee.core.session_utils import resolve_shopee_merchant_id
-                resolved_mid = resolve_shopee_merchant_id(store_metadata)
+                from shopee.core.session_utils import resolve_shopee_outlet_context
+                resolved_sid, resolved_mid = resolve_shopee_outlet_context(store_metadata)
+                if resolved_sid:
+                    store_metadata["store_id"] = resolved_sid
                 if resolved_mid:
                     store_metadata["merchant_id"] = resolved_mid
             except Exception:
