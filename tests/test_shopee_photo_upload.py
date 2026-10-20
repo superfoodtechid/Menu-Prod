@@ -229,6 +229,15 @@ class TestShopeePhotoUpload(unittest.TestCase):
         self.assertEqual(update_args["name"], "Mie Ayam Bakso")
         self.assertEqual(update_args["picture"], "hash_of_mie_ayam_bakso.jpg")
 
+    def test_outlet_model_outlet_name_property(self):
+        from menu_core.database import Outlet
+        outlet = Outlet(store_id="22459819", merchant_name="Bakso Solo", nama_outlet="Solo Baru", nama_resto_final="Bakso Solo Baru")
+        self.assertEqual(outlet.outlet_name, "Bakso Solo Baru")
+        self.assertEqual(outlet.nama_listing, "Bakso Solo Baru")
+
+        outlet_fallback = Outlet(store_id="22459819", merchant_name="Bakso Solo")
+        self.assertEqual(outlet_fallback.outlet_name, "Bakso Solo")
+
 
 if __name__ == "__main__":
     unittest.main()

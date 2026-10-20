@@ -153,6 +153,10 @@ class Outlet(Base):
     def nama_listing(self):
         return self.nama_resto_final
 
+    @property
+    def outlet_name(self):
+        return self.nama_resto_final or self.nama_outlet or self.merchant_name
+
     def __repr__(self):
         return f"<Outlet {self.merchant_name} ({self.store_id})>"
 
