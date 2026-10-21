@@ -33,6 +33,7 @@ from shopee.core.item.edit import (
     _resolve_target_merchant_name,
 )
 from shopee.core.item.create import create_dish, create_category
+from menu_core.c5_template_helper import is_c5_reserved_row
 
 logger = logging.getLogger("ShopeeC5Push")
 
@@ -326,6 +327,9 @@ def push_c5_shopee_for_merchant(
         new_name = upd.get("item_name_new") or item_name
         raw_price = upd.get("new_fake_price") if upd.get("new_fake_price") is not None else upd.get("current_fake_price")
         new_cat_name = (upd.get("category") or "").strip()
+
+        if is_c5_reserved_row([item_name, new_name, new_cat_name, item_id]):
+            continue
         photo_link = upd.get("photo_link") or ""
         description = upd.get("description") or ""
 
