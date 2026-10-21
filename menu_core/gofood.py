@@ -528,6 +528,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         ])
         
     df_items = pd.DataFrame(item_data, columns=item_cols)
+    if 'Outlet Name' in df_items.columns:
+        df_items['Listing Name'] = df_items['Outlet Name']
     
     mod_cols = [
         'OFD', 'Outlet Name', 'Outlet Short Name', 'Outlet Link', 'SID',
@@ -544,6 +546,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         ])
     
     df_mods = pd.DataFrame(mod_data, columns=mod_cols)
+    if 'Outlet Name' in df_mods.columns:
+        df_mods['Listing Name'] = df_mods['Outlet Name']
     
     # Write to files
     os.makedirs(output_dir, exist_ok=True)
@@ -585,8 +589,15 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     
     from pathlib import Path
     import openpyxl
+    from menu_core.c5_template_helper import (
+        get_c5_template_path,
+        prepare_c5_sheet,
+        get_c5_headers,
+        DATA_START_ROW,
+        is_c5_reserved_row,
+    )
     BASE_DIR = Path(__file__).resolve().parents[1]
-    template_path = BASE_DIR / "O. C5 Template.xlsx"
+    template_path = get_c5_template_path(BASE_DIR)
     
     # ── Kolom yang bisa diisi user secara manual (akan di-preserve saat re-pull) ──
     USER_EDITABLE_COLS = [
@@ -616,7 +627,9 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                 item_id_idx = prev_headers.get('Item ID')
                 edit_col_indices = {col: prev_headers[col] for col in USER_EDITABLE_COLS if col in prev_headers}
                 if item_id_idx is not None:
-                    for row_cells in sheet_prev.iter_rows(min_row=2, values_only=True):
+                    for row_cells in sheet_prev.iter_rows(min_row=DATA_START_ROW, values_only=True):
+                        if is_c5_reserved_row(row_cells):
+                            continue
                         raw_iid = row_cells[item_id_idx] if item_id_idx < len(row_cells) else None
                         if raw_iid is None or str(raw_iid).strip() in ('', 'None', 'nan'):
                             continue
@@ -649,9 +662,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     try:
         wb = openpyxl.load_workbook(template_path)
         sheet_item = wb['Item']
-        if sheet_item.max_row > 1:
-            sheet_item.delete_rows(2, sheet_item.max_row - 1)
-        headers_item = {cell.value: cell.column for cell in sheet_item[1]}
+        prepare_c5_sheet(sheet_item)
+        headers_item = get_c5_headers(sheet_item)
         for r_idx, row in df_items.iterrows():
             # Ambil Item ID untuk lookup data user lama
             item_id_val = str(row.get('Item ID', '')).strip()
@@ -686,12 +698,11 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                                 elif col_name == 'Offline Adjustment (Rp)':
                                     val = off_val.get('offline_adjustment', val)
                     
-                    sheet_item.cell(row=r_idx + 2, column=headers_item[col_name], value=val)
+                    sheet_item.cell(row=r_idx + DATA_START_ROW, column=headers_item[col_name], value=val)
                     
         sheet_mod = wb['Modifier']
-        if sheet_mod.max_row > 1:
-            sheet_mod.delete_rows(2, sheet_mod.max_row - 1)
-        headers_mod = {cell.value: cell.column for cell in sheet_mod[1]}
+        prepare_c5_sheet(sheet_mod)
+        headers_mod = get_c5_headers(sheet_mod)
         for r_idx, row in df_mods.iterrows():
             for col_name, val in row.items():
                 if col_name in headers_mod:
@@ -702,7 +713,7 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                             val = str(int(val)) if val.is_integer() else str(val)
                         else:
                             val = str(val)
-                    sheet_mod.cell(row=r_idx + 2, column=headers_mod[col_name], value=val)
+                    sheet_mod.cell(row=r_idx + DATA_START_ROW, column=headers_mod[col_name], value=val)
                     
         wb.save(excel_path)
         if prev_user_data:

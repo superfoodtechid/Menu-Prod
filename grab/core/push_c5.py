@@ -8,6 +8,7 @@ import requests
 from pathlib import Path
 from playwright.async_api import async_playwright
 from grab.core.grab_api_scraper import GrabAPI, perform_login, SESSION_DIR
+from menu_core.c5_template_helper import is_c5_reserved_row
 
 logger = logging.getLogger("GrabC5Push")
 
@@ -447,6 +448,8 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
 
             # Process each item update
             for idx, upd in enumerate(updates):
+                if is_c5_reserved_row([upd.get("item_name"), upd.get("item_name_new"), upd.get("category"), upd.get("item_id")]):
+                    continue
                 item_id = str(upd.get("item_id") or "").strip()
                 item_name = upd.get("item_name") or ""
                 new_name = upd.get("item_name_new") or item_name

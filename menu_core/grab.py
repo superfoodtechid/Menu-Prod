@@ -5,6 +5,13 @@ import re
 import pandas as pd
 from pathlib import Path
 import openpyxl
+from menu_core.c5_template_helper import (
+    get_c5_template_path,
+    prepare_c5_sheet,
+    get_c5_headers,
+    DATA_START_ROW,
+    is_c5_reserved_row,
+)
 
 def run_async(coro):
     """Safely run async coroutines inside a synchronous worker thread context."""
@@ -155,7 +162,7 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
 
     # 7. Write to O. C5 Template Excel
     BASE_DIR = Path(__file__).resolve().parents[1]
-    template_path = BASE_DIR / "O. C5 Template.xlsx"
+    template_path = get_c5_template_path(BASE_DIR)
 
     # ── Kolom yang bisa diisi user secara manual (akan di-preserve saat re-pull) ──
     USER_EDITABLE_COLS = [
@@ -185,7 +192,9 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
                 item_id_idx = prev_headers.get('Item ID')
                 edit_col_indices = {col: prev_headers[col] for col in USER_EDITABLE_COLS if col in prev_headers}
                 if item_id_idx is not None:
-                    for row_cells in sheet_prev.iter_rows(min_row=2, values_only=True):
+                    for row_cells in sheet_prev.iter_rows(min_row=DATA_START_ROW, values_only=True):
+                        if is_c5_reserved_row(row_cells):
+                            continue
                         raw_iid = row_cells[item_id_idx] if item_id_idx < len(row_cells) else None
                         if raw_iid is None or str(raw_iid).strip() in ('', 'None', 'nan'):
                             continue
@@ -200,7 +209,7 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
                             prev_user_data[iid] = row_data
             wb_prev.close()
             if prev_user_data:
-                print(f"   🔄 Ditemukan C5 sebelumnya — memuat {len(prev_user_data)} baris data user untuk di-preserve.")
+                print(f"   🔄 Ditemukan C5 sebelumnya - memuat {len(prev_user_data)} baris data user untuk di-preserve.")
         except Exception as prev_err:
             print(f"   ⚠️ Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
 
@@ -219,13 +228,11 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
         
         # 1. Fill Item Sheet
         sheet_item = wb['Item']
-        # Delete sample data rows (from row 2 onwards)
-        if sheet_item.max_row > 1:
-            sheet_item.delete_rows(2, sheet_item.max_row - 1)
+        prepare_c5_sheet(sheet_item)
             
-        headers_item = {cell.value: cell.column for cell in sheet_item[1]}
+        headers_item = get_c5_headers(sheet_item)
         
-        new_row_idx = 2
+        new_row_idx = DATA_START_ROW
         for item in matched_items:
             avail_str = str(item.get('Ketersediaan item', '')).lower()
             availability = "Available" if avail_str in ("available", "active", "1", "true") else "Unavailable"
@@ -251,6 +258,7 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
                 
             mapping = {
                 'OFD': 'GrabFood',
+                'Listing Name': item.get('Nama panjang', nama_resto),
                 'Outlet Name': item.get('Nama panjang', nama_resto),
                 'Outlet Short Name': brand or item.get('Nama panjang', nama_resto),
                 'Outlet Link': item.get('Link outlet', f"https://food.grab.com/id/en/restaurant/{store_id}"),
@@ -314,19 +322,18 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
                     
         # 2. Fill Modifier Sheet
         sheet_mod = wb['Modifier']
-        # Delete sample data rows (from row 2 onwards)
-        if sheet_mod.max_row > 1:
-            sheet_mod.delete_rows(2, sheet_mod.max_row - 1)
+        prepare_c5_sheet(sheet_mod)
             
-        headers_mod = {cell.value: cell.column for cell in sheet_mod[1]}
+        headers_mod = get_c5_headers(sheet_mod)
         
-        new_row_idx = 2
+        new_row_idx = DATA_START_ROW
         for mod in matched_mods:
             mod_avail_str = str(mod.get('Ketersediaan modifier', '')).lower()
             mod_availability = "Available" if mod_avail_str in ("available", "active", "1", "true") else "Unavailable"
             
             mapping_mod = {
                 'OFD': 'GrabFood',
+                'Listing Name': mod.get('Nama panjang', nama_resto),
                 'Outlet Name': mod.get('Nama panjang', nama_resto),
                 'Outlet Short Name': brand or mod.get('Nama panjang', nama_resto),
                 'Outlet Link': mod.get('Link outlet', f"https://food.grab.com/id/en/restaurant/{store_id}"),

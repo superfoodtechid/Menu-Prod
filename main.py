@@ -45,6 +45,7 @@ sys.path.append(str(BASE_DIR))
 sys.path.append(str(BASE_DIR / "menu_core"))
 
 from menu_core.database import get_db, init_db, Account, Outlet, Job, AuditTrail
+from menu_core.c5_template_helper import is_c5_reserved_row, DATA_START_ROW
 
 # Setup Logging
 logging.basicConfig(
@@ -1765,7 +1766,9 @@ def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: li
                                     except:
                                         pass
                                         
-                            for row_idx in range(2, sheet.max_row + 1):
+                            for row_idx in range(DATA_START_ROW, sheet.max_row + 1):
+                                if is_c5_reserved_row([sheet.cell(row=row_idx, column=c).value for c in range(1, 6)]):
+                                    continue
                                 cell_item_id = str(sheet.cell(row=row_idx, column=item_id_idx).value).strip()
                                 if cell_item_id in successful_updates:
                                     new_val = successful_updates[cell_item_id]
@@ -2882,6 +2885,8 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
             active_c5_item_ids = set()
             created_item_ids = {}
             for idx, upd in enumerate(updates):
+                if is_c5_reserved_row([upd.get("item_name"), upd.get("category"), upd.get("item_id")]):
+                    continue
                 item_id = str(upd.get("item_id") or "").strip()
                 new_name = (upd.get("item_name_new") or "").strip()
                 raw_price = upd.get("new_fake_price")
@@ -4079,7 +4084,7 @@ async def parse_c5_endpoint(
         return ""
 
     sid_col = resolve_col(['SID', 'Store ID'])
-    outlet_col = resolve_col(['Outlet Name', 'Outlet'])
+    outlet_col = resolve_col(['Listing Name', 'Outlet Name', 'Outlet'])
     cat_id_col = resolve_col(['Category ID'])
     cat_col = resolve_col(['Category', 'Nama Kategori', 'Kategori'])
     item_id_col = resolve_col(['Item ID'])
@@ -4098,7 +4103,7 @@ async def parse_c5_endpoint(
     # All rows sharing the same (SID, Category ID) in C5 MUST have the exact same Category Name.
     cat_id_name_map = {}
     for row in rows[1:]:
-        if not row or all(v is None for v in row):
+        if not row or all(v is None for v in row) or is_c5_reserved_row(row):
             continue
         s_id = get_val(row, sid_col) or "STORE-DEFAULT"
         c_id = get_val(row, cat_id_col)
@@ -4131,7 +4136,7 @@ async def parse_c5_endpoint(
     discontinuous_categories = {}  # (s_id, cat_key) -> error info dict
 
     for r_num, row in enumerate(rows[1:], start=2):
-        if not row or all(v is None for v in row):
+        if not row or all(v is None for v in row) or is_c5_reserved_row(row):
             continue
         s_id = get_val(row, sid_col) or "STORE-DEFAULT"
         c_id = get_val(row, cat_id_col)
@@ -4318,6 +4323,8 @@ async def parse_c5_endpoint(
 
                 found_sid = False
                 for row in rows_iter:
+                    if not row or is_c5_reserved_row(row):
+                        continue
                     if sid_idx >= len(row) or str(row[sid_idx] or "").strip().casefold() != sid_key.casefold():
                         continue
                     found_sid = True
@@ -4567,7 +4574,7 @@ async def parse_c5_endpoint(
                     base_categories_order = []
                     base_category_item_counts = {}
                     for r in exp_rows[1:]:
-                        if not r or exp_sid_idx is None or exp_sid_idx >= len(r):
+                        if not r or is_c5_reserved_row(r) or exp_sid_idx is None or exp_sid_idx >= len(r):
                             continue
                         if str(r[exp_sid_idx] or "").strip().lower() != str(sid).strip().lower():
                             continue
@@ -4718,7 +4725,7 @@ async def parse_c5_endpoint(
         )
 
     for r_idx, row in enumerate(rows[1:], start=2):
-        if not row or all(v is None for v in row):
+        if not row or all(v is None for v in row) or is_c5_reserved_row(row):
             continue
 
         sid = get_val(row, sid_col) or "STORE-DEFAULT"
@@ -5496,6 +5503,12 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
             if _provision_grab_outlet_from_master(db, sid):
                 provisioned_grab_sids.add(sid)
 
+    # ── Filter Out Template Reserved Rows (Baris 2 'Don't touch row 2') ──
+    request.updates = [
+        item for item in request.updates
+        if not is_c5_reserved_row([item.item_name, item.category, item.item_id])
+    ]
+
     # ── Category Order Contiguity Validation (All Platforms) ──
     # Reject push if any update is marked with INVALID_CATEGORY_ORDER, or if the updates
     # themselves have interleaved/fragmented categories for the same SID.
@@ -5875,17 +5888,23 @@ def parse_c5_template_headers(wb) -> dict:
     ws = wb['Item']
     header_map = {}
     
-    # 1. Pass 1: standard string headers (e.g. Category at col 7, Item at col 9, Description at col 11)
+    # 1. Pass 1: standard string headers (excluding formulas starting with '=')
     for col in range(1, ws.max_column + 1):
         val = ws.cell(row=1, column=col).value
-        if isinstance(val, str) and val.strip():
+        if isinstance(val, str) and val.strip() and not val.strip().startswith('='):
             header_map[val.strip()] = col - 1
             
-    # 2. Pass 2: formula headers (e.g. Current Slash Price (%) at col 33, Current Slash Price (Rp) at col 34)
+    # 2. Pass 2: formula headers (ArrayFormula object or string formula)
     for col in range(1, ws.max_column + 1):
         val = ws.cell(row=1, column=col).value
+        formula_text = None
         if hasattr(val, 'text'):
-            m = re.search(r'\"([^\"]+)\"', val.text)
+            formula_text = val.text
+        elif isinstance(val, str) and val.strip().startswith('='):
+            formula_text = val.strip()
+
+        if formula_text:
+            m = re.search(r'\"([^\"]+)\"', formula_text)
             if m:
                 h_name = m.group(1).strip()
                 if h_name not in header_map:
@@ -6057,7 +6076,7 @@ def get_parsed_menu_items(excel_path: str) -> list:
         # Also load data_only=True workbook to read evaluated/cached values if needed
         raw_items = []
         for row in sheet.iter_rows(min_row=2, values_only=True):
-            if not row or all(v is None for v in row):
+            if not row or all(v is None for v in row) or is_c5_reserved_row(row):
                 continue
                 
             def get_col_val(col_name, default=""):
