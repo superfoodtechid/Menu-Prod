@@ -22,6 +22,13 @@ from shopee.core.session_utils import (
     resolve_shopee_merchant_id,
     resolve_shopee_outlet_context,
 )
+from menu_core.c5_template_helper import (
+    get_c5_template_path,
+    prepare_c5_sheet,
+    get_c5_headers,
+    DATA_START_ROW,
+    is_c5_reserved_row,
+)
 
 IMG_BASE = "https://down-id.img.susercontent.com/file"
 
@@ -523,7 +530,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         excel_path = os.path.join(output_dir, excel_filename)
         
         # Write to O. C5 Template Excel
-        template_path = str(WORKSPACE_DIR / "O. C5 Template.xlsx")
+        template_path = str(get_c5_template_path(WORKSPACE_DIR))
         import openpyxl
 
         # ── Kolom yang bisa diisi user secara manual (akan di-preserve saat re-pull) ──
@@ -554,7 +561,9 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     item_id_idx = prev_headers.get('Item ID')
                     edit_col_indices = {col: prev_headers[col] for col in USER_EDITABLE_COLS if col in prev_headers}
                     if item_id_idx is not None:
-                        for row_cells in sheet_prev.iter_rows(min_row=2, values_only=True):
+                        for row_cells in sheet_prev.iter_rows(min_row=DATA_START_ROW, values_only=True):
+                            if is_c5_reserved_row(row_cells):
+                                continue
                             raw_iid = row_cells[item_id_idx] if item_id_idx < len(row_cells) else None
                             if raw_iid is None or str(raw_iid).strip() in ('', 'None', 'nan'):
                                 continue
@@ -569,7 +578,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                                 prev_user_data[iid] = row_data
                 wb_prev.close()
                 if prev_user_data:
-                    print(f"[🔄] Ditemukan C5 sebelumnya — memuat {len(prev_user_data)} baris data user untuk di-preserve.")
+                    print(f"[🔄] Ditemukan C5 sebelumnya - memuat {len(prev_user_data)} baris data user untuk di-preserve.")
             except Exception as prev_err:
                 print(f"[⚠️] Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
 
@@ -578,13 +587,11 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             
             # 1. Fill Item Sheet
             sheet_item = wb['Item']
-            # Delete sample data rows (from row 2 onwards)
-            if sheet_item.max_row > 1:
-                sheet_item.delete_rows(2, sheet_item.max_row - 1)
+            prepare_c5_sheet(sheet_item)
                 
-            headers_item = {cell.value: cell.column for cell in sheet_item[1]}
+            headers_item = get_c5_headers(sheet_item)
             
-            new_row_idx = 2
+            new_row_idx = DATA_START_ROW
             for d in all_dishes:
                 # Lookup data user lama berdasarkan Item ID (dish_id)
                 dish_id_str = str(d.get('dish_id', '')).strip()
@@ -592,6 +599,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
 
                 mapping = {
                     'OFD': d['ofd'],
+                    'Listing Name': d['nama_panjang'],
                     'Outlet Name': d['nama_panjang'],
                     'Outlet Short Name': d['nama_pendek'],
                     'Outlet Link': d['link_outlet'],
@@ -637,16 +645,15 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                         
             # 2. Fill Modifier Sheet
             sheet_mod = wb['Modifier']
-            # Delete sample data rows (from row 2 onwards)
-            if sheet_mod.max_row > 1:
-                sheet_mod.delete_rows(2, sheet_mod.max_row - 1)
+            prepare_c5_sheet(sheet_mod)
                 
-            headers_mod = {cell.value: cell.column for cell in sheet_mod[1]}
+            headers_mod = get_c5_headers(sheet_mod)
             
-            new_row_idx = 2
+            new_row_idx = DATA_START_ROW
             for m in modifier_rows:
                 mapping_mod = {
                     'OFD': m['ofd'],
+                    'Listing Name': m['outlet_name'],
                     'Outlet Name': m['outlet_name'],
                     'Outlet Short Name': m['outlet_short_name'],
                     'Outlet Link': m['outlet_link'],

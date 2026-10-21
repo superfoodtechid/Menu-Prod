@@ -45,6 +45,7 @@ sys.path.append(str(BASE_DIR))
 sys.path.append(str(BASE_DIR / "menu_core"))
 
 from menu_core.database import get_db, init_db, Account, Outlet, Job, AuditTrail
+from menu_core.c5_template_helper import is_c5_reserved_row
 
 # Setup Logging
 logging.basicConfig(
@@ -4079,7 +4080,7 @@ async def parse_c5_endpoint(
         return ""
 
     sid_col = resolve_col(['SID', 'Store ID'])
-    outlet_col = resolve_col(['Outlet Name', 'Outlet'])
+    outlet_col = resolve_col(['Listing Name', 'Outlet Name', 'Outlet'])
     cat_id_col = resolve_col(['Category ID'])
     cat_col = resolve_col(['Category', 'Nama Kategori', 'Kategori'])
     item_id_col = resolve_col(['Item ID'])
@@ -4098,7 +4099,7 @@ async def parse_c5_endpoint(
     # All rows sharing the same (SID, Category ID) in C5 MUST have the exact same Category Name.
     cat_id_name_map = {}
     for row in rows[1:]:
-        if not row or all(v is None for v in row):
+        if not row or all(v is None for v in row) or is_c5_reserved_row(row):
             continue
         s_id = get_val(row, sid_col) or "STORE-DEFAULT"
         c_id = get_val(row, cat_id_col)
@@ -4131,7 +4132,7 @@ async def parse_c5_endpoint(
     discontinuous_categories = {}  # (s_id, cat_key) -> error info dict
 
     for r_num, row in enumerate(rows[1:], start=2):
-        if not row or all(v is None for v in row):
+        if not row or all(v is None for v in row) or is_c5_reserved_row(row):
             continue
         s_id = get_val(row, sid_col) or "STORE-DEFAULT"
         c_id = get_val(row, cat_id_col)
@@ -4718,7 +4719,7 @@ async def parse_c5_endpoint(
         )
 
     for r_idx, row in enumerate(rows[1:], start=2):
-        if not row or all(v is None for v in row):
+        if not row or all(v is None for v in row) or is_c5_reserved_row(row):
             continue
 
         sid = get_val(row, sid_col) or "STORE-DEFAULT"
@@ -6057,7 +6058,7 @@ def get_parsed_menu_items(excel_path: str) -> list:
         # Also load data_only=True workbook to read evaluated/cached values if needed
         raw_items = []
         for row in sheet.iter_rows(min_row=2, values_only=True):
-            if not row or all(v is None for v in row):
+            if not row or all(v is None for v in row) or is_c5_reserved_row(row):
                 continue
                 
             def get_col_val(col_name, default=""):

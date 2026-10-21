@@ -3,9 +3,16 @@ import re
 import io
 import openpyxl
 import pandas as pd
+from menu_core.c5_template_helper import (
+    get_c5_template_path,
+    prepare_c5_sheet,
+    get_c5_headers,
+    DATA_START_ROW,
+    is_c5_reserved_row,
+)
 
 FILE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEMPLATE_PATH = os.path.join(FILE_DIR, "O. C5 Template.xlsx")
+TEMPLATE_PATH = str(get_c5_template_path())
 OFFLINE_PRICE_COLUMNS = ('Offline Price (Rp)', 'Offline Adjustment (Rp)')
 
 
@@ -51,7 +58,9 @@ def _read_offline_prices(previous_workbook):
         saved_by_id = {}
         saved_by_name_candidates = {}
         name_row_counts = {}
-        for row in sheet.iter_rows(min_row=2, values_only=True):
+        for row in sheet.iter_rows(min_row=DATA_START_ROW, values_only=True):
+            if is_c5_reserved_row(row):
+                continue
             sid = _identity_value(row[sid_col - 1] if sid_col - 1 < len(row) else None)
             if not sid:
                 continue
@@ -112,7 +121,9 @@ def _restore_offline_prices(output_path, previous_workbook=None, db=None):
         # Collect all unique SIDs from this sheet
         sheet_sids = set()
         target_name_counts = {}
-        for row_idx in range(2, sheet.max_row + 1):
+        for row_idx in range(DATA_START_ROW, sheet.max_row + 1):
+            if is_c5_reserved_row([sheet.cell(row=row_idx, column=c).value for c in range(1, 6)]):
+                continue
             sid = _identity_value(sheet.cell(row=row_idx, column=sid_col).value)
             if sid:
                 sheet_sids.add(sid)
@@ -191,7 +202,9 @@ def _restore_offline_prices(output_path, previous_workbook=None, db=None):
             return 0
 
         restored = 0
-        for row_idx in range(2, sheet.max_row + 1):
+        for row_idx in range(DATA_START_ROW, sheet.max_row + 1):
+            if is_c5_reserved_row([sheet.cell(row=row_idx, column=c).value for c in range(1, 6)]):
+                continue
             sid = _identity_value(sheet.cell(row=row_idx, column=sid_col).value)
             item_id = _identity_value(sheet.cell(row=row_idx, column=item_id_col).value) if item_id_col else ''
             values = combined_by_id.get((sid, item_id)) if item_id else None
@@ -244,6 +257,19 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
             try:
                 df_item = pd.read_excel(f, sheet_name='Item')
                 df_mod = pd.read_excel(f, sheet_name='Modifier')
+                # Filter out row 2 "Don't touch row 2" if present in input
+                if not df_item.empty:
+                    df_item = df_item[~df_item.iloc[:, 0].astype(str).str.lower().str.contains("don't touch")]
+                    if 'Listing Name' in df_item.columns and 'Outlet Name' not in df_item.columns:
+                        df_item['Outlet Name'] = df_item['Listing Name']
+                    elif 'Outlet Name' in df_item.columns and 'Listing Name' not in df_item.columns:
+                        df_item['Listing Name'] = df_item['Outlet Name']
+                if not df_mod.empty:
+                    df_mod = df_mod[~df_mod.iloc[:, 0].astype(str).str.lower().str.contains("don't touch")]
+                    if 'Listing Name' in df_mod.columns and 'Outlet Name' not in df_mod.columns:
+                        df_mod['Outlet Name'] = df_mod['Listing Name']
+                    elif 'Outlet Name' in df_mod.columns and 'Listing Name' not in df_mod.columns:
+                        df_mod['Listing Name'] = df_mod['Outlet Name']
                 all_items.append(df_item)
                 all_mods.append(df_mod)
             except Exception as e:
@@ -267,17 +293,13 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    if os.path.exists(TEMPLATE_PATH):
+    template_path = str(get_c5_template_path())
+    if os.path.exists(template_path):
         try:
-            wb = openpyxl.load_workbook(TEMPLATE_PATH)
+            wb = openpyxl.load_workbook(template_path)
             sheet_item = wb['Item']
-            if sheet_item.max_row > 1:
-                sheet_item.delete_rows(2, sheet_item.max_row - 1)
-                
-            headers_item = {}
-            for cell in sheet_item[1]:
-                if isinstance(cell.value, str):
-                    headers_item[cell.value] = cell.column
+            prepare_c5_sheet(sheet_item)
+            headers_item = get_c5_headers(sheet_item)
                     
             for r_idx, row in df_combined_items.iterrows():
                 for col_name, val in row.items():
@@ -289,23 +311,18 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
                                 val = str(int(val)) if val.is_integer() else str(val)
                             else:
                                 val = str(val)
-                        cell = sheet_item.cell(row=r_idx + 2, column=headers_item[col_name], value=val)
+                        sheet_item.cell(row=DATA_START_ROW + r_idx, column=headers_item[col_name], value=val)
                         
             # Apply percentage formatting to columns with '(%)' in the header
             for cell in sheet_item[1]:
                 val_str = cell.value.text if hasattr(cell.value, 'text') else str(cell.value or "")
                 if '(%)' in val_str:
-                    for r in range(2, sheet_item.max_row + 1):
+                    for r in range(DATA_START_ROW, sheet_item.max_row + 1):
                         sheet_item.cell(row=r, column=cell.column).number_format = '0%'
                         
             sheet_mod = wb['Modifier']
-            if sheet_mod.max_row > 1:
-                sheet_mod.delete_rows(2, sheet_mod.max_row - 1)
-                
-            headers_mod = {}
-            for cell in sheet_mod[1]:
-                if isinstance(cell.value, str):
-                    headers_mod[cell.value] = cell.column
+            prepare_c5_sheet(sheet_mod)
+            headers_mod = get_c5_headers(sheet_mod)
                     
             for r_idx, row in df_combined_mods.iterrows():
                 for col_name, val in row.items():
@@ -317,12 +334,12 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
                                 val = str(int(val)) if val.is_integer() else str(val)
                             else:
                                 val = str(val)
-                        sheet_mod.cell(row=r_idx + 2, column=headers_mod[col_name], value=val)
+                        sheet_mod.cell(row=DATA_START_ROW + r_idx, column=headers_mod[col_name], value=val)
                         
             for cell in sheet_mod[1]:
                 val_str = cell.value.text if hasattr(cell.value, 'text') else str(cell.value or "")
                 if '(%)' in val_str:
-                    for r in range(2, sheet_mod.max_row + 1):
+                    for r in range(DATA_START_ROW, sheet_mod.max_row + 1):
                         sheet_mod.cell(row=r, column=cell.column).number_format = '0%'
                         
             wb.save(output_path)
