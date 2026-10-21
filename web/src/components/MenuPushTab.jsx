@@ -17,6 +17,7 @@ const CHANGE_LABELS = {
   OTHER_CHANGE: "Atribut lain",
   INVALID_NEW_ITEM_PRICE: "Harga item baru tidak valid",
   GRAB_PRICE_LIMIT_EXCEEDED: "Kenaikan Grab melebihi 15%",
+  SHOPEE_PRICE_LIMIT_EXCEEDED: "Batas Shopee 1x/hari",
 };
 
 function friendlyPushError(rawMessage) {
@@ -39,6 +40,10 @@ function friendlyPushError(rawMessage) {
     }
   }
   const detail = message.toLowerCase();
+
+  if (detail.includes("1100036") || detail.includes("limit times") || detail.includes("exceed the limit times") || (detail.includes("shopee") && detail.includes("1x per hari"))) {
+    return "Batas perubahan harga Shopee tercapai (maksimal 1x per hari). Mohon jangan lakukan push harga lagi untuk item ini hari ini.";
+  }
 
   if ((detail.includes("description") || lower.includes("validation_errors.description")) &&
       (detail.includes("kata") || detail.includes("tidak bisa") || detail.includes("not allowed"))) {
@@ -464,6 +469,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
       if (changeTypeFilter === "new_category" && !item.is_new_category) return false;
       if (changeTypeFilter === "delete_item" && !item.is_deleted_item) return false;
       if (changeTypeFilter === "step_push" && !item.price_warning) return false;
+      if (changeTypeFilter === "shopee_limit" && !item.shopee_price_limit_exceeded) return false;
       if (changeTypeFilter === "invalid" && item.is_valid !== false) return false;
 
       // 3. Filter by Attribute
@@ -770,7 +776,8 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
           {(() => {
             const s = parseResult.summary || {};
             return (
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 <div className="surface-card p-3.5">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Store Terpilih</p>
                   <p className="mt-1 text-lg font-bold text-slate-900 dark:text-white">
@@ -801,7 +808,13 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                   <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-zinc-500">Update Harga</p>
                   <p className="mt-1 text-lg font-bold text-slate-900 dark:text-white">{s.price_changes || 0}</p>
                   <p className="text-[11px] text-slate-400">
-                    {s.price_warning_count > 0 ? `${s.price_warning_count} peringatan >15%` : "Perubahan harga"}
+                    {s.shopee_price_limit_count > 0 ? (
+                      <span className="font-semibold text-rose-600 dark:text-rose-400">{s.shopee_price_limit_count} batas Shopee</span>
+                    ) : s.price_warning_count > 0 ? (
+                      `${s.price_warning_count} peringatan >15%`
+                    ) : (
+                      "Perubahan harga"
+                    )}
                   </p>
                 </div>
 
@@ -815,7 +828,22 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                   </p>
                 </div>
               </div>
-            );
+
+              {s.shopee_price_limit_count > 0 && (
+                <div className="mt-4 rounded-xl border border-rose-300 bg-rose-50 p-4 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+                  <div className="flex items-center gap-2 font-bold text-rose-900 dark:text-rose-200">
+                    <svg className="h-4 w-4 shrink-0 text-rose-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                    </svg>
+                    Peringatan Batas Perubahan Harga Shopee ({s.shopee_price_limit_count} item)
+                  </div>
+                  <p className="mt-1">
+                    Shopee Food membatasi perubahan harga hidangan maksimal 1x per hari (24 jam). Terdapat {s.shopee_price_limit_count} item yang sudah pernah diubah harganya hari ini. <strong>Jangan lakukan push harga lagi untuk item tersebut hari ini</strong> agar push tidak ditolak oleh sistem Shopee.
+                  </p>
+                </div>
+              )}
+            </>
+          );
           })()}
 
           {/* Compact Store ID Grid (3 Columns) */}
@@ -1061,6 +1089,9 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                   ["new_category", `Kategori Baru (${parseResult?.summary?.new_categories_count || 0})`],
                   ["delete_item", `Hapus Item (${parseResult?.summary?.deleted_items_count || 0})`],
                   ["step_push", `Peringatan Harga >15% (${parseResult?.summary?.price_warning_count || 0})`],
+                  ...(parseResult?.summary?.shopee_price_limit_count > 0
+                    ? [["shopee_limit", `Batas Shopee 1x/hari (${parseResult?.summary?.shopee_price_limit_count || 0})`]]
+                    : []),
                   ["invalid", `Tidak Valid (${parseResult?.summary?.validation_errors_count || 0})`],
                 ].map(([mode, label]) => {
                   const isActive = changeTypeFilter === mode;
@@ -1274,24 +1305,35 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                         {/* Harga Baru (C5) */}
                         <td className="px-3.5 py-2.5 whitespace-nowrap">
                           {item.changes?.price_changed || item.is_new_item ? (
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-bold text-slate-900 dark:text-white">
-                                {fmtCurrency(item.new_fake_price)}
-                              </span>
-                              {item.price_diff_percent !== undefined && item.price_diff_percent !== null && (
-                                <span
-                                  className={`rounded px-1.5 py-0.2 text-[10px] font-bold ${
-                                    item.price_warning
-                                      ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
-                                      : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
-                                  }`}
-                                  title={
-                                    item.price_warning
-                                      ? `${item.price_diff_percent < 0 ? "Penurunan" : "Kenaikan"} harga > 15%`
-                                      : "Perubahan harga"
-                                  }
-                                >
-                                  {item.price_diff_percent > 0 ? `+${item.price_diff_percent}%` : `${item.price_diff_percent}%`}
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-bold text-slate-900 dark:text-white">
+                                  {fmtCurrency(item.new_fake_price)}
+                                </span>
+                                {item.price_diff_percent !== undefined && item.price_diff_percent !== null && (
+                                  <span
+                                    className={`rounded px-1.5 py-0.2 text-[10px] font-bold ${
+                                      item.shopee_price_limit_exceeded
+                                        ? "bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300"
+                                        : item.price_warning
+                                          ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                                          : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                    }`}
+                                    title={
+                                      item.shopee_price_limit_exceeded
+                                        ? "Batas Shopee: Sudah ganti harga hari ini (maksimal 1x per hari)"
+                                        : item.price_warning
+                                          ? `${item.price_diff_percent < 0 ? "Penurunan" : "Kenaikan"} harga > 15%`
+                                          : "Perubahan harga"
+                                    }
+                                  >
+                                    {item.price_diff_percent > 0 ? `+${item.price_diff_percent}%` : `${item.price_diff_percent}%`}
+                                  </span>
+                                )}
+                              </div>
+                              {item.shopee_price_limit_exceeded && (
+                                <span className="mt-0.5 block text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                                  ⚠️ Jangan push lagi hari ini
                                 </span>
                               )}
                             </div>
@@ -1330,6 +1372,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                               {item.changes?.price_changed && !item.is_new_item && (
                                 <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
                                   Harga
+                                </span>
+                              )}
+                              {item.shopee_price_limit_exceeded && (
+                                <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-semibold text-rose-800 dark:bg-rose-950/60 dark:text-rose-300" title={item.shopee_price_limit_message || "Shopee membatasi perubahan harga 1x per hari. Jangan lakukan push harga lagi hari ini."}>
+                                  Batas Shopee (1x/hari)
                                 </span>
                               )}
                               {item.price_warning && (
@@ -1474,6 +1521,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
             <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
               Periksa daftar ini sebelum push. Kategori baru dengan nama sama pada satu Store ID dibuat sekali, lalu dipakai oleh item terkait.
             </p>
+            {confirmationItems.some((item) => item.shopee_price_limit_exceeded) && (
+              <div className="mt-3 rounded-lg border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300">
+                <strong>⚠️ Perhatian Batas Shopee:</strong> Terdapat {confirmationItems.filter((i) => i.shopee_price_limit_exceeded).length} item Shopee yang sudah pernah diubah harganya hari ini. Shopee Food membatasi perubahan harga maksimal 1x per hari (24 jam). Push harga untuk item tersebut kemungkinan besar akan ditolak oleh Shopee.
+              </div>
+            )}
             <input type="search" value={confirmSearch} onChange={(event) => setConfirmSearch(event.target.value)} placeholder="Cari nama item, kategori, atau Store ID" aria-label="Cari perubahan yang akan dipush" className="field-control mt-3 text-xs" />
             <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
               {filteredConfirmationItems.length === 0 && <p className="p-6 text-center text-xs text-slate-500">Tidak ada item yang cocok dengan pencarian.</p>}
@@ -1491,6 +1543,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                       <span className="mt-0.5 block text-[11px] text-slate-500 dark:text-zinc-400">{item.platform} · {item.sid} · {item.category || "Tanpa kategori"}</span>
                     </span>
                     <span className="flex flex-wrap items-center justify-end gap-1">
+                      {item.shopee_price_limit_exceeded && (
+                        <span className="rounded-md bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-800 dark:bg-rose-950/60 dark:text-rose-300">
+                          Batas Shopee (1x/hari)
+                        </span>
+                      )}
                       {(item.change_types || []).map((change) => <span key={change} className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-zinc-800 dark:text-zinc-200">{CHANGE_LABELS[change] || change}</span>)}
                       <span className="ml-1 rounded-md bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-600 dark:bg-zinc-800 dark:text-zinc-300">Rincian</span>
                     </span>
@@ -1982,15 +2039,19 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                         {diffModalItem.price_diff_percent !== undefined && diffModalItem.price_diff_percent !== null && (
                           <span
                             className={`rounded px-1.5 py-0.2 text-[10px] font-bold ${
-                              diffModalItem.price_warning
-                                ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
-                                : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                              diffModalItem.shopee_price_limit_exceeded
+                                ? "bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300"
+                                : diffModalItem.price_warning
+                                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                                  : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
                             }`}
                           >
                             {diffModalItem.price_diff_percent > 0 ? `+${diffModalItem.price_diff_percent}%` : `${diffModalItem.price_diff_percent}%`}
-                            {diffModalItem.grab_price_limit_exceeded
-                              ? " (Melebihi batas Grab 15%)"
-                              : diffModalItem.price_warning ? " (Step Push)" : ""}
+                            {diffModalItem.shopee_price_limit_exceeded
+                              ? " (Batas Shopee 1x/hari)"
+                              : diffModalItem.grab_price_limit_exceeded
+                                ? " (Melebihi batas Grab 15%)"
+                                : diffModalItem.price_warning ? " (Step Push)" : ""}
                           </span>
                         )}
                       </div>
@@ -2069,8 +2130,23 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                 </div>
               )}
 
-              {/* Catatan Khusus Peringatan Step Push */}
-              {diffModalItem.grab_price_limit_exceeded ? (
+              {/* Catatan Khusus Peringatan Step Push / Batas Platform */}
+              {diffModalItem.shopee_price_limit_exceeded ? (
+                <div className="rounded-xl border border-rose-300 bg-rose-50 p-3.5 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+                  <div className="font-bold text-rose-900 dark:text-rose-200 flex items-center gap-1.5">
+                    <svg className="h-4 w-4 shrink-0 text-rose-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                    </svg>
+                    Peringatan Batas Perubahan Harga Shopee
+                  </div>
+                  <p className="mt-1">
+                    {diffModalItem.shopee_price_limit_message || "Item ini sudah pernah diubah harganya hari ini. Shopee Food membatasi perubahan harga maksimal 1x per hari (24 jam)."}
+                  </p>
+                  <p className="mt-1 font-semibold text-rose-700 dark:text-rose-300">
+                    Mohon jangan lakukan push harga lagi untuk item ini hari ini agar tidak gagal atau ditolak sistem Shopee.
+                  </p>
+                </div>
+              ) : diffModalItem.grab_price_limit_exceeded ? (
                 <div className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
                   Push harga item ini diblokir. {diffModalItem.price_diff_percent < 0 ? "Penurunan" : "Kenaikan"} {diffModalItem.price_diff_percent > 0 ? `+${diffModalItem.price_diff_percent}%` : `${diffModalItem.price_diff_percent}%`} melampaui batas kuota Grab (maksimal 10 tahapan perubahan per 24 jam).
                 </div>

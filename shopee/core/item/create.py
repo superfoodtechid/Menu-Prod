@@ -12,22 +12,48 @@ if str(AUTOMATION_DIR) not in sys.path:
 from core import browser
 
 def _build_dish_payload(
-    name: str,
-    price: float,
-    description: str,
-    available: bool,
-    catalog_id: int | str,
+    name: str = None,
+    price: float = None,
+    description: str = "",
+    available: bool = True,
+    catalog_id: int | str = None,
     picture: str = "",
     opt_groups: list = None,
     rank: int = None,
     existing_dish: dict = None,
-    list_price: float = None
+    list_price: float = None,
+    include_price_mutation: bool = True
 ) -> dict:
-    price_cents = int(price * 100000)
-    list_price_cents = int(list_price * 100000) if list_price is not None else price_cents
     time_for_sales = [{"sale_start_time": 0, "sale_end_time": 86399}]
     
     if existing_dish:
+        # Jika tidak ada perubahan harga (hanya ubah nama/kategori/deskripsi/foto),
+        # kirim payload bersih persis seperti cURL web portal Shopee Partner (tanpa list_price & promo)
+        # agar tidak memicu sistem validasi kuota batas perubahan harga harian.
+        if not include_price_mutation:
+            dish_payload = {
+                "name": name if (name is not None and str(name).strip() != "") else existing_dish.get("name", ""),
+                "available": available if available is not None else existing_dish.get("available", True),
+                "catalog_id": str(catalog_id or existing_dish.get("catalog_id", "")),
+                "description": description if description is not None else existing_dish.get("description", ""),
+                "price": str(existing_dish.get("price", "0")),
+                "picture": picture if (picture is not None and str(picture).strip() != "") else existing_dish.get("picture", ""),
+                "time_for_sales": existing_dish.get("time_for_sales") or time_for_sales,
+                "listing_status": existing_dish.get("listing_status", 1),
+                "sale_status": existing_dish.get("sale_status", 1),
+                "sale_week_bit": existing_dish.get("sale_week_bit", 127),
+                "stock_type": existing_dish.get("stock_type", 0),
+                "id": str(existing_dish.get("id"))
+            }
+            if rank is not None:
+                dish_payload["rank"] = rank
+            elif "rank" in existing_dish:
+                dish_payload["rank"] = existing_dish["rank"]
+            return dish_payload
+
+        price_cents = int(price * 100000) if price is not None else int(existing_dish.get("price", 0))
+        list_price_cents = int(list_price * 100000) if list_price is not None else price_cents
+
         dish_copy = existing_dish.copy()
         dish_copy["price"] = str(price_cents)
         dish_copy["list_price"] = list_price_cents
@@ -40,7 +66,7 @@ def _build_dish_payload(
             dish_copy["name"] = name
         if description is not None:
             dish_copy["description"] = description
-        if picture is not None:
+        if picture is not None and str(picture).strip() != "":
             dish_copy["picture"] = picture
         if catalog_id:
             dish_copy["catalog_id"] = str(catalog_id)
@@ -54,6 +80,9 @@ def _build_dish_payload(
                 it_disc["discount_price"] = str(price_cents)
             dish_copy["item_discount"] = it_disc
         return dish_copy
+
+    price_cents = int(price * 100000) if price is not None else 0
+    list_price_cents = int(list_price * 100000) if list_price is not None else price_cents
 
     if rank is None:
         rank = 1

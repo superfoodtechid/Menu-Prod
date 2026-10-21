@@ -260,15 +260,16 @@ def update_dish(
     store_id: str,
     catalog_id: int | str,
     dish_id: int | str,
-    name: str,
-    price: float,
+    name: str = None,
+    price: float = None,
     description: str = "",
     available: bool = True,
     picture: str = "",
     opt_groups: list = None,
     existing_dish: dict = None,
     rank: int = None,
-    list_price: float = None
+    list_price: float = None,
+    include_price_mutation: bool = True
 ) -> bool:
     from .create import _build_dish_payload
     dish_str_id = str(dish_id)
@@ -283,19 +284,23 @@ def update_dish(
         opt_groups=opt_groups,
         rank=rank,
         existing_dish=existing_dish,
-        list_price=list_price
+        list_price=list_price,
+        include_price_mutation=include_price_mutation
     )
     if isinstance(payload_raw, dict) and "dish" in payload_raw:
         payload = payload_raw
     else:
-        payload = {"dish": payload_raw}
+        payload = {"dish": payload_raw, "option_group_bindings": []}
+
+    if "option_group_bindings" not in payload:
+        payload["option_group_bindings"] = []
 
     dish_data = payload.get("dish") or {}
     dish_data["id"] = dish_str_id
-    if store_id:
-        dish_data["store_id"] = str(store_id)
     if catalog_id:
         dish_data["catalog_id"] = str(catalog_id)
+    if include_price_mutation and store_id:
+        dish_data["store_id"] = str(store_id)
 
     try:
         resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
@@ -326,6 +331,30 @@ def reorder_categories(client: ShopeeModifyClient, store_id: str, ranks: list[di
     ranks format: [{"id": "3142001330862080", "rank": 1}, ...]
     """
     url = "https://foody.shopee.co.id/api/seller/store/catalogs/-/rank"
+    formatted_ranks = []
+    for item in ranks:
+        formatted_ranks.append({
+            "id": str(item["id"]),
+            "rank": int(item["rank"])
+        })
+    payload = {"ranks": formatted_ranks}
+    try:
+        resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
+        data = resp.json()
+        if data.get("code") == 0:
+            return True
+        client.last_error = f"API error: code={data.get('code')} msg={data.get('msg')}"
+    except Exception as e:
+        client.last_error = str(e)
+    return False
+
+def reorder_dishes(client: ShopeeModifyClient, store_id: str, ranks: list[dict]) -> bool:
+    """
+    Mengatur urutan item (dishes) dalam kategori / toko.
+    ranks format: [{"id": "3148484252139008", "rank": 1}, {"id": "3148483850695168", "rank": 2}, ...]
+    Endpoint: POST https://foody.shopee.co.id/api/seller/store/dishes/-/rank
+    """
+    url = "https://foody.shopee.co.id/api/seller/store/dishes/-/rank"
     formatted_ranks = []
     for item in ranks:
         formatted_ranks.append({

@@ -255,45 +255,7 @@ def edit_dish_upload_image(
             except Exception:
                 pass
 
-def update_dish(
-    client: ShopeeModifyClient,
-    store_id: str,
-    catalog_id: int | str,
-    dish_id: int | str,
-    name: str,
-    price: float,
-    description: str = "",
-    available: bool = True,
-    picture: str = "",
-    opt_groups: list = None,
-    existing_dish: dict = None,
-    list_price: float = None,
-    rank: int = None
-) -> bool:
-    from .create import _build_dish_payload
-    dish_str_id = str(dish_id)
-    url = f"https://foody.shopee.co.id/api/seller/store/dishes/{dish_str_id}"
-    payload = _build_dish_payload(
-        name=name,
-        price=price,
-        description=description,
-        available=available,
-        catalog_id=catalog_id,
-        picture=picture,
-        opt_groups=opt_groups,
-        existing_dish=existing_dish,
-        list_price=list_price,
-        rank=rank or 1
-    )
-    try:
-        resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
-        data = resp.json()
-        if data.get("code") == 0:
-            return True
-        client.last_error = f"API error: code={data.get('code')} msg={data.get('msg')}"
-    except Exception as e:
-        client.last_error = str(e)
-    return False
+from shopee.core.item.edit import update_dish
 
 def update_category(client: ShopeeModifyClient, store_id: str, catalog_id: str, name: str) -> bool:
     url = f"https://foody.shopee.co.id/api/seller/store/catalog/update"
