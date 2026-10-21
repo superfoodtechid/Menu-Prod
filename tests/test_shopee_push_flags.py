@@ -75,6 +75,7 @@ class TestShopeePushFlags(unittest.TestCase):
         self.assertEqual(kwargs["description"], "Nasi goreng lezat")
         self.assertEqual(kwargs["price"], 20000.0)
         self.assertEqual(kwargs["list_price"], 20000.0)
+        self.assertEqual(kwargs["include_price_mutation"], False)
         # Category reordering should be skipped because only NAME_CHANGE was present
         mock_reorder.assert_not_called()
 
@@ -116,6 +117,7 @@ class TestShopeePushFlags(unittest.TestCase):
         self.assertEqual(kwargs["name"], "Nasi Goreng Spesial")
         self.assertEqual(kwargs["price"], 20000.0)
         self.assertEqual(kwargs["list_price"], 20000.0)
+        self.assertEqual(kwargs["include_price_mutation"], False)
 
     @patch("shopee.core.push_c5.update_dish")
     @patch("shopee.core.push_c5._boot_push_client")
@@ -182,6 +184,43 @@ class TestShopeePushFlags(unittest.TestCase):
         _, kwargs = mock_create.call_args
         self.assertEqual(kwargs["picture"], "")
         self.assertEqual(kwargs["price"], 15000.0)
+
+    def test_clean_dish_payload_omits_pricing_and_promo_keys(self):
+        from shopee.core.item.create import _build_dish_payload
+        existing = {
+            "id": "3148482929458688",
+            "name": "Es Jeruk",
+            "price": "1800000000",
+            "list_price": "1800000000",
+            "description": "Segar manis",
+            "catalog_id": "3148480950140416",
+            "picture": "Es Jeruk",
+            "item_discount": {"discount_price": "1500000000"},
+            "discount_type": 1,
+            "discount_amount": "300000000",
+            "flash_sale_dish_discount": {},
+            "store_id": "22459819",
+            "available": True,
+            "rank": 2,
+        }
+
+        payload = _build_dish_payload(
+            name="Es Jeruk Jumbo",
+            existing_dish=existing,
+            include_price_mutation=False
+        )
+
+        self.assertEqual(payload["name"], "Es Jeruk Jumbo")
+        self.assertEqual(payload["id"], "3148482929458688")
+        self.assertEqual(payload["price"], "1800000000")
+        self.assertEqual(payload["rank"], 2)
+        # Verify pricing and promo mutation keys are omitted
+        self.assertNotIn("list_price", payload)
+        self.assertNotIn("item_discount", payload)
+        self.assertNotIn("discount_type", payload)
+        self.assertNotIn("discount_amount", payload)
+        self.assertNotIn("flash_sale_dish_discount", payload)
+        self.assertNotIn("store_id", payload)
 
 
 if __name__ == "__main__":

@@ -557,45 +557,58 @@ def push_c5_shopee_for_merchant(
                 final_list_price = final_price
                 price_steps = calculate_price_steps(orig_price, final_price) if orig_price > 0 else [final_price]
                 promo_note = ""
+
+            update_success, last_err = True, ""
+
+            for step_val in price_steps:
+                if is_promo:
+                    step_list = step_val
+                    if list_price > orig_price > 0:
+                        d_rat = (list_price - orig_price) / list_price
+                        step_sell = round(step_list * (1.0 - d_rat))
+                    elif disc_pct > 0:
+                        d_rat = (disc_pct / 10000.0) if disc_pct > 100 else (disc_pct / 100.0)
+                        step_sell = round(step_list * (1.0 - d_rat))
+                    else:
+                        step_sell = step_list
+                    if step_sell > step_list:
+                        step_sell = step_list
+                else:
+                    step_list = step_val
+                    step_sell = step_val
+
+                ok = update_dish(
+                    client=client, store_id=store_id, catalog_id=catalog_id,
+                    dish_id=int(item_id), name=target_name, price=step_sell,
+                    description=target_desc, available=target_avail,
+                    picture=target_pic, opt_groups=opt_groups, existing_dish=existing_dish,
+                    list_price=step_list, include_price_mutation=True
+                )
+                if not ok:
+                    update_success = False
+                    last_err = client.last_error or "Update dish API returned error."
+                    logger.error(f"❌ [PUSH_C5] update_dish via API gagal untuk '{target_name}' (ID: {item_id}): {last_err}")
+                    break
+                time.sleep(0.2)
         else:
-            # Tidak ada perubahan harga: pertahankan harga dan list_price yang sudah ada di Shopee
+            # Metadata-only update (nama, kategori, deskripsi, foto tanpa ubah harga).
+            # Kirim payload bersih persis seperti web portal agar tidak memicu batas kuota perubahan harga harian.
             final_price = orig_price
             final_list_price = list_price
-            price_steps = [list_price]
             promo_note = ""
-
-        update_success, last_err = True, ""
-
-        for step_val in price_steps:
-            if is_promo:
-                step_list = step_val
-                if list_price > orig_price > 0:
-                    d_rat = (list_price - orig_price) / list_price
-                    step_sell = round(step_list * (1.0 - d_rat))
-                elif disc_pct > 0:
-                    d_rat = (disc_pct / 10000.0) if disc_pct > 100 else (disc_pct / 100.0)
-                    step_sell = round(step_list * (1.0 - d_rat))
-                else:
-                    step_sell = step_list
-                if step_sell > step_list:
-                    step_sell = step_list
-            else:
-                step_list = step_val
-                step_sell = step_val
-
             ok = update_dish(
                 client=client, store_id=store_id, catalog_id=catalog_id,
-                dish_id=int(item_id), name=target_name, price=step_sell,
+                dish_id=int(item_id), name=target_name, price=final_price,
                 description=target_desc, available=target_avail,
                 picture=target_pic, opt_groups=opt_groups, existing_dish=existing_dish,
-                list_price=step_list
+                list_price=final_list_price, include_price_mutation=False
             )
-            if not ok:
+            if ok:
+                update_success, last_err = True, ""
+            else:
                 update_success = False
                 last_err = client.last_error or "Update dish API returned error."
-                logger.error(f"❌ [PUSH_C5] update_dish via API gagal untuk '{target_name}' (ID: {item_id}): {last_err}")
-                break
-            time.sleep(0.2)
+                logger.error(f"❌ [PUSH_C5] update_dish metadata via API gagal untuk '{target_name}' (ID: {item_id}): {last_err}")
 
         if update_success:
             res_item["status"] = "SUCCESS"

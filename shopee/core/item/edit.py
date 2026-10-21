@@ -260,15 +260,16 @@ def update_dish(
     store_id: str,
     catalog_id: int | str,
     dish_id: int | str,
-    name: str,
-    price: float,
+    name: str = None,
+    price: float = None,
     description: str = "",
     available: bool = True,
     picture: str = "",
     opt_groups: list = None,
     existing_dish: dict = None,
     rank: int = None,
-    list_price: float = None
+    list_price: float = None,
+    include_price_mutation: bool = True
 ) -> bool:
     from .create import _build_dish_payload
     dish_str_id = str(dish_id)
@@ -283,19 +284,23 @@ def update_dish(
         opt_groups=opt_groups,
         rank=rank,
         existing_dish=existing_dish,
-        list_price=list_price
+        list_price=list_price,
+        include_price_mutation=include_price_mutation
     )
     if isinstance(payload_raw, dict) and "dish" in payload_raw:
         payload = payload_raw
     else:
-        payload = {"dish": payload_raw}
+        payload = {"dish": payload_raw, "option_group_bindings": []}
+
+    if "option_group_bindings" not in payload:
+        payload["option_group_bindings"] = []
 
     dish_data = payload.get("dish") or {}
     dish_data["id"] = dish_str_id
-    if store_id:
-        dish_data["store_id"] = str(store_id)
     if catalog_id:
         dish_data["catalog_id"] = str(catalog_id)
+    if include_price_mutation and store_id:
+        dish_data["store_id"] = str(store_id)
 
     try:
         resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
