@@ -301,6 +301,76 @@ class TestShopeePushFlags(unittest.TestCase):
         ]
         self.assertEqual(call_args[2], expected_ranks)
 
+    @patch("shopee.core.push_c5.reorder_categories")
+    @patch("shopee.core.push_c5.update_dish")
+    @patch("shopee.core.push_c5._boot_push_client")
+    def test_price_change_direct_push_no_step_push(self, mock_boot, mock_update, mock_reorder):
+        mock_client = MagicMock()
+        mock_client.entity_id = "STORE_FLAG"
+        mock_client.get_store_dishes.return_value = self.catalogs
+        mock_boot.return_value = (mock_client, None)
+        mock_update.return_value = True
+
+        # Kenaikan harga 1000% dari Rp20.000 ke Rp200.000
+        updates = [
+            {
+                "item_id": "1001",
+                "item_name": "Nasi Goreng Spesial",
+                "new_fake_price": 200000,
+                "changes": ["PRICE_CHANGE"]
+            }
+        ]
+
+        results = push_c5_shopee_for_merchant(
+            store_metadata={"store_id": "STORE_FLAG", "username": "user"},
+            updates=updates
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "SUCCESS")
+        # Memastikan update_dish hanya dipanggil 1 kali langsung dengan harga akhir (tanpa step push)
+        self.assertEqual(mock_update.call_count, 1)
+        _, _, update_kwargs = mock_update.mock_calls[0]
+        self.assertEqual(update_kwargs["price"], 200000.0)
+        self.assertEqual(update_kwargs["list_price"], 200000.0)
+        self.assertTrue(update_kwargs["include_price_mutation"])
+
+    @patch("shopee.core.push_c5.reorder_categories")
+    @patch("shopee.core.push_c5.update_dish")
+    @patch("shopee.core.push_c5._boot_push_client")
+    def test_shopee_daily_price_limit_error_translation(self, mock_boot, mock_update, mock_reorder):
+        mock_client = MagicMock()
+        mock_client.entity_id = "STORE_FLAG"
+        mock_client.get_store_dishes.return_value = self.catalogs
+        mock_client.last_error = "Dish error 1100036: edit times exceed the limit times."
+        mock_boot.return_value = (mock_client, None)
+        mock_update.return_value = False
+
+        updates = [
+            {
+                "item_id": "1001",
+                "item_name": "Nasi Goreng Spesial",
+                "new_fake_price": 25000,
+                "changes": ["PRICE_CHANGE"]
+            }
+        ]
+
+        results = push_c5_shopee_for_merchant(
+            store_metadata={"store_id": "STORE_FLAG", "username": "user"},
+            updates=updates
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "FAILED")
+        self.assertIn("Batas perubahan harga Shopee tercapai", results[0]["error"])
+        self.assertIn("maksimal 1x per hari", results[0]["error"])
+
+    def test_calculate_price_steps_returns_single_price(self):
+        from shopee.core.push_c5 import calculate_price_steps
+        # Shopee tidak menggunakan step push, selalu langsung harga akhir
+        self.assertEqual(calculate_price_steps(10000, 50000), [50000])
+        self.assertEqual(calculate_price_steps(20000, 15000), [15000])
+
 
 if __name__ == "__main__":
     unittest.main()

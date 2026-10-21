@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, or_, and_
 from sqlalchemy.orm import Session, joinedload
 
 from dotenv import load_dotenv
@@ -4214,6 +4214,7 @@ async def parse_c5_endpoint(
     name_changes_count = 0
     price_changes_count = 0
     price_warning_count = 0
+    shopee_price_limit_count = 0
     category_changes_count = 0
     order_changes_count = 0
     photo_changes_count = 0
@@ -4667,6 +4668,49 @@ async def parse_c5_endpoint(
     offline_records_to_sync = []
     seen_invalid_cat_names = set()
 
+    # Pre-fetch riwayat perubahan harga Shopee 24 jam terakhir dari AuditTrail
+    # untuk mendeteksi kuota harian Shopee (maksimal 1x per hari).
+    shopee_price_cooldown_map = {}
+    try:
+        now_utc = datetime.utcnow()
+        twenty_four_hours_ago = now_utc - timedelta(hours=24)
+        recent_shopee_trails = db.query(AuditTrail).filter(
+            AuditTrail.created_at >= twenty_four_hours_ago,
+            or_(
+                and_(
+                    AuditTrail.status.ilike("SUCCESS"),
+                    AuditTrail.field_changed.ilike("%price%")
+                ),
+                AuditTrail.error_message.ilike("%1100036%"),
+                AuditTrail.error_message.ilike("%limit times%"),
+                AuditTrail.error_message.ilike("%exceed%")
+            )
+        ).order_by(AuditTrail.created_at.desc()).all()
+
+        for st in recent_shopee_trails:
+            if st.item_id:
+                iid_key = str(st.item_id).strip()
+                if iid_key and iid_key not in shopee_price_cooldown_map:
+                    c_at = st.created_at
+                    if c_at.tzinfo is not None:
+                        c_at_utc = c_at.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        c_at_utc = c_at
+                    elapsed_sec = (now_utc - c_at_utc).total_seconds()
+                    rem_sec = max(0, 86400 - elapsed_sec)
+                    rem_hours = round(rem_sec / 3600, 1)
+                    available_at_wib = c_at_utc + timedelta(hours=7, seconds=86400)
+                    time_fmt_wib = (c_at_utc + timedelta(hours=7)).strftime("%H:%M WIB")
+                    avail_fmt_wib = available_at_wib.strftime("%H:%M WIB")
+                    shopee_price_cooldown_map[iid_key] = {
+                        "pushed_at_wib": time_fmt_wib,
+                        "available_at_wib": avail_fmt_wib,
+                        "remaining_hours": rem_hours,
+                        "item_name": st.item_name,
+                    }
+    except Exception as ex:
+        logger.warning(f"Error querying recent Shopee price trails: {ex}")
+
     def is_drive_folder_link(value):
         value = str(value or "").strip()
         return "drive.google.com" in value.casefold() and bool(
@@ -4843,6 +4887,7 @@ async def parse_c5_endpoint(
         row_platform = get_val(row, platform_col) or baseline.get("baseline_platform") or ""
         normalized_platform = re.sub(r"[^a-z]", "", str(row_platform).casefold())
         is_grab_platform = normalized_platform in {"grab", "grabfood"}
+        is_shopee_platform = normalized_platform in {"shopee", "shopeefood"}
         invalid_new_item_price = (
             is_new_item
             and normalized_platform in {"gofood", "grab", "grabfood"}
@@ -4981,6 +5026,8 @@ async def parse_c5_endpoint(
         price_changed = False
         price_warning = False
         grab_price_limit_exceeded = False
+        shopee_price_limit_exceeded = False
+        shopee_price_limit_message = ""
         price_diff_percent = 0.0
         price_steps_count = 1
         if new_fake_price is not None:
@@ -4988,16 +5035,36 @@ async def parse_c5_endpoint(
                 price_changed = float(new_fake_price) != float(base_price)
                 price_diff_percent = ((float(new_fake_price) - float(base_price)) / float(base_price)) * 100.0
                 if price_changed and abs(price_diff_percent) > 15.0:
-                    price_warning = True
-                    steps = calculate_price_steps(float(base_price), float(new_fake_price), max_step_pct=0.15)
-                    price_steps_count = len(steps)
-                    if is_grab_platform and price_steps_count > 10:
-                        grab_price_limit_exceeded = True
+                    # Shopee membatasi perubahan harga maksimal 1x per hari dan tidak menggunakan step push
+                    if not is_shopee_platform:
+                        price_warning = True
+                        steps = calculate_price_steps(float(base_price), float(new_fake_price), max_step_pct=0.15)
+                        price_steps_count = len(steps)
+                        if is_grab_platform and price_steps_count > 10:
+                            grab_price_limit_exceeded = True
             else:
                 price_changed = True
 
+        if is_shopee_platform and price_changed:
+            target_iid = str(item_id or (base_rec.get("id") if base_rec else "") or "").strip()
+            cooldown_info = shopee_price_cooldown_map.get(target_iid) if target_iid else None
+            if cooldown_info:
+                shopee_price_limit_exceeded = True
+                shopee_price_limit_message = (
+                    f"Item ini sudah diubah harganya pada {cooldown_info['pushed_at_wib']} "
+                    f"(dapat diubah kembali setelah {cooldown_info['available_at_wib']}). "
+                    f"Shopee membatasi perubahan harga maksimal 1x per hari (24 jam). "
+                    f"Jangan lakukan push harga lagi untuk item ini hari ini!"
+                )
+
         if price_changed:
-            if price_warning:
+            if shopee_price_limit_exceeded:
+                diff_details.append({
+                    "column": "Price",
+                    "old_val": f"Rp {float(base_price):,.0f}" if base_price is not None else "(Baru)",
+                    "new_val": f"Rp {float(new_fake_price):,.0f} (⚠️ Batas Shopee: Sudah ganti harga hari ini - Jangan push lagi!)"
+                })
+            elif price_warning:
                 direction_label = "Kenaikan" if price_diff_percent > 0 else "Penurunan"
                 pct_display = f"{price_diff_percent:+.1f}%"
                 if grab_price_limit_exceeded:
@@ -5127,7 +5194,10 @@ async def parse_c5_endpoint(
         if price_changed:
             change_types.append("PRICE_CHANGE")
             price_changes_count += 1
-            if price_warning and not grab_price_limit_exceeded:
+            if shopee_price_limit_exceeded:
+                change_types.append("SHOPEE_PRICE_LIMIT_EXCEEDED")
+                shopee_price_limit_count += 1
+            elif price_warning and not grab_price_limit_exceeded:
                 change_types.append("PRICE_WARNING_STEP_PUSH")
                 price_warning_count += 1
         if other_changed:
@@ -5171,6 +5241,8 @@ async def parse_c5_endpoint(
             "is_new_category": is_new_category,
             "price_warning": price_warning,
             "grab_price_limit_exceeded": grab_price_limit_exceeded,
+            "shopee_price_limit_exceeded": shopee_price_limit_exceeded,
+            "shopee_price_limit_message": shopee_price_limit_message,
             "price_diff_percent": round(price_diff_percent, 2),
             "category_weight": cat_weight,
             "item_weight": item_weight,
@@ -5300,6 +5372,7 @@ async def parse_c5_endpoint(
             "offline_price_changes": offline_price_changes_count,
             "price_changes": price_changes_count,
             "price_warning_count": price_warning_count,
+            "shopee_price_limit_count": shopee_price_limit_count,
             "other_changes": other_changes_count,
             "new_items_count": new_items_count,
             "new_categories_count": new_categories_count,

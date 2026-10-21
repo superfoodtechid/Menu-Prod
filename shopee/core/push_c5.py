@@ -38,22 +38,12 @@ logger = logging.getLogger("ShopeeC5Push")
 
 
 def calculate_price_steps(old_price: float, new_price: float, max_jump_ratio: float = 0.50) -> list[float]:
-    """Jika kenaikan harga > max_jump_ratio (50%), pecah jadi beberapa tahapan."""
-    if old_price <= 0 or new_price <= old_price:
-        return [new_price]
-    ratio = (new_price - old_price) / old_price
-    if ratio <= max_jump_ratio:
-        return [new_price]
-
-    steps = []
-    curr = old_price
-    while True:
-        curr = round(curr * (1 + max_jump_ratio) / 100) * 100
-        if curr >= new_price:
-            steps.append(new_price)
-            break
-        steps.append(curr)
-    return steps
+    """Menghitung tahapan perubahan harga.
+    Catatan: Shopee membatasi perubahan harga maksimal 1x per hari sehingga
+    step push tidak digunakan agar tidak memicu kuota harian (error 1100036).
+    Fungsi ini selalu mengembalikan harga akhir langsung [new_price].
+    """
+    return [new_price]
 
 
 def download_image_bytes(photo_link: str) -> tuple[bytes, str, str]:
@@ -553,46 +543,31 @@ def push_c5_shopee_for_merchant(
                 )
                 final_price = target_selling_price
                 final_list_price = target_list_price
-                price_steps = calculate_price_steps(list_price, target_list_price) if list_price > 0 else [target_list_price]
                 promo_note = f" (Promo aktif: list_price Rp{target_list_price:,.0f}, promo Rp{target_selling_price:,.0f})"
             else:
                 final_price = float(raw_price)
                 final_list_price = final_price
-                price_steps = calculate_price_steps(orig_price, final_price) if orig_price > 0 else [final_price]
                 promo_note = ""
 
-            update_success, last_err = True, ""
-
-            for step_val in price_steps:
-                if is_promo:
-                    step_list = step_val
-                    if list_price > orig_price > 0:
-                        d_rat = (list_price - orig_price) / list_price
-                        step_sell = round(step_list * (1.0 - d_rat))
-                    elif disc_pct > 0:
-                        d_rat = (disc_pct / 10000.0) if disc_pct > 100 else (disc_pct / 100.0)
-                        step_sell = round(step_list * (1.0 - d_rat))
-                    else:
-                        step_sell = step_list
-                    if step_sell > step_list:
-                        step_sell = step_list
+            # Kirim perubahan harga langsung dalam 1 kali request tanpa step push
+            # agar tidak menghabiskan kuota harian Shopee (maksimal 1x per hari).
+            ok = update_dish(
+                client=client, store_id=store_id, catalog_id=catalog_id,
+                dish_id=target_dish_id, name=target_name, price=final_price,
+                description=target_desc, available=target_avail,
+                picture=target_pic, opt_groups=opt_groups, existing_dish=existing_dish,
+                list_price=final_list_price, include_price_mutation=True
+            )
+            if ok:
+                update_success, last_err = True, ""
+            else:
+                update_success = False
+                raw_err = client.last_error or "Update dish API returned error."
+                if "1100036" in raw_err or "limit times" in raw_err.lower() or "exceed the limit times" in raw_err.lower():
+                    last_err = "Batas perubahan harga Shopee tercapai (maksimal 1x per hari). Mohon jangan lakukan push harga lagi untuk item ini hari ini."
                 else:
-                    step_list = step_val
-                    step_sell = step_val
-
-                ok = update_dish(
-                    client=client, store_id=store_id, catalog_id=catalog_id,
-                    dish_id=target_dish_id, name=target_name, price=step_sell,
-                    description=target_desc, available=target_avail,
-                    picture=target_pic, opt_groups=opt_groups, existing_dish=existing_dish,
-                    list_price=step_list, include_price_mutation=True
-                )
-                if not ok:
-                    update_success = False
-                    last_err = client.last_error or "Update dish API returned error."
-                    logger.error(f"❌ [PUSH_C5] update_dish via API gagal untuk '{target_name}' (ID: {item_id}): {last_err}")
-                    break
-                time.sleep(0.2)
+                    last_err = raw_err
+                logger.error(f"❌ [PUSH_C5] update_dish via API gagal untuk '{target_name}' (ID: {item_id}): {last_err}")
         else:
             # Metadata-only update (nama, kategori, deskripsi, foto tanpa ubah harga).
             # Kirim payload bersih persis seperti web portal agar tidak memicu batas kuota perubahan harga harian.
@@ -610,7 +585,11 @@ def push_c5_shopee_for_merchant(
                 update_success, last_err = True, ""
             else:
                 update_success = False
-                last_err = client.last_error or "Update dish API returned error."
+                raw_err = client.last_error or "Update dish API returned error."
+                if "1100036" in raw_err or "limit times" in raw_err.lower() or "exceed the limit times" in raw_err.lower():
+                    last_err = "Batas perubahan harga Shopee tercapai (maksimal 1x per hari). Mohon jangan lakukan push harga lagi untuk item ini hari ini."
+                else:
+                    last_err = raw_err
                 logger.error(f"❌ [PUSH_C5] update_dish metadata via API gagal untuk '{target_name}' (ID: {item_id}): {last_err}")
 
         if update_success:
