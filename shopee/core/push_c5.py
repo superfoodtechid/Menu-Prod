@@ -27,6 +27,7 @@ from shopee.core.item.edit import (
     update_dish,
     update_category,
     reorder_categories,
+    reorder_dishes,
     edit_dish_upload_image,
     _sync_store_session,
     _resolve_target_merchant_name,
@@ -524,6 +525,8 @@ def push_c5_shopee_for_merchant(
         disc_pct = float(existing_dish.get("discount_percentage", 0))
         is_promo = (list_price > orig_price > 0) or (disc_pct > 0) or (existing_dish.get("discount_status") == 1)
 
+        target_dish_id = int(item_id) if str(item_id).isdigit() else item_id
+
         if want_price and raw_price is not None:
             target_list_price = float(raw_price)
             new_real_price = upd.get("new_real_price")
@@ -579,7 +582,7 @@ def push_c5_shopee_for_merchant(
 
                 ok = update_dish(
                     client=client, store_id=store_id, catalog_id=catalog_id,
-                    dish_id=int(item_id), name=target_name, price=step_sell,
+                    dish_id=target_dish_id, name=target_name, price=step_sell,
                     description=target_desc, available=target_avail,
                     picture=target_pic, opt_groups=opt_groups, existing_dish=existing_dish,
                     list_price=step_list, include_price_mutation=True
@@ -598,7 +601,7 @@ def push_c5_shopee_for_merchant(
             promo_note = ""
             ok = update_dish(
                 client=client, store_id=store_id, catalog_id=catalog_id,
-                dish_id=int(item_id), name=target_name, price=final_price,
+                dish_id=target_dish_id, name=target_name, price=final_price,
                 description=target_desc, available=target_avail,
                 picture=target_pic, opt_groups=opt_groups, existing_dish=existing_dish,
                 list_price=final_list_price, include_price_mutation=False
@@ -664,76 +667,145 @@ def push_c5_shopee_for_merchant(
         or (not (u.get("changes") or u.get("change_types")))
         for u in updates
     )
-    if not has_any_cat_changes:
+    has_any_item_order_changes = any(
+        ("ITEM_ORDER_CHANGE" in (u.get("changes") or u.get("change_types") or []))
+        or ("NEW_ITEM" in (u.get("changes") or u.get("change_types") or []))
+        or ("CATEGORY_CHANGE" in (u.get("changes") or u.get("change_types") or []))
+        or (not (u.get("changes") or u.get("change_types")))
+        for u in updates
+    )
+    if not has_any_cat_changes and not has_any_item_order_changes:
         return results
 
-    try:
-        valid_cat_ids = {str(cid) for cid in cat_obj_map.keys()}
-        c5_name_to_cid = {}
-        for upd in updates:
-            c_name = (upd.get("category") or "").strip().lower()
-            c_id = str(upd.get("category_id") or "").strip()
-            if c_name and c_id and c_id in valid_cat_ids and c_name not in c5_name_to_cid:
-                c5_name_to_cid[c_name] = c_id
+    valid_cat_ids = {str(cid) for cid in cat_obj_map.keys()}
+    c5_name_to_cid = {}
+    for upd in updates:
+        c_name = (upd.get("category") or "").strip().lower()
+        c_id = str(upd.get("category_id") or "").strip()
+        if c_name and c_id and c_id in valid_cat_ids and c_name not in c5_name_to_cid:
+            c5_name_to_cid[c_name] = c_id
 
-        ordered_c5_cat_names = []
-        category_weights = {}
-        for upd in updates:
-            for c_name in (upd.get("c5_categories") or []):
-                if c_name and c_name not in ordered_c5_cat_names:
-                    ordered_c5_cat_names.append(c_name)
-            c_name_upd = (upd.get("category") or "").strip()
-            cw = upd.get("category_weight")
-            if c_name_upd and cw is not None and c_name_upd.lower() not in category_weights:
-                try:
-                    category_weights[c_name_upd.lower()] = int(cw)
-                except (ValueError, TypeError):
-                    pass
+    if has_any_cat_changes:
+        try:
+            ordered_c5_cat_names = []
+            category_weights = {}
+            for upd in updates:
+                for c_name in (upd.get("c5_categories") or []):
+                    if c_name and c_name not in ordered_c5_cat_names:
+                        ordered_c5_cat_names.append(c_name)
+                c_name_upd = (upd.get("category") or "").strip()
+                cw = upd.get("category_weight")
+                if c_name_upd and cw is not None and c_name_upd.lower() not in category_weights:
+                    try:
+                        category_weights[c_name_upd.lower()] = int(cw)
+                    except (ValueError, TypeError):
+                        pass
 
-        if not ordered_c5_cat_names and category_weights:
-            sorted_c = sorted(category_weights.items(), key=lambda x: x[1])
-            ordered_c5_cat_names = [x[0] for x in sorted_c]
+            if not ordered_c5_cat_names and category_weights:
+                sorted_c = sorted(category_weights.items(), key=lambda x: x[1])
+                ordered_c5_cat_names = [x[0] for x in sorted_c]
 
-        if not ordered_c5_cat_names:
+            if not ordered_c5_cat_names:
+                for upd in updates:
+                    c_name = (upd.get("category") or "").strip()
+                    if c_name and c_name not in ordered_c5_cat_names:
+                        ordered_c5_cat_names.append(c_name)
+
+            if ordered_c5_cat_names or category_weights:
+                target_cat_ids = []
+                seen_cat_ids = set()
+                for c_name in ordered_c5_cat_names:
+                    c_key = (c_name or "").strip().lower()
+                    cid = c5_name_to_cid.get(c_key) or cat_map.get(c_key)
+                    if not cid and c_name in valid_cat_ids:
+                        cid = c_name
+                    if cid and str(cid) not in seen_cat_ids:
+                        target_cat_ids.append(str(cid))
+                        seen_cat_ids.add(str(cid))
+
+                current_sorted_cats = sorted(catalogs, key=lambda c: int(c.get("rank") or 0))
+                current_cat_ids = []
+                for c in current_sorted_cats:
+                    cid = str(c.get("id") or "")
+                    if cid:
+                        current_cat_ids.append(cid)
+                        if cid not in seen_cat_ids:
+                            target_cat_ids.append(cid)
+                            seen_cat_ids.add(cid)
+
+                if target_cat_ids and target_cat_ids != current_cat_ids:
+                    logger.info(f"Mengatur urutan kategori Shopee: {target_cat_ids}")
+                    ranks_payload = [
+                        {"id": str(cid), "rank": idx + 1}
+                        for idx, cid in enumerate(target_cat_ids)
+                    ]
+                    ok_reorder = reorder_categories(client, store_id, ranks_payload)
+                    if ok_reorder:
+                        logger.info("Urutan kategori Shopee berhasil diperbarui")
+                    else:
+                        logger.warning(f"Gagal mengatur urutan kategori Shopee: {client.last_error}")
+        except Exception as ex_cat_sort:
+            logger.warning(f"Pengecualian saat mengatur urutan kategori Shopee: {ex_cat_sort}")
+
+    # ── Mengatur urutan item di setiap kategori berdasarkan susunan C5 ──
+    if has_any_item_order_changes:
+        try:
+            cat_updates_map = {}
             for upd in updates:
                 c_name = (upd.get("category") or "").strip()
-                if c_name and c_name not in ordered_c5_cat_names:
-                    ordered_c5_cat_names.append(c_name)
-
-        if ordered_c5_cat_names or category_weights:
-            target_cat_ids = []
-            seen_cat_ids = set()
-            for c_name in ordered_c5_cat_names:
-                c_key = (c_name or "").strip().lower()
-                cid = c5_name_to_cid.get(c_key) or cat_map.get(c_key)
-                if not cid and c_name in valid_cat_ids:
-                    cid = c_name
-                if cid and str(cid) not in seen_cat_ids:
-                    target_cat_ids.append(str(cid))
-                    seen_cat_ids.add(str(cid))
-
-            current_sorted_cats = sorted(catalogs, key=lambda c: int(c.get("rank") or 0))
-            current_cat_ids = []
-            for c in current_sorted_cats:
-                cid = str(c.get("id") or "")
+                cid = None
+                if c_name:
+                    c_key = c_name.lower()
+                    cid = c5_name_to_cid.get(c_key) or cat_map.get(c_key)
+                if not cid:
+                    item_id = str(upd.get("item_id") or "")
+                    if item_id in dish_map:
+                        cid = str(dish_map[item_id].get("catalog_id") or "")
                 if cid:
-                    current_cat_ids.append(cid)
-                    if cid not in seen_cat_ids:
-                        target_cat_ids.append(cid)
-                        seen_cat_ids.add(cid)
+                    cid_str = str(cid)
+                    if cid_str not in cat_updates_map:
+                        cat_updates_map[cid_str] = []
+                    item_id = str(upd.get("item_id") or "")
+                    if item_id and item_id not in cat_updates_map[cid_str]:
+                        cat_updates_map[cid_str].append(item_id)
 
-            if target_cat_ids and target_cat_ids != current_cat_ids:
-                logger.info(f"Mengatur urutan kategori Shopee: {target_cat_ids}")
-                ranks_payload = [
-                    {"id": str(cid), "rank": idx + 1}
-                    for idx, cid in enumerate(target_cat_ids)
-                ]
-                ok_reorder = reorder_categories(client, store_id, ranks_payload)
-                if ok_reorder:
-                    logger.info("Urutan kategori Shopee berhasil diperbarui")
-                else:
-                    logger.warning(f"Gagal mengatur urutan kategori Shopee: {client.last_error}")
-    except Exception as ex_cat_sort:
-        logger.warning(f"Pengecualian saat mengatur urutan kategori Shopee: {ex_cat_sort}")
+            for cat in catalogs:
+                cid_str = str(cat.get("id") or "")
+                existing_dishes = cat.get("dishes") or []
+                if not existing_dishes:
+                    continue
+
+                current_dishes = sorted(existing_dishes, key=lambda d: int(d.get("rank") or 0))
+                current_dish_ids = [str(d.get("id")) for d in current_dishes if d.get("id")]
+
+                c5_item_ids = cat_updates_map.get(cid_str, [])
+                if not c5_item_ids:
+                    continue
+
+                target_dish_ids = []
+                seen_dish_ids = set()
+                for did in c5_item_ids:
+                    if did in current_dish_ids and did not in seen_dish_ids:
+                        target_dish_ids.append(did)
+                        seen_dish_ids.add(did)
+
+                for did in current_dish_ids:
+                    if did not in seen_dish_ids:
+                        target_dish_ids.append(did)
+                        seen_dish_ids.add(did)
+
+                if target_dish_ids and len(target_dish_ids) > 1 and target_dish_ids != current_dish_ids:
+                    logger.info(f"Mengatur urutan item kategori {cid_str} di Shopee: {target_dish_ids}")
+                    dish_ranks = [
+                        {"id": str(did), "rank": idx + 1}
+                        for idx, did in enumerate(target_dish_ids)
+                    ]
+                    ok_dish_reorder = reorder_dishes(client, store_id, dish_ranks)
+                    if ok_dish_reorder:
+                        logger.info(f"Urutan item kategori {cid_str} Shopee berhasil diperbarui")
+                    else:
+                        logger.warning(f"Gagal mengatur urutan item kategori {cid_str}: {client.last_error}")
+        except Exception as ex_dish_sort:
+            logger.warning(f"Pengecualian saat mengatur urutan item Shopee: {ex_dish_sort}")
 
     return results

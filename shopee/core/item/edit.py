@@ -348,6 +348,30 @@ def reorder_categories(client: ShopeeModifyClient, store_id: str, ranks: list[di
         client.last_error = str(e)
     return False
 
+def reorder_dishes(client: ShopeeModifyClient, store_id: str, ranks: list[dict]) -> bool:
+    """
+    Mengatur urutan item (dishes) dalam kategori / toko.
+    ranks format: [{"id": "3148484252139008", "rank": 1}, {"id": "3148483850695168", "rank": 2}, ...]
+    Endpoint: POST https://foody.shopee.co.id/api/seller/store/dishes/-/rank
+    """
+    url = "https://foody.shopee.co.id/api/seller/store/dishes/-/rank"
+    formatted_ranks = []
+    for item in ranks:
+        formatted_ranks.append({
+            "id": str(item["id"]),
+            "rank": int(item["rank"])
+        })
+    payload = {"ranks": formatted_ranks}
+    try:
+        resp = client.session.post(url, json=payload, headers=client._seller_headers(override_entity_id=store_id), timeout=15)
+        data = resp.json()
+        if data.get("code") == 0:
+            return True
+        client.last_error = f"API error: code={data.get('code')} msg={data.get('msg')}"
+    except Exception as e:
+        client.last_error = str(e)
+    return False
+
 
 def edit_dish_via_portal(
     store_metadata: dict,

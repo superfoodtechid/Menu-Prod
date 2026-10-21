@@ -222,6 +222,85 @@ class TestShopeePushFlags(unittest.TestCase):
         self.assertNotIn("flash_sale_dish_discount", payload)
         self.assertNotIn("store_id", payload)
 
+    def test_delete_category_api(self):
+        from shopee.core.item.delete import delete_category
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"code": 0, "msg": "success"}
+        mock_client.session.delete.return_value = mock_resp
+        mock_client._seller_headers.return_value = {"Header": "Test"}
+
+        ok = delete_category(mock_client, "STORE_123", "3312666246514176")
+        self.assertTrue(ok)
+        mock_client.session.delete.assert_called_once_with(
+            "https://foody.shopee.co.id/api/seller/store/catalogs/3312666246514176",
+            headers={"Header": "Test"},
+            timeout=15
+        )
+
+    def test_reorder_dishes_api(self):
+        from shopee.core.item.edit import reorder_dishes
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"code": 0, "msg": "success"}
+        mock_client.session.post.return_value = mock_resp
+        mock_client._seller_headers.return_value = {"Header": "Test"}
+
+        ranks = [
+            {"id": "3148484252139008", "rank": 1},
+            {"id": "3148483850695168", "rank": 2},
+            {"id": "3148484649480704", "rank": 3}
+        ]
+        ok = reorder_dishes(mock_client, "STORE_123", ranks)
+        self.assertTrue(ok)
+        mock_client.session.post.assert_called_once_with(
+            "https://foody.shopee.co.id/api/seller/store/dishes/-/rank",
+            json={"ranks": ranks},
+            headers={"Header": "Test"},
+            timeout=15
+        )
+
+    @patch("shopee.core.push_c5.reorder_dishes")
+    @patch("shopee.core.push_c5.update_dish")
+    @patch("shopee.core.push_c5._boot_push_client")
+    def test_item_reordering_within_category(self, mock_boot, mock_update, mock_reorder_dishes):
+        mock_client = MagicMock()
+        mock_client.entity_id = "STORE_FLAG"
+        # Catalog with 3 dishes initially in rank 1, 2, 3
+        cat_dishes = [
+            {"id": "DISH_1", "catalog_id": 50, "rank": 1, "name": "Item 1", "price": "1000000000", "available": True},
+            {"id": "DISH_2", "catalog_id": 50, "rank": 2, "name": "Item 2", "price": "1000000000", "available": True},
+            {"id": "DISH_3", "catalog_id": 50, "rank": 3, "name": "Item 3", "price": "1000000000", "available": True},
+        ]
+        mock_client.get_store_dishes.return_value = [
+            {"id": 50, "name": "Makanan Utama", "rank": 1, "dishes": cat_dishes}
+        ]
+        mock_boot.return_value = (mock_client, None)
+        mock_update.return_value = True
+        mock_reorder_dishes.return_value = True
+
+        # C5 specifies updates in new order: DISH_3 first, then DISH_1
+        updates = [
+            {"item_id": "DISH_3", "item_name": "Item 3", "category": "Makanan Utama", "changes": ["ITEM_ORDER_CHANGE"]},
+            {"item_id": "DISH_1", "item_name": "Item 1", "category": "Makanan Utama", "changes": ["ITEM_ORDER_CHANGE"]},
+        ]
+
+        results = push_c5_shopee_for_merchant(
+            store_metadata={"store_id": "STORE_FLAG", "username": "user"},
+            updates=updates
+        )
+
+        self.assertEqual(len(results), 2)
+        mock_reorder_dishes.assert_called_once()
+        _, call_args, call_kwargs = mock_reorder_dishes.mock_calls[0]
+        # Target rank should be DISH_3 (rank 1), DISH_1 (rank 2), DISH_2 (rank 3)
+        expected_ranks = [
+            {"id": "DISH_3", "rank": 1},
+            {"id": "DISH_1", "rank": 2},
+            {"id": "DISH_2", "rank": 3},
+        ]
+        self.assertEqual(call_args[2], expected_ranks)
+
 
 if __name__ == "__main__":
     unittest.main()
