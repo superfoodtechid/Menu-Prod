@@ -28,6 +28,60 @@ def _sanitize_name(name: str) -> str:
     return clean or "Unknown"
 
 
+def _persist_drive_photo_baseline(folder_url: str, sid: str, dishes: List[Dict[str, Any]]) -> None:
+    """Persist Drive file identities for the items in a completed menu pull."""
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", str(folder_url or ""))
+    api_key = os.getenv("GOOGLE_DRIVE_API_KEY")
+    if not match or not api_key or not sid:
+        return
+
+    folder_id = match.group(1) or match.group(2)
+    try:
+        response = requests.get(
+            "https://www.googleapis.com/drive/v3/files",
+            params={
+                "q": f"'{folder_id}' in parents and trashed = false",
+                "fields": "files(id,name,mimeType)",
+                "pageSize": 1000,
+                "key": api_key,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        files = [f for f in response.json().get("files", []) if str(f.get("mimeType", "")).startswith("image/")]
+        by_filename = {str(f.get("name", "")).casefold(): f for f in files}
+
+        name_counts = {}
+        by_id, by_name = {}, {}
+        for dish in dishes:
+            item_name = str(dish.get("item_name") or dish.get("Item") or dish.get("nama_item") or "").strip()
+            item_id = str(dish.get("item_id") or dish.get("dish_id") or dish.get("Item ID") or "").strip()
+            if not item_name:
+                continue
+            norm_name = re.sub(r"[^a-z0-9]+", " ", item_name.casefold()).strip()
+            name_counts[norm_name] = name_counts.get(norm_name, 0) + 1
+            unique_name = item_name
+            if name_counts[norm_name] > 1:
+                unique_name = f"{item_name} ({item_id or name_counts[norm_name]})"
+            file = by_filename.get(f"{_sanitize_name(unique_name)}.jpg".casefold())
+            if not file:
+                continue
+            record = {"file_id": file["id"], "folder_id": folder_id}
+            if item_id:
+                by_id[item_id] = record
+            by_name.setdefault(norm_name, record)
+
+        if not by_id and not by_name:
+            return
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "photo_baselines")
+        os.makedirs(output_dir, exist_ok=True)
+        safe_sid = _sanitize_name(sid)
+        with open(os.path.join(output_dir, f"{safe_sid}.json"), "w", encoding="utf-8") as f:
+            json.dump({"sid": str(sid), "folder_id": folder_id, "by_id": by_id, "by_name": by_name}, f, ensure_ascii=False)
+    except Exception as exc:
+        logger.warning("Could not persist Drive photo baseline for SID %s: %s", sid, exc)
+
+
 # =====================================================================
 # Google Drive Service Account Implementation
 # =====================================================================
@@ -381,6 +435,7 @@ def sync_menu_photos_via_appscript(
                 except Exception as ec:
                     logger.warning(f"Warning uploading photo chunk: {ec}")
 
+        _persist_drive_photo_baseline(folder_url, sid, dishes)
         return folder_url
     except Exception as exc:
         logger.error(f"Exception calling Google Apps Script Web App: {exc}")
@@ -452,6 +507,7 @@ def sync_menu_photos_to_drive(
                                 future.result()
                             except Exception:
                                 pass
+                _persist_drive_photo_baseline(folder_url, sid, dishes)
                 return folder_url
         except Exception as e_sa:
             logger.warning(f"Service Account sync failed: {e_sa}. Falling back to Apps Script Web App.")
