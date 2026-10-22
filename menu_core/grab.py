@@ -223,6 +223,23 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
         except Exception as e_db:
             print(f"   ⚠️ Gagal memuat harga offline dari DB: {e_db}")
 
+    # ── Sinkronisasi Foto Menu ke Folder Google Drive ──
+    drive_folder_url = None
+    try:
+        from menu_core.gdrive_service import sync_menu_photos_to_drive
+        owner_name = store_metadata.get("owner") or "Default Owner"
+        listing_name = nama_resto or "GrabFood Outlet"
+        sid = str(store_id or "").strip()
+        drive_folder_url = sync_menu_photos_to_drive(
+            owner_name=owner_name,
+            platform="GrabFood",
+            listing_name=listing_name,
+            sid=sid,
+            dishes=[{"item_name": it.get("Nama item"), "photo_url": it.get("Link foto"), "item_id": it.get("Item ID")} for it in matched_items]
+        )
+    except Exception as e_drive:
+        print(f"   ⚠️ Gagal sinkronisasi foto GrabFood ke Google Drive: {e_drive}")
+
     try:
         wb = openpyxl.load_workbook(template_path)
         
@@ -256,6 +273,9 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
             item_id_str = str(item.get('Item ID', '')).strip()
             prev_row = prev_user_data.get(item_id_str, {})
                 
+            # Gunakan Drive folder URL jika tersedia, jika tidak fallback ke CDN
+            photo_link_val = drive_folder_url if drive_folder_url else item.get('Link foto', '')
+
             mapping = {
                 'OFD': 'GrabFood',
                 'Listing Name': item.get('Nama panjang', nama_resto),
@@ -267,7 +287,7 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
                 'Category': item.get('Nama kategori', ''),
                 'Item ID': item.get('Item ID', ''),
                 'Item': item.get('Nama item', ''),
-                'Photo Link': item.get('Link foto', ''),
+                'Photo Link': photo_link_val,
                 'Description': item.get('Deskripsi item', ''),
                 'Keyword': '',
                 'Total Sold': item.get('Jumlah terjual', 0),

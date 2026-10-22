@@ -4,7 +4,7 @@ import requests
 from typing import Optional
 from dotenv import load_dotenv, dotenv_values
 
-DEFAULT_APPSCRIPT_URL = "https://script.google.com/macros/s/AKfycbww-dv6C_vQAfsulCfrduMKNz6RuodcOOtQnprWcZ3mMZ0k2sfZagywVYNkRrhqPoM9pg/exec"
+DEFAULT_APPSCRIPT_URL = ""
 DEFAULT_FOLDER_ID = "14EFVOjND6brFT6BKdXu5dWJBErbSMqie"
 
 def upload_combined_to_drive(file_path: str, outlet_name: str, custom_filename: Optional[str] = None) -> Optional[str]:
@@ -21,6 +21,9 @@ def upload_combined_to_drive(file_path: str, outlet_name: str, custom_filename: 
         # Read fresh values directly from .env file to guarantee no stale cached environment variables
         env_vals = dotenv_values()
         target_url = env_vals.get("GDRIVE_APPSCRIPT_URL") or os.getenv("GDRIVE_APPSCRIPT_URL") or DEFAULT_APPSCRIPT_URL
+        if not target_url:
+            print("❌ GDRIVE_APPSCRIPT_URL tidak terdefinisi di .env")
+            return None
         target_folder = env_vals.get("GDRIVE_PARENT_FOLDER_ID") or env_vals.get("GDRIVE_FOLDER_ID") or os.getenv("GDRIVE_FOLDER_ID") or DEFAULT_FOLDER_ID
 
         # Membaca file dan encode ke base64

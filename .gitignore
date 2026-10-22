@@ -100,5 +100,9 @@ council-report-*.html
 council-transcript-*.md
 
 # Temporary API responses
+grab/API/menu-response-*.json
 shopee/API/menu-response-*.json
 Gofood/outlet_mapping.json
+test_artifacts/
+.vscode/
+

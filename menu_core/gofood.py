@@ -505,6 +505,25 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             }
             all_dishes.append(dish_obj)
             
+    # ── Sinkronisasi Foto Menu ke Folder Google Drive ──
+    drive_folder_url = None
+    if all_dishes:
+        try:
+            from menu_core.gdrive_service import sync_menu_photos_to_drive
+            owner_name = store_metadata.get("owner") or "Default Owner"
+            first_dish = all_dishes[0]
+            listing_name = first_dish.get('nama_panjang') or store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or "GoFood Outlet"
+            sid = str(first_dish.get('store_id') or store_metadata.get('store_id') or "").strip()
+            drive_folder_url = sync_menu_photos_to_drive(
+                owner_name=owner_name,
+                platform="GoFood",
+                listing_name=listing_name,
+                sid=sid,
+                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes]
+            )
+        except Exception as e_drive:
+            print(f"⚠️ Gagal sinkronisasi foto GoFood ke Google Drive: {e_drive}")
+
     # Build standard output DataFrames
     item_cols = [
         'OFD', 'Outlet Name', 'Outlet Short Name', 'Outlet Link', 'SID',
@@ -518,9 +537,10 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     
     item_data = []
     for d in all_dishes:
+        photo_link_val = drive_folder_url if drive_folder_url else d['link_foto']
         item_data.append([
             'GoFood', d['nama_panjang'], d['nama_pendek'], d['link_outlet'], d['store_id'],
-            d['cat_id'], d['nama_kategori'], d['item_id'], d['nama_item'], d['link_foto'],
+            d['cat_id'], d['nama_kategori'], d['item_id'], d['nama_item'], photo_link_val,
             d['deskripsi_item'], '', d['jumlah_terjual'], d['jumlah_modifier_group'],
             d['jumlah_modifier'], d['ketersediaan'], d['visibility'],
             d['harga_sebelum_promo'], d['harga_setelah_promo'], d['slash_pct'], d['slash_rp'],
