@@ -593,7 +593,7 @@ def sync_sheets(db: Session = Depends(get_db)):
         nama_portal = str(portal_raw).strip() if pd.notna(portal_raw) and str(portal_raw).strip() not in ("-", "", "nan", "None") else None
 
         merchant_name = str(row.get("Outlet") or row.get("Merchant Name") or brand or nama_outlet or "").strip()
-        cabang = brand or str(row.get("Cabang", "")).strip() or None
+        cabang = nama_resto_final or nama_outlet or brand or str(row.get("Cabang", "")).strip() or None
 
         # 3. Upsert Outlet
         db_outlet = None
@@ -5774,8 +5774,12 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
 
     # ── Field Character Length Validations (All Platforms) ──
     # Nama item <= 60, Category <= 80, Description <= 250
+    # Note: Skip DELETE_ITEM because deleted items are existing baseline items being removed,
+    # not new mutations to be published.
     invalid_length_errors = []
     for item in request.updates:
+        if "DELETE_ITEM" in (item.changes or []):
+            continue
         target_name = (item.item_name_new or item.item_name or "").strip()
         if len(target_name) > 60:
             invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks 60)")

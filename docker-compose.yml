@@ -20,6 +20,7 @@ services:
       - ./data:/app/data
       - ./main.py:/app/main.py
       - ./login_gofood.py:/app/login_gofood.py
+      - ./O. C5 .xlsx:/app/O. C5 .xlsx:ro
       - ./Gofood:/app/Gofood
       - ./shopee:/app/shopee
       - ./grab:/app/grab
