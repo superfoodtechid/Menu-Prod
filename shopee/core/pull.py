@@ -582,6 +582,23 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             except Exception as prev_err:
                 print(f"[⚠️] Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
 
+        # ── Sinkronisasi Foto Menu ke Folder Google Drive ──
+        drive_folder_url = None
+        try:
+            from menu_core.gdrive_service import sync_menu_photos_to_drive
+            owner_name = store_metadata.get("owner") or "Default Owner"
+            listing_name = raw_resto_final or raw_outlet or "ShopeeFood Outlet"
+            sid = str(store_metadata.get("store_id") or "").strip()
+            drive_folder_url = sync_menu_photos_to_drive(
+                owner_name=owner_name,
+                platform="ShopeeFood",
+                listing_name=listing_name,
+                sid=sid,
+                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes]
+            )
+        except Exception as e_drive:
+            print(f"[⚠️] Gagal sinkronisasi foto ke Google Drive: {e_drive}")
+
         try:
             wb = openpyxl.load_workbook(template_path)
             
@@ -597,6 +614,9 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 dish_id_str = str(d.get('dish_id', '')).strip()
                 prev_row = prev_user_data.get(dish_id_str, {})
 
+                # Gunakan Drive folder URL jika tersedia, jika tidak fallback ke CDN
+                photo_link_val = drive_folder_url if drive_folder_url else d['link_foto']
+
                 mapping = {
                     'OFD': d['ofd'],
                     'Listing Name': d['nama_panjang'],
@@ -608,7 +628,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     'Category': d['nama_kategori'],
                     'Item ID': d['dish_id'],
                     'Item': d['nama_item'],
-                    'Photo Link': d['link_foto'],
+                    'Photo Link': photo_link_val,
                     'Description': d['deskripsi_item'],
                     'Keyword': d['keyword'],
                     'Total Sold': d['jumlah_terjual'],

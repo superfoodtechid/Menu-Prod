@@ -837,6 +837,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "job_id": str(job_id),
                 "store_id": outlet.store_id,
                 "merchant_name": outlet.merchant_name,
+                "owner": outlet.owner,
                 "nama_outlet": outlet.nama_outlet,
                 "cabang": outlet.cabang,
                 "nama_resto_final": outlet.nama_resto_final,
@@ -904,6 +905,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "job_id": str(job_id),
                 "store_id": outlet.store_id,
                 "merchant_name": outlet.merchant_name,
+                "owner": outlet.owner,
                 "nama_outlet": outlet.nama_outlet,
                 "cabang": outlet.cabang,
                 "nama_resto_final": outlet.nama_resto_final,
@@ -950,6 +952,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "job_id": str(job_id),
                 "store_id": outlet.store_id,
                 "merchant_name": outlet.merchant_name,
+                "owner": outlet.owner,
                 "nama_outlet": outlet.nama_outlet,
                 "cabang": outlet.cabang,
                 "nama_resto_final": outlet.nama_resto_final,
@@ -2902,8 +2905,14 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                 is_new_cat = ("NEW_CATEGORY" in change_types) or (is_dict_changes and upd["changes"].get("is_new_category"))
                 is_cat_changed = ("CATEGORY_CHANGE" in change_types) or (is_dict_changes and upd["changes"].get("category_changed"))
 
+                is_explicit_new_item = (
+                    ("NEW_ITEM" in change_types)
+                    or (is_dict_changes and bool(upd.get("changes", {}).get("is_new_item")))
+                    or (not item_id)
+                )
+
                 item_info = go_items_by_id.get(item_id) if item_id else None
-                if not item_info and not is_deleted_item:
+                if not item_info and not is_deleted_item and not is_explicit_new_item:
                     for candidate_name in (upd.get("baseline_name"), upd.get("item_name"), new_name):
                         if candidate_name and norm_str(candidate_name) in go_items_by_name:
                             item_info = go_items_by_name[norm_str(candidate_name)]
@@ -2911,7 +2920,7 @@ def _push_c5_gofood_for_merchant(email: str, password: str, merchant_id: str, up
                                 item_id = str(item_info.get("id") or "")
                             break
 
-                is_new_item = (
+                is_new_item = is_explicit_new_item or (
                     (("NEW_ITEM" in change_types) or (is_dict_changes and upd["changes"].get("is_new_item")) or (not item_id))
                     and item_info is None
                 )
@@ -4724,6 +4733,19 @@ async def parse_c5_endpoint(
             re.search(r"/folders/[a-zA-Z0-9_-]+|[?&]id=[a-zA-Z0-9_-]+", value)
         )
 
+    c5_explicit_ids_by_sid = {}
+    for r in rows[1:]:
+        if not r or all(v is None for v in r) or is_c5_reserved_row(r):
+            continue
+        r_sid = get_val(r, sid_col) or "STORE-DEFAULT"
+        r_iid = str(get_val(r, item_id_col) or "").strip()
+        if r_iid in ("-", "NEW_ITEM", "TAMBAH_ITEM", "None", "nan", "#N/A"):
+            r_iid = ""
+        if r_sid not in c5_explicit_ids_by_sid:
+            c5_explicit_ids_by_sid[r_sid] = set()
+        if r_iid:
+            c5_explicit_ids_by_sid[r_sid].add(r_iid)
+
     for r_idx, row in enumerate(rows[1:], start=2):
         if not row or all(v is None for v in row) or is_c5_reserved_row(row):
             continue
@@ -4756,6 +4778,12 @@ async def parse_c5_endpoint(
         curr_fake_raw = get_val(row, curr_fake_col) if curr_fake_col else ""
         item_name_imp = get_val(row, item_name_imp_col) if item_name_imp_col else ""
 
+        raw_item_id = str(item_id or "").strip()
+        if raw_item_id in ("-", "NEW_ITEM", "TAMBAH_ITEM", "None", "nan", "#N/A"):
+            item_id = ""
+        else:
+            item_id = raw_item_id
+
         display_name = item_name_imp.strip() if item_name_imp else item_name
         if not item_id and not display_name:
             continue
@@ -4778,18 +4806,41 @@ async def parse_c5_endpoint(
         base_rec = None
         if item_id and item_id in baseline["by_id"]:
             base_rec = baseline["by_id"][item_id]
-        elif display_name and norm_str(display_name) in baseline["by_name"]:
-            base_rec = baseline["by_name"][norm_str(display_name)]
-        elif item_name and norm_str(item_name) in baseline["by_name"]:
-            base_rec = baseline["by_name"][norm_str(item_name)]
+        elif not item_id:
+            # If Item ID was omitted in C5, candidate matching by name is only allowed
+            # if the baseline ID is not explicitly claimed by another row in C5
+            # and has not already been claimed/parsed.
+            candidate_rec = None
+            if display_name and norm_str(display_name) in baseline["by_name"]:
+                candidate_rec = baseline["by_name"][norm_str(display_name)]
+            elif item_name and norm_str(item_name) in baseline["by_name"]:
+                candidate_rec = baseline["by_name"][norm_str(item_name)]
 
-        # If Item ID was omitted in C5 for an existing item matched by name,
-        # backfill the baseline Item ID so it is updated/moved rather than duplicated.
-        if not item_id and base_rec and base_rec.get("id"):
-            candidate_base_id = str(base_rec["id"]).strip()
-            if candidate_base_id and candidate_base_id not in c5_parsed_ids_by_sid[sid]:
-                item_id = candidate_base_id
-                c5_parsed_ids_by_sid[sid].add(item_id)
+            if candidate_rec and candidate_rec.get("id"):
+                cand_id = str(candidate_rec["id"]).strip()
+                if (
+                    cand_id
+                    and cand_id not in c5_explicit_ids_by_sid.get(sid, set())
+                    and cand_id not in c5_parsed_ids_by_sid.get(sid, set())
+                ):
+                    base_rec = candidate_rec
+                    item_id = cand_id
+                    c5_parsed_ids_by_sid[sid].add(item_id)
+
+        # Detect New Item (tambah_item) & New Category (new_categories)
+        is_new_item = False
+        is_new_category = False
+
+        if not item_id or (base_rec is None and norm_str(display_name) not in baseline["by_name"]):
+            is_new_item = True
+
+        if is_new_item:
+            base_rec = None
+            base_price = None
+
+        new_fake_price = parse_price(new_fake_raw)
+        if new_fake_price is None:
+            new_fake_price = parse_price(curr_fake_raw)
 
         base_name = base_rec["name"] if base_rec else item_name
         base_price = base_rec["price"] if base_rec else None
@@ -4825,19 +4876,6 @@ async def parse_c5_endpoint(
                 photo_link = base_img
                 photo_resolution_error = f"Gambar untuk '{resolver_name or item_name}' tidak ditemukan di folder Drive."
                 photo_resolution_errors_count += 1
-
-        # ── Detect New Item (tambah_item) & New Category (new_categories) ──
-        is_new_item = False
-        is_new_category = False
-
-        if not item_id or (base_rec is None and norm_str(display_name) not in baseline["by_name"]):
-            is_new_item = True
-
-        # A new item must use an explicit target price from the C5 new-price
-        # column. Existing-item rows retain the historical current-price fallback.
-        new_fake_price = parse_price(new_fake_raw)
-        if new_fake_price is None and not is_new_item:
-            new_fake_price = parse_price(curr_fake_raw)
 
         if cat_name and (
             norm_str(cat_name) not in baseline["categories"]
@@ -5037,7 +5075,7 @@ async def parse_c5_endpoint(
         shopee_price_limit_message = ""
         price_diff_percent = 0.0
         price_steps_count = 1
-        if new_fake_price is not None:
+        if not is_new_item and new_fake_price is not None:
             if base_price is not None and float(base_price) > 0:
                 price_changed = float(new_fake_price) != float(base_price)
                 price_diff_percent = ((float(new_fake_price) - float(base_price)) / float(base_price)) * 100.0
@@ -5051,8 +5089,15 @@ async def parse_c5_endpoint(
                             grab_price_limit_exceeded = True
             else:
                 price_changed = True
+        elif is_new_item:
+            price_changed = new_fake_price is not None
+            price_warning = False
+            grab_price_limit_exceeded = False
+            shopee_price_limit_exceeded = False
+            price_diff_percent = 0.0
+            price_steps_count = 1
 
-        if is_shopee_platform and price_changed:
+        if not is_new_item and is_shopee_platform and price_changed:
             target_iid = str(item_id or (base_rec.get("id") if base_rec else "") or "").strip()
             cooldown_info = shopee_price_cooldown_map.get(target_iid) if target_iid else None
             if cooldown_info:
@@ -5065,7 +5110,13 @@ async def parse_c5_endpoint(
                 )
 
         if price_changed:
-            if shopee_price_limit_exceeded:
+            if is_new_item:
+                diff_details.append({
+                    "column": "Price",
+                    "old_val": "(Baru)",
+                    "new_val": f"Rp {float(new_fake_price):,.0f}" if new_fake_price is not None else "(Kosong)"
+                })
+            elif shopee_price_limit_exceeded:
                 diff_details.append({
                     "column": "Price",
                     "old_val": f"Rp {float(base_price):,.0f}" if base_price is not None else "(Baru)",
@@ -5198,7 +5249,7 @@ async def parse_c5_endpoint(
         if description_changed:
             change_types.append("DESCRIPTION_CHANGE")
             description_changes_count += 1
-        if price_changed:
+        if price_changed and not is_new_item:
             change_types.append("PRICE_CHANGE")
             price_changes_count += 1
             if shopee_price_limit_exceeded:
@@ -5235,9 +5286,9 @@ async def parse_c5_endpoint(
             "baseline_category": base_cat,
             "baseline_photo": base_img,
             "baseline_description": base_desc,
-            "current_fake_price": base_price,
+            "current_fake_price": None if is_new_item else base_price,
             "new_fake_price": new_fake_price,
-            "baseline_found": base_rec is not None,
+            "baseline_found": False if is_new_item else (base_rec is not None),
             "baseline_file": baseline.get("baseline_file"),
             "baseline_pulled_at": baseline.get("baseline_pulled_at"),
             "baseline_platform": baseline.get("baseline_platform"),
@@ -5246,27 +5297,27 @@ async def parse_c5_endpoint(
             "is_changed": is_changed,
             "is_new_item": is_new_item,
             "is_new_category": is_new_category,
-            "price_warning": price_warning,
-            "grab_price_limit_exceeded": grab_price_limit_exceeded,
-            "shopee_price_limit_exceeded": shopee_price_limit_exceeded,
-            "shopee_price_limit_message": shopee_price_limit_message,
-            "price_diff_percent": round(price_diff_percent, 2),
+            "price_warning": False if is_new_item else price_warning,
+            "grab_price_limit_exceeded": False if is_new_item else grab_price_limit_exceeded,
+            "shopee_price_limit_exceeded": False if is_new_item else shopee_price_limit_exceeded,
+            "shopee_price_limit_message": "" if is_new_item else shopee_price_limit_message,
+            "price_diff_percent": 0.0 if is_new_item else round(price_diff_percent, 2),
             "category_weight": cat_weight,
             "item_weight": item_weight,
             "change_types": change_types,
             "diff_details": diff_details,
             "changes": {
-                "name_changed": name_changed,
-                "category_changed": category_changed,
-                "photo_changed": photo_changed,
-                "description_changed": description_changed,
+                "name_changed": False if is_new_item else name_changed,
+                "category_changed": False if is_new_item else category_changed,
+                "photo_changed": False if is_new_item else photo_changed,
+                "description_changed": False if is_new_item else description_changed,
                 "offline_price_changed": offline_price_changed,
-                "price_changed": price_changed,
-                "price_warning": price_warning,
-                "price_diff_percent": round(price_diff_percent, 2),
-                "order_changed": order_changed,
-                "cat_order_changed": cat_order_changed,
-                "item_order_changed": item_order_changed,
+                "price_changed": False if is_new_item else price_changed,
+                "price_warning": False if is_new_item else price_warning,
+                "price_diff_percent": 0.0 if is_new_item else round(price_diff_percent, 2),
+                "order_changed": False if is_new_item else order_changed,
+                "cat_order_changed": False if is_new_item else cat_order_changed,
+                "item_order_changed": False if is_new_item else item_order_changed,
                 "other_changed": other_changed,
                 "is_new_item": is_new_item,
                 "is_new_category": is_new_category,

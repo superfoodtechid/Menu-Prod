@@ -562,10 +562,13 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     # Validate existing item and price before any category API
                     # mutation so a blocked price cannot leave partial changes.
                     # 3. Validate price mutations before sending them to Grab.
-                    existing_it = existing_items_map.get(item_id) or existing_items_map.get(item_name.strip().lower())
+                    if is_new_item:
+                        existing_it = existing_items_map.get(item_id) if item_id else None
+                    else:
+                        existing_it = existing_items_map.get(item_id) or existing_items_map.get(item_name.strip().lower())
                     if not is_new_item and not existing_it:
                         raise ValueError(f"Item '{item_name}' tidak ditemukan pada menu Grab yang baru ditarik. Pull ulang sebelum push.")
-                    if existing_it:
+                    if existing_it and not is_new_item:
                         res_item["item_id"] = str(existing_it.get("itemID") or existing_it.get("id") or item_id)
                     if is_new_item and (new_price is None or float(new_price) <= 0):
                         raise ValueError("Harga item baru harus lebih dari Rp0.")
