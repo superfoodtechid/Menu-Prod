@@ -209,7 +209,34 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
       });
 
       if (res.ok) {
-        const data = await res.json();
+        let data = await res.json();
+        if (data.parse_job_id) {
+          const parseJobId = data.parse_job_id;
+          const deadline = Date.now() + 60 * 60 * 1000;
+          let parseJob = null;
+          while (Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            const statusRes = await fetch(`${API_BASE_URL}/api/jobs/${parseJobId}`, {
+              headers: { "X-API-Key": API_SECRET_KEY || "" }
+            });
+            if (!statusRes.ok) throw new Error(`Status parsing tidak dapat dimuat (HTTP ${statusRes.status}).`);
+            parseJob = await statusRes.json();
+            if (parseJob.status === "FAILED") {
+              throw new Error(parseJob.error_message || "Server gagal memproses file C5.");
+            }
+            if (parseJob.status === "SUCCESS") {
+              const resultRes = await fetch(`${API_BASE_URL}/api/jobs/parse-c5/${parseJobId}/result`, {
+                headers: { "X-API-Key": API_SECRET_KEY || "" }
+              });
+              if (!resultRes.ok) throw new Error(`Hasil parsing tidak dapat dimuat (HTTP ${resultRes.status}).`);
+              data = await resultRes.json();
+              break;
+            }
+          }
+          if (parseJob?.status !== "SUCCESS") {
+            throw new Error("Pemrosesan C5 masih berjalan lebih dari 60 menit. Periksa status server sebelum mengunggah ulang.");
+          }
+        }
         setParseResult(data);
         // Detect the platform from the first store, then select only its SIDs.
         if (data.stores && data.stores.length > 0) {
@@ -242,7 +269,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
       }
     } catch (err) {
       console.error("Error parsing C5:", err);
-      setErrorMsg("Terjadi kesalahan jaringan atau koneksi terputus saat memproses file C5.");
+      setErrorMsg(err?.message || "Terjadi kesalahan jaringan atau koneksi terputus saat memproses file C5.");
     } finally {
       setParsing(false);
     }

@@ -17,6 +17,7 @@ except Exception:
 import threading
 import time
 import builtins
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Union, Dict, Any
@@ -30,6 +31,7 @@ builtins.print = timestamped_print
 
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Query, status, Request, File, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.encoders import jsonable_encoder
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -54,6 +56,76 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("FoodMasterAPI")
+
+_PARSE_C5_LOCK = threading.Lock()
+
+
+def _run_parse_c5_background(job_id, filename, contents, drive_url=None):
+    """Run C5 parsing outside the request lifecycle and persist the result."""
+    import io
+    from fastapi import BackgroundTasks
+    from menu_core.database import SessionLocal
+
+    with _PARSE_C5_LOCK:
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if not job or job.status in ("CANCELLED", "FAILED"):
+                return
+            job.status = "RUNNING"
+            job.progress_pct = 5
+            job.current_step = "Memproses file C5 dan mencocokkan baseline..."
+            job.started_at = datetime.utcnow()
+            db.commit()
+
+            upload = UploadFile(filename=filename, file=io.BytesIO(contents)) if contents else None
+            result = asyncio.run(parse_c5_endpoint(
+                file=upload,
+                drive_url=drive_url,
+                background_tasks=BackgroundTasks(),
+                background_job_id=job_id,
+                db=db,
+            ))
+
+            result_dir = BASE_DIR / "data" / "parse_jobs"
+            result_dir.mkdir(parents=True, exist_ok=True)
+            result_path = result_dir / f"{job_id}.json"
+            result_path.write_text(
+                json.dumps(jsonable_encoder(result), ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job:
+                job.status = "SUCCESS"
+                job.progress_pct = 100
+                job.current_step = "Preview C5 siap."
+                job.result_metadata = {"parse_result_ready": True}
+                job.completed_at = datetime.utcnow()
+                db.commit()
+            logger.info("C5 parse job %s completed successfully.", job_id)
+        except HTTPException as exc:
+            db.rollback()
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job:
+                job.status = "FAILED"
+                job.error_message = str(exc.detail)
+                job.current_step = "Parsing C5 gagal."
+                job.completed_at = datetime.utcnow()
+                db.commit()
+            logger.warning("C5 parse job %s failed: %s", job_id, exc.detail)
+        except Exception as exc:
+            db.rollback()
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job:
+                job.status = "FAILED"
+                job.error_message = str(exc)
+                job.current_step = "Parsing C5 gagal."
+                job.completed_at = datetime.utcnow()
+                db.commit()
+            logger.exception("C5 parse job %s failed.", job_id)
+        finally:
+            db.close()
 
 
 def norm_str(value):
@@ -3988,10 +4060,12 @@ def _resolve_drive_folder_image(folder_url: str, item_name: str) -> Optional[str
         return None
 
 
-@app.post("/api/jobs/parse-c5")
+@app.post("/api/jobs/parse-c5", status_code=status.HTTP_202_ACCEPTED)
 async def parse_c5_endpoint(
+    background_tasks: BackgroundTasks,
     file: Optional[UploadFile] = File(None),
     drive_url: Optional[str] = Form(None),
+    background_job_id: Optional[uuid.UUID] = Query(None, include_in_schema=False),
     db: Session = Depends(get_db)
 ):
     """Parses an uploaded C5 Excel file (.xlsx) or Google Drive link and detects Store IDs (SIDs) plus menu changes
@@ -4010,9 +4084,46 @@ async def parse_c5_endpoint(
         filename = file.filename
         contents = await file.read()
     elif drive_url and drive_url.strip():
-        contents, filename = _download_gdrive_or_gsheet_bytes(drive_url.strip())
+        filename = "Google Drive C5.xlsx"
+        if background_job_id:
+            contents, filename = _download_gdrive_or_gsheet_bytes(drive_url.strip())
     else:
         raise HTTPException(status_code=400, detail="Harap unggah file Excel C5 (.xlsx) atau masukkan Link Google Drive / Sheets.")
+
+    if not background_job_id:
+        new_job = Job(
+            job_type="PARSE_C5",
+            platform="multi",
+            status="PENDING",
+            progress_pct=0,
+            current_step="Menunggu giliran untuk memproses C5...",
+            payload={"filename": filename, "source": "drive_url" if drive_url and not contents else "upload"},
+            created_by="c5_upload",
+        )
+        db.add(new_job)
+        db.commit()
+        db.refresh(new_job)
+        background_tasks.add_task(
+            _run_parse_c5_background,
+            new_job.id,
+            filename,
+            contents,
+            drive_url.strip() if drive_url and not contents else None,
+        )
+        return {
+            "success": True,
+            "parse_job_id": str(new_job.id),
+            "status": "PENDING",
+            "current_step": new_job.current_step,
+        }
+
+    parse_job = db.query(Job).filter(
+        Job.id == background_job_id,
+        Job.job_type == "PARSE_C5",
+        Job.status == "RUNNING",
+    ).first()
+    if not parse_job:
+        raise HTTPException(status_code=404, detail="Parse job tidak ditemukan atau sudah selesai.")
 
     # Refresh the Drive index once per C5 parse so recently added images are visible.
     _DRIVE_FOLDER_IMAGE_INDEX.clear()
@@ -4681,6 +4792,7 @@ async def parse_c5_endpoint(
     c5_active_categories_by_sid = {}
     c5_category_item_counts = {}
     drive_image_cache = {}
+    drive_photo_baseline_cache = {}
     offline_records_to_sync = []
     seen_invalid_cat_names = set()
 
@@ -4732,6 +4844,17 @@ async def parse_c5_endpoint(
         return "drive.google.com" in value.casefold() and bool(
             re.search(r"/folders/[a-zA-Z0-9_-]+|[?&]id=[a-zA-Z0-9_-]+", value)
         )
+
+    def load_drive_photo_baseline(sid_value):
+        sid_key = str(sid_value or "").strip()
+        if sid_key not in drive_photo_baseline_cache:
+            safe_sid = re.sub(r'[\\/*?:"<>|]', "", sid_key).strip()
+            metadata_path = BASE_DIR / "data" / "photo_baselines" / f"{safe_sid}.json"
+            try:
+                drive_photo_baseline_cache[sid_key] = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception:
+                drive_photo_baseline_cache[sid_key] = {}
+        return drive_photo_baseline_cache[sid_key]
 
     c5_explicit_ids_by_sid = {}
     for r in rows[1:]:
@@ -4865,17 +4988,41 @@ async def parse_c5_endpoint(
         drive_root = os.getenv("MENU_FOTO_GDRIVE", "").strip()
         resolver_name = (item_name or base_name or "").strip()
         photo_resolution_error = None
+        drive_archive_image = False
+        photo_baseline = load_drive_photo_baseline(sid) if drive_image_requested else {}
+        photo_baseline_record = (
+            photo_baseline.get("by_id", {}).get(str(item_id or "").strip())
+            or photo_baseline.get("by_name", {}).get(re.sub(r"[^a-z0-9]+", " ", resolver_name.casefold()).strip())
+        )
         if drive_image_requested:
             resolver_root = drive_folder_link or drive_root
-            cache_key = (resolver_root, resolver_name.casefold())
-            if resolver_root and resolver_name and cache_key not in drive_image_cache:
-                drive_image_cache[cache_key] = _resolve_drive_folder_image(resolver_root, resolver_name)
-            if drive_image_cache.get(cache_key):
-                photo_link = drive_image_cache[cache_key]
-            else:
+            folder_match = re.search(r"/folders/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", drive_folder_link)
+            current_folder_id = (folder_match.group(1) or folder_match.group(2)) if folder_match else ""
+            if photo_baseline_record and current_folder_id == str(photo_baseline_record.get("folder_id") or ""):
+                # The archived folder from the baseline is already known; no
+                # Drive API lookup is needed for its unchanged image.
                 photo_link = base_img
-                photo_resolution_error = f"Gambar untuk '{resolver_name or item_name}' tidak ditemukan di folder Drive."
-                photo_resolution_errors_count += 1
+                drive_archive_image = True
+            else:
+                cache_key = (resolver_root, resolver_name.casefold())
+                if resolver_root and resolver_name and cache_key not in drive_image_cache:
+                    drive_image_cache[cache_key] = _resolve_drive_folder_image(resolver_root, resolver_name)
+                resolved_drive_image = drive_image_cache.get(cache_key)
+                if resolved_drive_image:
+                    photo_link = resolved_drive_image
+                    image_id_match = re.search(r"googleusercontent\.com/d/([a-zA-Z0-9_-]+)", resolved_drive_image)
+                    resolved_file_id = image_id_match.group(1) if image_id_match else ""
+                    if photo_baseline_record:
+                        drive_archive_image = resolved_file_id == str(photo_baseline_record.get("file_id") or "")
+                    else:
+                        # Legacy pull baselines have no Drive file identity.
+                        # Preserve their archive behavior until a new pull
+                        # writes the identity metadata.
+                        drive_archive_image = True
+                else:
+                    photo_link = base_img
+                    photo_resolution_error = f"Gambar untuk '{resolver_name or item_name}' tidak ditemukan di folder Drive."
+                    photo_resolution_errors_count += 1
 
         if cat_name and (
             norm_str(cat_name) not in baseline["categories"]
@@ -5017,7 +5164,11 @@ async def parse_c5_endpoint(
                 diff_details.append({"column": "Category", "old_val": base_cat, "new_val": cat_name})
 
         # 3. Photo Link Change
-        photo_changed = bool(photo_link and not is_same_photo(photo_link, base_img))
+        photo_changed = bool(
+            photo_link
+            and not drive_archive_image
+            and not is_same_photo(photo_link, base_img)
+        )
         if photo_changed:
             diff_details.append({"column": "Photo Link", "old_val": base_img or "(Kosong)", "new_val": photo_link})
 
@@ -5524,6 +5675,23 @@ def _provision_grab_outlet_from_master(db: Session, sid: str):
 
     logger.info("Restored missing Grab outlet mapping from master source for SID %s", sid)
     return outlet
+
+
+@app.get("/api/jobs/parse-c5/{job_id}/result")
+def get_parse_c5_result(job_id: uuid.UUID, db: Session = Depends(get_db)):
+    job = db.query(Job).filter(Job.id == job_id, Job.job_type == "PARSE_C5").first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Parse job tidak ditemukan.")
+    if job.status != "SUCCESS":
+        raise HTTPException(status_code=409, detail="Hasil parse belum siap.")
+    result_path = BASE_DIR / "data" / "parse_jobs" / f"{job_id}.json"
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="File hasil parse tidak ditemukan.")
+    try:
+        return JSONResponse(content=json.loads(result_path.read_text(encoding="utf-8")))
+    except Exception as exc:
+        logger.exception("Could not read C5 parse result %s", job_id)
+        raise HTTPException(status_code=500, detail="Gagal membaca hasil parse C5.") from exc
 
 
 @app.post("/api/jobs/push-c5", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
