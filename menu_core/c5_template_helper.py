@@ -9,10 +9,15 @@ Menjamin integritas template C5:
 
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
+from openpyxl.styles import Font
 
 DATA_START_ROW = 3
 TEMPLATE_RESERVED_ROW = 2
+
+FOLDER_LINK_SHEET_NAME = "Folder Link"
+FOLDER_LINK_LABEL_HEADER = "Platform | Listing Name | SID | YYYY-MM-DD HH:MM"
+FOLDER_LINK_URL_HEADER = "Folder Link"
 
 
 def get_c5_template_path(base_dir: Optional[Path] = None) -> Path:
@@ -68,4 +73,76 @@ def is_c5_reserved_row(row_values) -> bool:
         if val is not None and "don't touch" in str(val).lower():
             return True
     return False
+
+
+def upsert_folder_link_sheet(wb, folder_entries: List[Tuple[str, str]]) -> None:
+    """Create or update the 'Folder Link' sheet with folder labels and Google Drive URLs."""
+    if FOLDER_LINK_SHEET_NAME in wb.sheetnames:
+        ws = wb[FOLDER_LINK_SHEET_NAME]
+        if ws.max_row >= 1:
+            ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(title=FOLDER_LINK_SHEET_NAME)
+
+    header_font = Font(bold=True)
+    c1 = ws.cell(row=1, column=1, value=FOLDER_LINK_LABEL_HEADER)
+    c2 = ws.cell(row=1, column=2, value=FOLDER_LINK_URL_HEADER)
+    c1.font = header_font
+    c2.font = header_font
+
+    ws.column_dimensions["A"].width = 58
+    ws.column_dimensions["B"].width = 65
+
+    seen = set()
+    row_idx = 2
+    for label, url in folder_entries or []:
+        clean_label = str(label or "").strip()
+        clean_url = str(url or "").strip()
+        if not clean_label and not clean_url:
+            continue
+        dedup_key = (clean_label, clean_url)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        ws.cell(row=row_idx, column=1, value=clean_label)
+        ws.cell(row=row_idx, column=2, value=clean_url)
+        row_idx += 1
+
+
+def read_folder_link_entries(wb_or_path) -> List[Tuple[str, str]]:
+    """Read (label, url) rows from the 'Folder Link' sheet of an O.C5 workbook or path."""
+    import openpyxl
+
+    close_after = False
+    wb = wb_or_path
+    if isinstance(wb_or_path, (str, Path)):
+        if not os.path.exists(str(wb_or_path)):
+            return []
+        try:
+            wb = openpyxl.load_workbook(str(wb_or_path), data_only=True, read_only=True)
+            close_after = True
+        except Exception:
+            return []
+
+    entries: List[Tuple[str, str]] = []
+    try:
+        if FOLDER_LINK_SHEET_NAME in wb.sheetnames:
+            ws = wb[FOLDER_LINK_SHEET_NAME]
+            for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                if r_idx == 1 or not row:
+                    continue
+                label = str(row[0] if len(row) > 0 and row[0] is not None else "").strip()
+                url = str(row[1] if len(row) > 1 and row[1] is not None else "").strip()
+                if label or url:
+                    entries.append((label, url))
+    except Exception:
+        pass
+    finally:
+        if close_after and wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+    return entries
+
 

@@ -505,71 +505,6 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             }
             all_dishes.append(dish_obj)
             
-    # ── Sinkronisasi Foto Menu ke Folder Google Drive ──
-    drive_folder_url = None
-    if all_dishes:
-        try:
-            from menu_core.gdrive_service import sync_menu_photos_to_drive
-            owner_name = store_metadata.get("owner") or "Default Owner"
-            first_dish = all_dishes[0]
-            listing_name = first_dish.get('nama_panjang') or store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or "GoFood Outlet"
-            sid = str(first_dish.get('store_id') or store_metadata.get('store_id') or "").strip()
-            drive_folder_url = sync_menu_photos_to_drive(
-                owner_name=owner_name,
-                platform="GoFood",
-                listing_name=listing_name,
-                sid=sid,
-                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes]
-            )
-        except Exception as e_drive:
-            print(f"⚠️ Gagal sinkronisasi foto GoFood ke Google Drive: {e_drive}")
-
-    # Build standard output DataFrames
-    item_cols = [
-        'OFD', 'Outlet Name', 'Outlet Short Name', 'Outlet Link', 'SID',
-        'Category ID', 'Category', 'Item ID', 'Item', 'Photo Link',
-        'Description', 'Keyword', 'Total Sold', 'Total Modifier Group', 'Total Modifier',
-        'Availability', 'Visibility', 'Current Fake Price (Rp)', 'Current Real Price (Rp)',
-        'Current Slash Price (%)', 'Current Slash Price (Rp)', 'New Markup (%)',
-        'New Real Price (Rp)', 'Adjustment (Rp)', 'New Final Real Price (Rp)',
-        'New Slash Price (%)', 'New Fake Price (Rp)', 'Notes'
-    ]
-    
-    item_data = []
-    for d in all_dishes:
-        photo_link_val = drive_folder_url if drive_folder_url else d['link_foto']
-        item_data.append([
-            'GoFood', d['nama_panjang'], d['nama_pendek'], d['link_outlet'], d['store_id'],
-            d['cat_id'], d['nama_kategori'], d['item_id'], d['nama_item'], photo_link_val,
-            d['deskripsi_item'], '', d['jumlah_terjual'], d['jumlah_modifier_group'],
-            d['jumlah_modifier'], d['ketersediaan'], d['visibility'],
-            d['harga_sebelum_promo'], d['harga_setelah_promo'], d['slash_pct'], d['slash_rp'],
-            "", "", "", "", "", "", ""
-        ])
-        
-    df_items = pd.DataFrame(item_data, columns=item_cols)
-    if 'Outlet Name' in df_items.columns:
-        df_items['Listing Name'] = df_items['Outlet Name']
-    
-    mod_cols = [
-        'OFD', 'Outlet Name', 'Outlet Short Name', 'Outlet Link', 'SID',
-        'Item', 'Modifier Group ID', 'Modifier Group', 'Modifier ID',
-        'Modifier', 'Min', 'Max', 'Availability', 'Visibility', 'Current Price (Rp)'
-    ]
-    
-    mod_data = []
-    for m in modifier_rows:
-        mod_data.append([
-            'GoFood', m[1], m[2], m[0], m[3],
-            m[4], m[5], m[6], m[7],
-            m[8], m[10], m[11], m[13], m[14], m[12]
-        ])
-    
-    df_mods = pd.DataFrame(mod_data, columns=mod_cols)
-    if 'Outlet Name' in df_mods.columns:
-        df_mods['Listing Name'] = df_mods['Outlet Name']
-    
-    # Write to files
     os.makedirs(output_dir, exist_ok=True)
     
     def clean_name(s):
@@ -606,6 +541,71 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         excel_filename = f"O.C5 {clean_outlet}.xlsx"
         
     excel_path = os.path.join(output_dir, excel_filename)
+
+    drive_folder_url = None
+    photo_sync_meta = None
+    if all_dishes:
+        try:
+            from menu_core.gdrive_service import prepare_and_start_photo_sync
+            owner_name = store_metadata.get("owner") or "Default Owner"
+            first_dish = all_dishes[0]
+            listing_name = first_dish.get('nama_panjang') or store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or "GoFood Outlet"
+            sid = str(first_dish.get('store_id') or store_metadata.get('store_id') or "").strip()
+            drive_folder_url, photo_sync_meta = prepare_and_start_photo_sync(
+                owner_name=owner_name,
+                platform="GoFood",
+                listing_name=listing_name,
+                sid=sid,
+                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes],
+                excel_path=excel_path,
+                job_id=store_metadata.get("job_id"),
+            )
+        except Exception as e_drive:
+            print(f"⚠️ Gagal sinkronisasi foto GoFood ke Google Drive: {e_drive}")
+
+    # Build standard output DataFrames
+    item_cols = [
+        'OFD', 'Outlet Name', 'Outlet Short Name', 'Outlet Link', 'SID',
+        'Category ID', 'Category', 'Item ID', 'Item', 'Photo Link',
+        'Description', 'Keyword', 'Total Sold', 'Total Modifier Group', 'Total Modifier',
+        'Availability', 'Visibility', 'Current Fake Price (Rp)', 'Current Real Price (Rp)',
+        'Current Slash Price (%)', 'Current Slash Price (Rp)', 'New Markup (%)',
+        'New Real Price (Rp)', 'Adjustment (Rp)', 'New Final Real Price (Rp)',
+        'New Slash Price (%)', 'New Fake Price (Rp)', 'Notes'
+    ]
+    
+    item_data = []
+    for d in all_dishes:
+        item_data.append([
+            'GoFood', d['nama_panjang'], d['nama_pendek'], d['link_outlet'], d['store_id'],
+            d['cat_id'], d['nama_kategori'], d['item_id'], d['nama_item'], d['link_foto'],
+            d['deskripsi_item'], '', d['jumlah_terjual'], d['jumlah_modifier_group'],
+            d['jumlah_modifier'], d['ketersediaan'], d['visibility'],
+            d['harga_sebelum_promo'], d['harga_setelah_promo'], d['slash_pct'], d['slash_rp'],
+            "", "", "", "", "", "", ""
+        ])
+        
+    df_items = pd.DataFrame(item_data, columns=item_cols)
+    if 'Outlet Name' in df_items.columns:
+        df_items['Listing Name'] = df_items['Outlet Name']
+    
+    mod_cols = [
+        'OFD', 'Outlet Name', 'Outlet Short Name', 'Outlet Link', 'SID',
+        'Item', 'Modifier Group ID', 'Modifier Group', 'Modifier ID',
+        'Modifier', 'Min', 'Max', 'Availability', 'Visibility', 'Current Price (Rp)'
+    ]
+    
+    mod_data = []
+    for m in modifier_rows:
+        mod_data.append([
+            'GoFood', m[1], m[2], m[0], m[3],
+            m[4], m[5], m[6], m[7],
+            m[8], m[10], m[11], m[13], m[14], m[12]
+        ])
+    
+    df_mods = pd.DataFrame(mod_data, columns=mod_cols)
+    if 'Outlet Name' in df_mods.columns:
+        df_mods['Listing Name'] = df_mods['Outlet Name']
     
     from pathlib import Path
     import openpyxl
@@ -615,6 +615,10 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         get_c5_headers,
         DATA_START_ROW,
         is_c5_reserved_row,
+        upsert_folder_link_sheet,
+        FOLDER_LINK_SHEET_NAME,
+        FOLDER_LINK_LABEL_HEADER,
+        FOLDER_LINK_URL_HEADER,
     )
     BASE_DIR = Path(__file__).resolve().parents[1]
     template_path = get_c5_template_path(BASE_DIR)
@@ -734,7 +738,11 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                         else:
                             val = str(val)
                     sheet_mod.cell(row=r_idx + DATA_START_ROW, column=headers_mod[col_name], value=val)
-                    
+
+        folder_label = (photo_sync_meta or {}).get("target_folder_name") or ""
+        folder_entries = [(folder_label, drive_folder_url)] if drive_folder_url else []
+        upsert_folder_link_sheet(wb, folder_entries)
+
         wb.save(excel_path)
         if prev_user_data:
             merged_count = sum(1 for iid in prev_user_data if any(str(row.get('Item ID', '')).strip() == iid for _, row in df_items.iterrows()))
@@ -743,9 +751,15 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             print(f"   ✅ Berhasil menyimpan file catalog menggunakan template O.C5 ke: {excel_path}")
     except Exception as ex_err:
         print(f"   [-] Gagal menulis ke template O.C5: {ex_err}. Fallback ke Excel biasa.")
+        folder_label = (photo_sync_meta or {}).get("target_folder_name") or ""
+        df_folder_links = pd.DataFrame(
+            [[folder_label, drive_folder_url]] if drive_folder_url else [],
+            columns=[FOLDER_LINK_LABEL_HEADER, FOLDER_LINK_URL_HEADER],
+        )
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
             df_items.to_excel(writer, sheet_name='Item', index=False)
             df_mods.to_excel(writer, sheet_name='Modifier', index=False)
+            df_folder_links.to_excel(writer, sheet_name=FOLDER_LINK_SHEET_NAME, index=False)
         
     print(f"   ✅ Berhasil memproses data menu GoFood!")
     print(f"      - Item Count: {len(df_items)}")
@@ -754,5 +768,6 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         'mods_csv': None,
         'excel': excel_path,
         'items_count': len(df_items),
-        'mods_count': len(df_mods)
+        'mods_count': len(df_mods),
+        'photo_sync': photo_sync_meta,
     }

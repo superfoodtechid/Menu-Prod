@@ -1,12 +1,14 @@
 import os
 import re
+import math
 import json
 import base64
 import logging
 import io
 import time
+import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict, Any, Tuple
@@ -28,28 +30,111 @@ def _sanitize_name(name: str) -> str:
     return clean or "Unknown"
 
 
-def _persist_drive_photo_baseline(folder_url: str, sid: str, dishes: List[Dict[str, Any]]) -> None:
+def format_photo_folder_label(
+    platform: str,
+    listing_name: str,
+    sid: str,
+    timestamp_str: Optional[str] = None,
+) -> str:
+    """Format the standard folder label: Platform | Listing Name | SID | YYYY-MM-DD HH:MM."""
+    clean_platform = _sanitize_name(platform or "Platform")
+    clean_listing = _sanitize_name(listing_name or "Outlet")
+    clean_sid = _sanitize_name(sid or "SID")
+    if not timestamp_str:
+        timestamp_str = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y-%m-%d %H:%M")
+    return f"{clean_platform} | {clean_listing} | {clean_sid} | {timestamp_str}"
+
+
+def is_photo_sync_enabled() -> bool:
+    """Return True if Google Drive menu photo sync is enabled in environment configuration."""
+    env_vals = dotenv_values()
+    raw_val = (
+        os.getenv("ENABLE_GDRIVE_PHOTO_SYNC")
+        or env_vals.get("ENABLE_GDRIVE_PHOTO_SYNC")
+        or "true"
+    )
+    return str(raw_val).strip().lower() not in ("false", "0", "no", "off", "disabled")
+
+
+def calculate_photo_sync_eta(photo_count: int, batch_size: int = 25) -> Dict[str, Any]:
+    """Calculate estimated completion time in WIB for background photo collection."""
+    now_wib = datetime.now(ZoneInfo("Asia/Jakarta"))
+    if photo_count <= 0:
+        return {
+            "total_photos": 0,
+            "estimated_seconds": 0,
+            "estimated_completion": now_wib.strftime("%H:%M WIB"),
+            "estimated_completion_iso": now_wib.isoformat(),
+        }
+
+    batches = math.ceil(photo_count / max(1, batch_size))
+    est_seconds = max(20, batches * 18)
+    eta_wib = now_wib + timedelta(seconds=est_seconds)
+    return {
+        "total_photos": photo_count,
+        "estimated_seconds": est_seconds,
+        "estimated_completion": eta_wib.strftime("%H:%M WIB"),
+        "estimated_completion_iso": eta_wib.isoformat(),
+    }
+
+
+def _extract_photo_tasks(dishes: List[Dict[str, Any]]) -> List[Tuple[str, str, str]]:
+    """Build deduplicated (unique_name, photo_url, item_id) tuples from dish records."""
+    photo_tasks: List[Tuple[str, str, str]] = []
+    name_counts: Dict[str, int] = {}
+    for d in dishes or []:
+        item_name = str(d.get("item_name") or d.get("Item") or d.get("nama_item") or "").strip()
+        photo_url = str(d.get("photo_url") or d.get("link_foto") or d.get("Photo Link") or "").strip()
+        item_id = str(d.get("item_id") or d.get("dish_id") or d.get("Item ID") or "").strip()
+
+        if photo_url and photo_url.startswith(("http://", "https://")):
+            norm_name = (item_name or f"Item_{item_id}").casefold()
+            name_counts[norm_name] = name_counts.get(norm_name, 0) + 1
+            unique_name = item_name or f"Item_{item_id}" or "Item"
+            if name_counts[norm_name] > 1:
+                unique_name = f"{unique_name} ({item_id or name_counts[norm_name]})"
+            photo_tasks.append((unique_name, photo_url, item_id))
+    return photo_tasks
+
+
+def _persist_drive_photo_baseline(
+    folder_url: str,
+    sid: str,
+    dishes: List[Dict[str, Any]],
+    uploaded_files: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     """Persist Drive file identities for the items in a completed menu pull."""
     match = re.search(r"/folders/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", str(folder_url or ""))
-    api_key = os.getenv("GOOGLE_DRIVE_API_KEY")
-    if not match or not api_key or not sid:
+    if not match or not sid:
         return
 
     folder_id = match.group(1) or match.group(2)
     try:
-        response = requests.get(
-            "https://www.googleapis.com/drive/v3/files",
-            params={
-                "q": f"'{folder_id}' in parents and trashed = false",
-                "fields": "files(id,name,mimeType)",
-                "pageSize": 1000,
-                "key": api_key,
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        files = [f for f in response.json().get("files", []) if str(f.get("mimeType", "")).startswith("image/")]
-        by_filename = {str(f.get("name", "")).casefold(): f for f in files}
+        by_filename: Dict[str, Dict[str, Any]] = {}
+        for uf in uploaded_files or []:
+            fname = str(uf.get("fileName") or uf.get("name") or "").strip().casefold()
+            fid = str(uf.get("fileId") or uf.get("id") or "").strip()
+            if fname and fid:
+                by_filename[fname] = {"id": fid, "name": fname}
+
+        api_key = os.getenv("GOOGLE_DRIVE_API_KEY")
+        if not by_filename and api_key:
+            response = requests.get(
+                "https://www.googleapis.com/drive/v3/files",
+                params={
+                    "q": f"'{folder_id}' in parents and trashed = false",
+                    "fields": "files(id,name,mimeType)",
+                    "pageSize": 1000,
+                    "key": api_key,
+                },
+                timeout=20,
+            )
+            response.raise_for_status()
+            files = [f for f in response.json().get("files", []) if str(f.get("mimeType", "")).startswith("image/")]
+            by_filename = {str(f.get("name", "")).casefold(): f for f in files}
+
+        if not by_filename:
+            return
 
         name_counts = {}
         by_id, by_name = {}, {}
@@ -82,18 +167,91 @@ def _persist_drive_photo_baseline(folder_url: str, sid: str, dishes: List[Dict[s
         logger.warning("Could not persist Drive photo baseline for SID %s: %s", sid, exc)
 
 
-# =====================================================================
-# Google Drive Service Account Implementation
-# =====================================================================
+def _restore_cdn_urls_in_excel(excel_path: Optional[str], dishes: List[Dict[str, Any]]) -> None:
+    """Restore original CDN photo URLs in the O.C5 Excel file if background Drive upload fails completely."""
+    if not excel_path or not os.path.exists(excel_path):
+        return
+    try:
+        import openpyxl
+        from menu_core.c5_template_helper import DATA_START_ROW, is_c5_reserved_row
+
+        url_by_id: Dict[str, str] = {}
+        url_by_name: Dict[str, str] = {}
+        for d in dishes or []:
+            item_name = str(d.get("item_name") or d.get("Item") or d.get("nama_item") or "").strip()
+            photo_url = str(d.get("photo_url") or d.get("link_foto") or d.get("Photo Link") or "").strip()
+            item_id = str(d.get("item_id") or d.get("dish_id") or d.get("Item ID") or "").strip()
+            if photo_url:
+                if item_id:
+                    url_by_id[item_id] = photo_url
+                if item_name:
+                    url_by_name[item_name.casefold()] = photo_url
+
+        if not url_by_id and not url_by_name:
+            return
+
+        wb = openpyxl.load_workbook(excel_path)
+        if "Item" not in wb.sheetnames:
+            wb.close()
+            return
+
+        sheet = wb["Item"]
+        headers = {str(cell.value).strip(): cell.column for cell in sheet[1] if cell.value}
+        photo_col = headers.get("Photo Link")
+        item_id_col = headers.get("Item ID")
+        item_name_col = headers.get("Item") or headers.get("Item Name")
+
+        if not photo_col:
+            wb.close()
+            return
+
+        updated = 0
+        for row_idx in range(DATA_START_ROW, sheet.max_row + 1):
+            row_vals = [sheet.cell(row=row_idx, column=c).value for c in range(1, min(8, sheet.max_column + 1))]
+            if is_c5_reserved_row(row_vals):
+                continue
+            iid = str(sheet.cell(row=row_idx, column=item_id_col).value or "").strip() if item_id_col else ""
+            iname = str(sheet.cell(row=row_idx, column=item_name_col).value or "").strip().casefold() if item_name_col else ""
+            orig_url = url_by_id.get(iid) or url_by_name.get(iname)
+            if orig_url is not None:
+                sheet.cell(row=row_idx, column=photo_col, value=orig_url)
+                updated += 1
+
+        if updated > 0:
+            wb.save(excel_path)
+            logger.info("Restored %d original CDN photo URLs in %s after Drive sync failure.", updated, excel_path)
+        wb.close()
+    except Exception as exc:
+        logger.warning("Failed to restore CDN photo URLs in Excel %s: %s", excel_path, exc)
+
+
+def _update_job_photo_sync_metadata(job_id: Optional[str], photo_sync_meta: Dict[str, Any]) -> None:
+    """Update Job.result_metadata['photo_sync'] in the database from a background thread."""
+    if not job_id:
+        return
+    try:
+        import uuid
+        from sqlalchemy.orm.attributes import flag_modified
+        from menu_core.database import SessionLocal, Job
+
+        parsed_id = uuid.UUID(str(job_id)) if not isinstance(job_id, uuid.UUID) else job_id
+        with SessionLocal() as db:
+            job = db.query(Job).filter(Job.id == parsed_id).first()
+            if not job:
+                return
+            meta = dict(job.result_metadata or {})
+            existing_ps = dict(meta.get("photo_sync") or {})
+            existing_ps.update(photo_sync_meta)
+            meta["photo_sync"] = existing_ps
+            job.result_metadata = meta
+            flag_modified(job, "result_metadata")
+            db.commit()
+    except Exception as exc:
+        logger.warning("Could not update photo_sync metadata for job %s: %s", job_id, exc)
+
 
 def get_drive_service() -> Optional[Any]:
-    """
-    Initialize Google Drive v3 client from Service Account credentials.
-    Supports:
-    1. GDRIVE_SERVICE_ACCOUNT_KEY (raw JSON string or base64 encoded string in .env)
-    2. GDRIVE_SERVICE_ACCOUNT_JSON (path to .json file)
-    3. GOOGLE_APPLICATION_CREDENTIALS (env var path)
-    """
+    """Initialize Google Drive v3 client from Service Account credentials if configured."""
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -220,17 +378,14 @@ def resolve_menu_foto_folder(
         now_wib = datetime.now(ZoneInfo("Asia/Jakarta"))
         timestamp_str = now_wib.strftime("%Y-%m-%d %H:%M")
 
-    # 1. Level 1: {nama owner}
     owner_folder_id = get_or_create_subfolder(service, root_folder_id, clean_owner)
     if not owner_folder_id:
         return None, None
 
-    # 2. Level 2: Menu Foto
     menu_foto_folder_id = get_or_create_subfolder(service, owner_folder_id, "Menu Foto")
     if not menu_foto_folder_id:
         return None, None
 
-    # 3. Level 3: Platform | Listing Name | SID | YYYY-MM-DD HH:MM
     target_folder_name = f"{clean_platform} | {clean_listing} | {clean_sid} | {timestamp_str}"
     outlet_folder_id = get_or_create_subfolder(service, menu_foto_folder_id, target_folder_name)
     if not outlet_folder_id:
@@ -283,10 +438,6 @@ def _download_and_upload_single_photo_sa(
         return False
 
 
-# =====================================================================
-# Google Apps Script Web App Implementation
-# =====================================================================
-
 def _download_photo_content_base64(item_name: str, photo_url: str, item_id: str = "") -> Optional[Dict[str, str]]:
     """Download image from CDN and return filename, mimeType, and base64 string."""
     if not photo_url or not str(photo_url).strip().startswith(("http://", "https://")):
@@ -298,7 +449,13 @@ def _download_photo_content_base64(item_name: str, photo_url: str, item_id: str 
     filename = f"{clean_name}.jpg"
 
     try:
-        resp = requests.get(photo_url, timeout=15)
+        resp = requests.get(
+            photo_url,
+            timeout=15,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            }
+        )
         if resp.status_code != 200 or not resp.content:
             return None
 
@@ -317,6 +474,219 @@ def _download_photo_content_base64(item_name: str, photo_url: str, item_id: str 
         return None
 
 
+def _post_to_appscript_with_retry(
+    target_url: str,
+    payload: Dict[str, Any],
+    timeout: int = 75,
+    max_retries: int = 3,
+    backoff_delays: Tuple[float, ...] = (2.0, 5.0, 10.0)
+) -> Optional[Dict[str, Any]]:
+    """Send POST request to Apps Script Web App with exponential backoff retry on transient errors."""
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(target_url, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "success":
+                    return data
+                last_err = f"Apps Script error: {data.get('message')}"
+            else:
+                last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except Exception as exc:
+            last_err = str(exc)
+
+        if attempt < max_retries - 1:
+            delay = backoff_delays[min(attempt, len(backoff_delays) - 1)]
+            logger.warning(
+                "Apps Script request failed (attempt %d/%d: %s). Retrying in %.1fs...",
+                attempt + 1, max_retries, last_err, delay
+            )
+            time.sleep(delay)
+
+    logger.warning("Apps Script request failed after %d attempts: %s", max_retries, last_err)
+    return None
+
+
+def _upload_tasks_via_base64_fallback(
+    target_url: str,
+    sub_folder_id: str,
+    tasks: List[Tuple[str, str, str]],
+    batch_size: int = 10
+) -> int:
+    """Download images on backend and upload as Base64 chunks when direct CDN fetch fails or legacy script is active."""
+    if not tasks or not sub_folder_id:
+        return 0
+
+    downloaded_files: List[Dict[str, str]] = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_task = {
+            executor.submit(_download_photo_content_base64, t[0], t[1], t[2]): t
+            for t in tasks
+        }
+        for fut in as_completed(future_to_task):
+            try:
+                res = fut.result()
+                if res:
+                    downloaded_files.append(res)
+            except Exception:
+                pass
+
+    if not downloaded_files:
+        return 0
+
+    uploaded_count = 0
+    for i in range(0, len(downloaded_files), batch_size):
+        chunk = downloaded_files[i:i + batch_size]
+        payload = {
+            "folderId": sub_folder_id,
+            "targetFolderId": sub_folder_id,
+            "files": chunk,
+        }
+        res = _post_to_appscript_with_retry(target_url, payload, timeout=90, max_retries=3)
+        if res and res.get("status") == "success":
+            cnt = res.get("uploadedCount")
+            uploaded_count += int(cnt) if cnt is not None else len(chunk)
+        time.sleep(0.5)
+
+    return uploaded_count
+
+
+def _execute_appscript_photo_batches(
+    target_url: str,
+    sub_folder_id: str,
+    folder_url: str,
+    sid: str,
+    dishes: List[Dict[str, Any]],
+    photo_tasks: List[Tuple[str, str, str]],
+    batch_size: int = 25,
+    excel_path: Optional[str] = None,
+    job_id: Optional[str] = None,
+) -> int:
+    """Upload photo tasks to Apps Script using direct CDN URLs first, falling back to Base64 on failure."""
+    if not photo_tasks or not sub_folder_id:
+        if job_id:
+            _update_job_photo_sync_metadata(job_id, {
+                "status": "SUCCESS",
+                "uploaded_photos": 0,
+                "completed_at": datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%H:%M WIB"),
+            })
+        return 0
+
+    total_uploaded = 0
+    legacy_base64_mode = False
+    uploaded_files_list: List[Dict[str, Any]] = []
+
+    for i in range(0, len(photo_tasks), batch_size):
+        chunk_tasks = photo_tasks[i:i + batch_size]
+
+        if legacy_base64_mode:
+            total_uploaded += _upload_tasks_via_base64_fallback(
+                target_url, sub_folder_id, chunk_tasks, batch_size=10
+            )
+            continue
+
+        url_files = []
+        task_by_filename: Dict[str, Tuple[str, str, str]] = {}
+        for unique_name, photo_url, item_id in chunk_tasks:
+            clean_name = _sanitize_name(unique_name) or (f"Item_{item_id}" if item_id else "Item")
+            fname = f"{clean_name}.jpg"
+            url_files.append({
+                "fileName": fname,
+                "fileUrl": photo_url,
+                "url": photo_url,
+                "itemId": item_id,
+            })
+            task_by_filename[fname.casefold()] = (unique_name, photo_url, item_id)
+
+        payload = {
+            "folderId": sub_folder_id,
+            "targetFolderId": sub_folder_id,
+            "files": url_files,
+        }
+        res = _post_to_appscript_with_retry(target_url, payload, timeout=75, max_retries=3)
+
+        if not res:
+            logger.warning(
+                "Direct URL batch %d failed after retries. Falling back to Base64 upload in smaller chunks...",
+                i // batch_size + 1,
+            )
+            total_uploaded += _upload_tasks_via_base64_fallback(
+                target_url, sub_folder_id, chunk_tasks, batch_size=10
+            )
+            continue
+
+        mode = res.get("mode")
+        uploaded_cnt = res.get("uploadedCount")
+        failed_files = res.get("failedFiles") or []
+        if isinstance(res.get("files"), list):
+            uploaded_files_list.extend(res["files"])
+
+        if mode != "direct_url_v2" and uploaded_cnt == 0 and len(url_files) > 0:
+            logger.info(
+                "Apps Script endpoint did not process fileUrl payload (legacy Web App detected). Switching to Base64 fallback."
+            )
+            legacy_base64_mode = True
+            total_uploaded += _upload_tasks_via_base64_fallback(
+                target_url, sub_folder_id, chunk_tasks, batch_size=10
+            )
+            continue
+
+        batch_uploaded = int(uploaded_cnt) if uploaded_cnt is not None else len(url_files)
+        total_uploaded += batch_uploaded
+
+        if failed_files:
+            retry_tasks: List[Tuple[str, str, str]] = []
+            for ff in failed_files:
+                ff_name = str(ff.get("fileName") or "").strip().casefold()
+                if ff_name in task_by_filename:
+                    retry_tasks.append(task_by_filename[ff_name])
+                elif ff.get("fileUrl"):
+                    retry_tasks.append((
+                        str(ff.get("fileName") or "Item").removesuffix(".jpg"),
+                        str(ff.get("fileUrl")),
+                        str(ff.get("itemId") or ""),
+                    ))
+            if retry_tasks:
+                logger.info(
+                    "Retrying %d failed direct-fetch photos via backend Base64 fallback...",
+                    len(retry_tasks),
+                )
+                total_uploaded += _upload_tasks_via_base64_fallback(
+                    target_url, sub_folder_id, retry_tasks, batch_size=10
+                )
+
+    if total_uploaded == 0 and len(photo_tasks) > 0:
+        logger.error(
+            "All photo uploads failed for SID %s (0/%d uploaded). Restoring original CDN URLs in Excel.",
+            sid, len(photo_tasks),
+        )
+        _restore_cdn_urls_in_excel(excel_path, dishes)
+        if job_id:
+            _update_job_photo_sync_metadata(job_id, {
+                "status": "FAILED",
+                "uploaded_photos": 0,
+                "message": "Gagal menyalin foto ke Google Drive.",
+            })
+        return 0
+
+    _persist_drive_photo_baseline(folder_url, sid, dishes, uploaded_files=uploaded_files_list)
+
+    completed_wib = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%H:%M WIB")
+    final_status = "SUCCESS" if total_uploaded >= len(photo_tasks) else "PARTIAL"
+    if job_id:
+        _update_job_photo_sync_metadata(job_id, {
+            "status": final_status,
+            "uploaded_photos": min(total_uploaded, len(photo_tasks)),
+            "completed_at": completed_wib,
+        })
+    logger.info(
+        "Photo sync finished for SID %s: %d/%d photos uploaded to %s",
+        sid, total_uploaded, len(photo_tasks), folder_url,
+    )
+    return total_uploaded
+
+
 def sync_menu_photos_via_appscript(
     owner_name: str,
     platform: str,
@@ -324,12 +694,19 @@ def sync_menu_photos_via_appscript(
     sid: str,
     dishes: List[Dict[str, Any]],
     timestamp_str: Optional[str] = None,
-    batch_size: int = 10
+    batch_size: int = 25,
+    run_async: bool = False,
+    excel_path: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Upload menu photos to Google Drive using Google Apps Script Web App endpoint.
     Hierarchical folder structure: {GDRIVE_FOLDER_ID} -> {nama owner} -> Menu Foto -> {Platform} | {Listing Name} | {SID} | {YYYY-MM-DD HH:MM}
     """
+    if not is_photo_sync_enabled():
+        logger.info("ENABLE_GDRIVE_PHOTO_SYNC is disabled. Skipping photo Drive sync.")
+        return None
+
     env_vals = dotenv_values()
     target_url = (
         env_vals.get("GDRIVE_APPSCRIPT_URL")
@@ -339,6 +716,7 @@ def sync_menu_photos_via_appscript(
     if not target_url:
         logger.info("GDRIVE_APPSCRIPT_URL is not configured in .env. Skipping photo Drive sync.")
         return None
+
     root_folder_id = (
         env_vals.get("GDRIVE_FOLDER_ID")
         or env_vals.get("GDRIVE_PARENT_FOLDER_ID")
@@ -358,56 +736,20 @@ def sync_menu_photos_via_appscript(
 
     target_folder_name = f"{clean_platform} | {clean_listing} | {clean_sid} | {timestamp_str}"
     folder_path = [clean_owner, "Menu Foto", target_folder_name]
+    photo_tasks = _extract_photo_tasks(dishes)
 
-    # Filter dishes with photo URLs and download them concurrently
-    photo_tasks = []
-    name_counts = {}
-    for d in dishes:
-        item_name = str(d.get("item_name") or d.get("Item") or d.get("nama_item") or "").strip()
-        photo_url = str(d.get("photo_url") or d.get("link_foto") or d.get("Photo Link") or "").strip()
-        item_id = str(d.get("item_id") or d.get("dish_id") or d.get("Item ID") or "").strip()
-
-        if photo_url and photo_url.startswith(("http://", "https://")):
-            norm_name = item_name.casefold()
-            name_counts[norm_name] = name_counts.get(norm_name, 0) + 1
-            unique_name = item_name
-            if name_counts[norm_name] > 1:
-                unique_name = f"{item_name} ({item_id or name_counts[norm_name]})"
-            photo_tasks.append((unique_name, photo_url, item_id))
-
-    downloaded_files = []
-    if photo_tasks:
-        logger.info(f"Downloading {len(photo_tasks)} photos from platform CDN...")
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_task = {
-                executor.submit(_download_photo_content_base64, t[0], t[1], t[2]): t
-                for t in photo_tasks
-            }
-            for fut in as_completed(future_to_task):
-                res = fut.result()
-                if res:
-                    downloaded_files.append(res)
-        logger.info(f"Downloaded {len(downloaded_files)}/{len(photo_tasks)} photos successfully.")
-
-    # 1. Step 1: Create or resolve folder & upload first batch of photos (if any)
-    first_chunk = downloaded_files[:batch_size]
     init_payload = {
         "folderPath": folder_path,
         "folderId": root_folder_id,
         "targetFolderId": root_folder_id,
-        "files": first_chunk
+        "files": [],
     }
 
     try:
-        logger.info(f"Sending request to Apps Script Web App for folder '{target_folder_name}'...")
-        resp = requests.post(target_url, json=init_payload, timeout=90)
-        if resp.status_code != 200:
-            logger.warning(f"Apps Script Web App HTTP error {resp.status_code}: {resp.text[:200]}")
-            return None
-
-        result = resp.json()
-        if result.get("status") != "success":
-            logger.warning(f"Apps Script Web App failed: {result.get('message')}")
+        logger.info(f"Resolving Drive folder '{target_folder_name}' via Apps Script Web App...")
+        result = _post_to_appscript_with_retry(target_url, init_payload, timeout=30, max_retries=3)
+        if not result:
+            logger.warning("Failed to resolve Drive folder via Apps Script. Keeping original CDN URLs.")
             return None
 
         folder_url = result.get("folderUrl")
@@ -415,36 +757,104 @@ def sync_menu_photos_via_appscript(
         if not folder_url and sub_folder_id:
             folder_url = f"https://drive.google.com/drive/folders/{sub_folder_id}"
 
-        logger.info(f"✅ Folder Drive successfully resolved: {folder_url}")
+        if not folder_url or not sub_folder_id:
+            logger.warning("Apps Script did not return valid folderUrl/subFolderId.")
+            return None
 
-        # 2. Step 2: Upload remaining chunks (if any)
-        remaining_files = downloaded_files[batch_size:]
-        if remaining_files and sub_folder_id:
-            for i in range(0, len(remaining_files), batch_size):
-                chunk = remaining_files[i:i + batch_size]
-                chunk_payload = {
-                    "folderId": sub_folder_id,
-                    "targetFolderId": sub_folder_id,
-                    "files": chunk
-                }
-                try:
-                    resp_c = requests.post(target_url, json=chunk_payload, timeout=90)
-                    if resp_c.status_code == 200:
-                        logger.info(f"Uploaded photo batch {i // batch_size + 2} ({len(chunk)} photos)")
-                    time.sleep(1)
-                except Exception as ec:
-                    logger.warning(f"Warning uploading photo chunk: {ec}")
+        logger.info(f"Drive folder resolved: {folder_url}")
 
-        _persist_drive_photo_baseline(folder_url, sid, dishes)
+        if not photo_tasks:
+            return folder_url
+
+        if run_async:
+            bg_thread = threading.Thread(
+                target=_execute_appscript_photo_batches,
+                kwargs={
+                    "target_url": target_url,
+                    "sub_folder_id": sub_folder_id,
+                    "folder_url": folder_url,
+                    "sid": sid,
+                    "dishes": dishes,
+                    "photo_tasks": photo_tasks,
+                    "batch_size": batch_size,
+                    "excel_path": excel_path,
+                    "job_id": job_id,
+                },
+                daemon=True,
+            )
+            bg_thread.start()
+            return folder_url
+
+        _execute_appscript_photo_batches(
+            target_url=target_url,
+            sub_folder_id=sub_folder_id,
+            folder_url=folder_url,
+            sid=sid,
+            dishes=dishes,
+            photo_tasks=photo_tasks,
+            batch_size=batch_size,
+            excel_path=excel_path,
+            job_id=job_id,
+        )
         return folder_url
     except Exception as exc:
         logger.error(f"Exception calling Google Apps Script Web App: {exc}")
         return None
 
 
-# =====================================================================
-# Main Unified Interface
-# =====================================================================
+def _execute_sa_photo_uploads(
+    sa_service,
+    folder_id: str,
+    folder_url: str,
+    sid: str,
+    dishes: List[Dict[str, Any]],
+    photo_tasks: List[Tuple[str, str, str]],
+    excel_path: Optional[str] = None,
+    job_id: Optional[str] = None,
+) -> int:
+    """Upload photos via Google Drive Service Account with fallback to Apps Script if all uploads fail."""
+    uploaded = 0
+    if photo_tasks:
+        logger.info(f"Uploading {len(photo_tasks)} photos via Service Account...")
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [
+                executor.submit(
+                    _download_and_upload_single_photo_sa,
+                    sa_service,
+                    folder_id,
+                    t[0],
+                    t[1],
+                    t[2],
+                )
+                for t in photo_tasks
+            ]
+            for future in as_completed(futures):
+                try:
+                    if future.result():
+                        uploaded += 1
+                except Exception:
+                    pass
+
+    if uploaded == 0 and len(photo_tasks) > 0:
+        logger.warning("Service Account uploaded 0 photos. Restoring original CDN URLs in Excel.")
+        _restore_cdn_urls_in_excel(excel_path, dishes)
+        if job_id:
+            _update_job_photo_sync_metadata(job_id, {
+                "status": "FAILED",
+                "uploaded_photos": 0,
+                "message": "Gagal menyalin foto ke Google Drive. Kolom Photo Link di Excel telah dikembalikan ke link CDN asli.",
+            })
+        return 0
+
+    _persist_drive_photo_baseline(folder_url, sid, dishes)
+    if job_id:
+        _update_job_photo_sync_metadata(job_id, {
+            "status": "SUCCESS" if uploaded >= len(photo_tasks) else "PARTIAL",
+            "uploaded_photos": uploaded,
+            "completed_at": datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%H:%M WIB"),
+        })
+    return uploaded
+
 
 def sync_menu_photos_to_drive(
     owner_name: str,
@@ -452,15 +862,24 @@ def sync_menu_photos_to_drive(
     listing_name: str,
     sid: str,
     dishes: List[Dict[str, Any]],
-    timestamp_str: Optional[str] = None
+    timestamp_str: Optional[str] = None,
+    run_async: bool = False,
+    excel_path: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Main entry point for photo sync:
-    1. If Service Account credentials are valid, uses Service Account.
-    2. Otherwise, uses Google Apps Script Web App (GDRIVE_APPSCRIPT_URL).
-    3. If neither or if it fails, logs warning and returns None (caller keeps CDN URLs).
+    1. Checks ENABLE_GDRIVE_PHOTO_SYNC toggle.
+    2. If Service Account credentials are valid, uses Service Account.
+    3. Otherwise, uses Google Apps Script Web App (GDRIVE_APPSCRIPT_URL).
+    4. If neither or if folder creation fails, returns None so caller keeps CDN URLs.
     """
-    # 1. Try Service Account first if available
+    if not is_photo_sync_enabled():
+        logger.info("ENABLE_GDRIVE_PHOTO_SYNC is disabled. Skipping photo sync to Google Drive.")
+        return None
+
+    photo_tasks = _extract_photo_tasks(dishes)
+
     sa_service = get_drive_service()
     if sa_service:
         try:
@@ -473,51 +892,116 @@ def sync_menu_photos_to_drive(
                 timestamp_str=timestamp_str
             )
             if folder_id and folder_url:
-                photo_tasks = []
-                name_counts = {}
-                for d in dishes:
-                    item_name = str(d.get("item_name") or d.get("Item") or d.get("nama_item") or "").strip()
-                    photo_url = str(d.get("photo_url") or d.get("link_foto") or d.get("Photo Link") or "").strip()
-                    item_id = str(d.get("item_id") or d.get("dish_id") or d.get("Item ID") or "").strip()
+                if run_async and photo_tasks:
+                    threading.Thread(
+                        target=_execute_sa_photo_uploads,
+                        kwargs={
+                            "sa_service": sa_service,
+                            "folder_id": folder_id,
+                            "folder_url": folder_url,
+                            "sid": sid,
+                            "dishes": dishes,
+                            "photo_tasks": photo_tasks,
+                            "excel_path": excel_path,
+                            "job_id": job_id,
+                        },
+                        daemon=True,
+                    ).start()
+                    return folder_url
 
-                    if photo_url and photo_url.startswith(("http://", "https://")):
-                        norm_name = item_name.casefold()
-                        name_counts[norm_name] = name_counts.get(norm_name, 0) + 1
-                        unique_name = item_name
-                        if name_counts[norm_name] > 1:
-                            unique_name = f"{item_name} ({item_id or name_counts[norm_name]})"
-                        photo_tasks.append((unique_name, photo_url, item_id))
-
-                if photo_tasks:
-                    logger.info(f"Uploading {len(photo_tasks)} photos via Service Account...")
-                    with ThreadPoolExecutor(max_workers=6) as executor:
-                        futures = [
-                            executor.submit(
-                                _download_and_upload_single_photo_sa,
-                                sa_service,
-                                folder_id,
-                                t[0],
-                                t[1],
-                                t[2]
-                            )
-                            for t in photo_tasks
-                        ]
-                        for future in as_completed(futures):
-                            try:
-                                future.result()
-                            except Exception:
-                                pass
-                _persist_drive_photo_baseline(folder_url, sid, dishes)
+                _execute_sa_photo_uploads(
+                    sa_service=sa_service,
+                    folder_id=folder_id,
+                    folder_url=folder_url,
+                    sid=sid,
+                    dishes=dishes,
+                    photo_tasks=photo_tasks,
+                    excel_path=excel_path,
+                    job_id=job_id,
+                )
                 return folder_url
         except Exception as e_sa:
             logger.warning(f"Service Account sync failed: {e_sa}. Falling back to Apps Script Web App.")
 
-    # 2. Use Google Apps Script Web App
     return sync_menu_photos_via_appscript(
         owner_name=owner_name,
         platform=platform,
         listing_name=listing_name,
         sid=sid,
         dishes=dishes,
-        timestamp_str=timestamp_str
+        timestamp_str=timestamp_str,
+        run_async=run_async,
+        excel_path=excel_path,
+        job_id=job_id,
     )
+
+
+def prepare_and_start_photo_sync(
+    owner_name: str,
+    platform: str,
+    listing_name: str,
+    sid: str,
+    dishes: List[Dict[str, Any]],
+    excel_path: Optional[str] = None,
+    job_id: Optional[str] = None,
+    timestamp_str: Optional[str] = None,
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """
+    Resolve the Google Drive folder immediately (~2s), start background photo collection,
+    and return (drive_folder_url, photo_sync_metadata) for the frontend UI.
+    """
+    photo_tasks = _extract_photo_tasks(dishes)
+    total_photos = len(photo_tasks)
+
+    if not timestamp_str:
+        timestamp_str = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y-%m-%d %H:%M")
+
+    target_folder_name = format_photo_folder_label(platform, listing_name, sid, timestamp_str)
+
+    if not is_photo_sync_enabled():
+        return None, {
+            "status": "DISABLED",
+            "total_photos": total_photos,
+            "target_folder_name": target_folder_name,
+            "message": "Sinkronisasi foto Google Drive dinonaktifkan melalui konfigurasi server.",
+        }
+
+    if total_photos == 0:
+        return None, {
+            "status": "SKIPPED",
+            "total_photos": 0,
+            "target_folder_name": target_folder_name,
+            "message": "Tidak ada foto menu untuk disinkronkan.",
+        }
+
+    eta_info = calculate_photo_sync_eta(total_photos)
+    folder_url = sync_menu_photos_to_drive(
+        owner_name=owner_name,
+        platform=platform,
+        listing_name=listing_name,
+        sid=sid,
+        dishes=dishes,
+        timestamp_str=timestamp_str,
+        run_async=True,
+        excel_path=excel_path,
+        job_id=job_id,
+    )
+
+    if not folder_url:
+        return None, {
+            "status": "FAILED",
+            "total_photos": total_photos,
+            "target_folder_name": target_folder_name,
+            "message": "Gagal membuat folder Google Drive. Kolom Photo Link di Excel menggunakan link CDN asli.",
+        }
+
+    return folder_url, {
+        "status": "PROCESSING",
+        "total_photos": total_photos,
+        "uploaded_photos": 0,
+        "estimated_seconds": eta_info["estimated_seconds"],
+        "estimated_completion": eta_info["estimated_completion"],
+        "estimated_completion_iso": eta_info["estimated_completion_iso"],
+        "drive_folder_url": folder_url,
+        "target_folder_name": target_folder_name,
+    }

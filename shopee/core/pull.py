@@ -28,6 +28,10 @@ from menu_core.c5_template_helper import (
     get_c5_headers,
     DATA_START_ROW,
     is_c5_reserved_row,
+    upsert_folder_link_sheet,
+    FOLDER_LINK_SHEET_NAME,
+    FOLDER_LINK_LABEL_HEADER,
+    FOLDER_LINK_URL_HEADER,
 )
 
 IMG_BASE = "https://down-id.img.susercontent.com/file"
@@ -582,19 +586,21 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             except Exception as prev_err:
                 print(f"[⚠️] Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
 
-        # ── Sinkronisasi Foto Menu ke Folder Google Drive ──
         drive_folder_url = None
+        photo_sync_meta = None
         try:
-            from menu_core.gdrive_service import sync_menu_photos_to_drive
+            from menu_core.gdrive_service import prepare_and_start_photo_sync
             owner_name = store_metadata.get("owner") or "Default Owner"
             listing_name = raw_resto_final or raw_outlet or "ShopeeFood Outlet"
             sid = str(store_metadata.get("store_id") or "").strip()
-            drive_folder_url = sync_menu_photos_to_drive(
+            drive_folder_url, photo_sync_meta = prepare_and_start_photo_sync(
                 owner_name=owner_name,
                 platform="ShopeeFood",
                 listing_name=listing_name,
                 sid=sid,
-                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes]
+                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes],
+                excel_path=excel_path,
+                job_id=store_metadata.get("job_id"),
             )
         except Exception as e_drive:
             print(f"[⚠️] Gagal sinkronisasi foto ke Google Drive: {e_drive}")
@@ -614,8 +620,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 dish_id_str = str(d.get('dish_id', '')).strip()
                 prev_row = prev_user_data.get(dish_id_str, {})
 
-                # Gunakan Drive folder URL jika tersedia, jika tidak fallback ke CDN
-                photo_link_val = drive_folder_url if drive_folder_url else d['link_foto']
+                photo_link_val = d['link_foto']
 
                 mapping = {
                     'OFD': d['ofd'],
@@ -702,7 +707,11 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                                 val = str(val)
                         sheet_mod.cell(row=new_row_idx, column=col_idx, value=val)
                 new_row_idx += 1
-                        
+
+            folder_label = (photo_sync_meta or {}).get("target_folder_name") or ""
+            folder_entries = [(folder_label, drive_folder_url)] if drive_folder_url else []
+            upsert_folder_link_sheet(wb, folder_entries)
+
             wb.save(excel_path)
             if prev_user_data:
                 print(f"[+] Berhasil menyimpan file catalog dengan data user yang di-preserve ke: {excel_path}")
@@ -712,16 +721,23 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         except Exception as ex_err:
             print(f"[-] Gagal menulis ke template O.C5: {ex_err}. Fallback ke Excel biasa.")
             # Fallback to standard excel writer if template fails
+            folder_label = (photo_sync_meta or {}).get("target_folder_name") or ""
+            df_folder_links = pd.DataFrame(
+                [[folder_label, drive_folder_url]] if drive_folder_url else [],
+                columns=[FOLDER_LINK_LABEL_HEADER, FOLDER_LINK_URL_HEADER],
+            )
             with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
                 df_items.to_excel(writer, sheet_name='Item', index=False)
                 df_mods.to_excel(writer, sheet_name='Modifier', index=False)
+                df_folder_links.to_excel(writer, sheet_name=FOLDER_LINK_SHEET_NAME, index=False)
             
         return True, {
             'items_csv': None,
             'mods_csv': None,
             'excel': excel_path,
             'items_count': len(df_items),
-            'mods_count': len(df_mods)
+            'mods_count': len(df_mods),
+            'photo_sync': photo_sync_meta,
         }
     except Exception as e:
         return False, f"Error selama ekstraksi menu: {e}"
