@@ -303,7 +303,10 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
             return nextJobs;
           });
 
-          if (job.status === "SUCCESS" || job.status === "FAILED" || job.status === "CANCELLED") {
+          const photoSyncStatus = job.result_metadata?.photo_sync?.status;
+          const isTerminal = job.status === "SUCCESS" || job.status === "FAILED" || job.status === "CANCELLED";
+          const isPhotoSyncPending = job.status === "SUCCESS" && photoSyncStatus === "PROCESSING";
+          if (isTerminal && !isPhotoSyncPending) {
             clearInterval(pollingIntervalsRef.current[jobId]);
             delete pollingIntervalsRef.current[jobId];
           }
@@ -888,6 +891,60 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                   {job.error_message && (
                     <div className="rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 p-2 text-[13px] text-red-700 dark:text-red-400">
                       {job.error_message}
+                    </div>
+                  )}
+
+                  {job.status === "SUCCESS" && job.result_metadata?.photo_sync && job.result_metadata.photo_sync.total_photos > 0 && (
+                    <div
+                      className={`rounded-lg border p-3 text-[13px] ${
+                        job.result_metadata.photo_sync.status === "PROCESSING"
+                          ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/40 dark:text-amber-200"
+                          : job.result_metadata.photo_sync.status === "FAILED"
+                          ? "border-red-300 bg-red-50 text-red-800 dark:border-red-800/70 dark:bg-red-950/40 dark:text-red-200"
+                          : "border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-200"
+                      }`}
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                        <div className="space-y-0.5">
+                          {job.result_metadata.photo_sync.status === "PROCESSING" && (
+                            <>
+                              <p className="font-semibold">
+                                Pengumpulan {job.result_metadata.photo_sync.total_photos} foto ke Google Drive berjalan di latar belakang
+                              </p>
+                              <p className="text-xs text-amber-800 dark:text-amber-300">
+                                Perkiraan selesai pukul <strong>{job.result_metadata.photo_sync.estimated_completion}</strong>. File Excel C5 sudah dapat diunduh sekarang.
+                              </p>
+                            </>
+                          )}
+                          {(job.result_metadata.photo_sync.status === "SUCCESS" || job.result_metadata.photo_sync.status === "PARTIAL") && (
+                            <>
+                              <p className="font-semibold">
+                                Pengumpulan foto ke Google Drive selesai ({job.result_metadata.photo_sync.uploaded_photos ?? job.result_metadata.photo_sync.total_photos}/{job.result_metadata.photo_sync.total_photos} foto)
+                              </p>
+                              {job.result_metadata.photo_sync.completed_at && (
+                                <p className="text-xs text-emerald-800 dark:text-emerald-300">
+                                  Terkumpul pukul {job.result_metadata.photo_sync.completed_at}.
+                                </p>
+                              )}
+                            </>
+                          )}
+                          {job.result_metadata.photo_sync.status === "FAILED" && (
+                            <p className="font-medium">
+                              {job.result_metadata.photo_sync.message || "Gagal menyalin foto ke Google Drive. Kolom Photo Link di Excel tetap menggunakan link foto CDN asli."}
+                            </p>
+                          )}
+                        </div>
+                        {job.result_metadata.photo_sync.drive_folder_url && job.result_metadata.photo_sync.status !== "FAILED" && (
+                          <a
+                            href={job.result_metadata.photo_sync.drive_folder_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex min-h-[36px] shrink-0 items-center justify-center rounded-lg border border-current/25 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-900 transition hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 dark:bg-zinc-900 dark:text-white dark:hover:bg-zinc-800"
+                          >
+                            Buka Folder Foto Drive
+                          </a>
+                        )}
+                      </div>
                     </div>
                   )}
 

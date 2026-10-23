@@ -593,7 +593,7 @@ def sync_sheets(db: Session = Depends(get_db)):
         nama_portal = str(portal_raw).strip() if pd.notna(portal_raw) and str(portal_raw).strip() not in ("-", "", "nan", "None") else None
 
         merchant_name = str(row.get("Outlet") or row.get("Merchant Name") or brand or nama_outlet or "").strip()
-        cabang = brand or str(row.get("Cabang", "")).strip() or None
+        cabang = nama_resto_final or nama_outlet or brand or str(row.get("Cabang", "")).strip() or None
 
         # 3. Upsert Outlet
         db_outlet = None
@@ -953,6 +953,11 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 logger.info(f"🛑 Job {job_id} was CANCELLED before Shopee success commit.")
                 return
 
+            existing_ps = (job.result_metadata or {}).get("photo_sync") if isinstance(job.result_metadata, dict) else None
+            photo_sync_meta = dict(result.get("photo_sync") or {})
+            if isinstance(existing_ps, dict):
+                photo_sync_meta.update(existing_ps)
+
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu selesai!"
@@ -962,6 +967,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "mods_csv_path": result.get("mods_csv"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
+                "photo_sync": photo_sync_meta or None,
                 "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
@@ -1002,6 +1008,11 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 logger.info(f"🛑 Job {job_id} was CANCELLED before GoFood success commit.")
                 return
 
+            existing_ps = (job.result_metadata or {}).get("photo_sync") if isinstance(job.result_metadata, dict) else None
+            photo_sync_meta = dict(result.get("photo_sync") or {})
+            if isinstance(existing_ps, dict):
+                photo_sync_meta.update(existing_ps)
+
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu GoFood selesai!"
@@ -1009,6 +1020,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "excel_path": result.get("excel"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
+                "photo_sync": photo_sync_meta or None,
                 "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
@@ -1049,6 +1061,11 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 logger.info(f"🛑 Job {job_id} was CANCELLED before Grab success commit.")
                 return
 
+            existing_ps = (job.result_metadata or {}).get("photo_sync") if isinstance(job.result_metadata, dict) else None
+            photo_sync_meta = dict(result.get("photo_sync") or {})
+            if isinstance(existing_ps, dict):
+                photo_sync_meta.update(existing_ps)
+
             job.status = "SUCCESS"
             job.progress_pct = 100
             job.current_step = "Penarikan menu GrabFood selesai!"
@@ -1056,6 +1073,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "excel_path": result.get("excel"),
                 "items_count": result.get("items_count", 0),
                 "mods_count": result.get("mods_count", 0),
+                "photo_sync": photo_sync_meta or None,
                 "completed_at": datetime.utcnow().isoformat()
             }
             job.completed_at = datetime.utcnow()
@@ -4881,9 +4899,11 @@ async def parse_c5_endpoint(
         item_name = get_val(row, item_col)
         photo_link_raw = get_val(row, photo_col)
         design_imp = get_val(row, resolve_col(['Design Improvement', 'Photo Improvement'])) if resolve_col(['Design Improvement', 'Photo Improvement']) else ""
-        # Drive folder links are accepted only from Photo Link. Design
-        # Improvement remains available for its existing direct-image URL use.
-        drive_folder_link = photo_link_raw if is_drive_folder_link(photo_link_raw) else ""
+        drive_folder_link = (
+            photo_link_raw
+            if is_drive_folder_link(photo_link_raw)
+            else (design_imp if is_drive_folder_link(design_imp) else "")
+        )
         drive_image_requested = bool(drive_folder_link)
 
         # A folder URL is a search location, never an image URL for the push API.
@@ -4998,9 +5018,12 @@ async def parse_c5_endpoint(
             resolver_root = drive_folder_link or drive_root
             folder_match = re.search(r"/folders/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", drive_folder_link)
             current_folder_id = (folder_match.group(1) or folder_match.group(2)) if folder_match else ""
-            if photo_baseline_record and current_folder_id == str(photo_baseline_record.get("folder_id") or ""):
-                # The archived folder from the baseline is already known; no
-                # Drive API lookup is needed for its unchanged image.
+            baseline_was_folder_link = is_drive_folder_link(base_img)
+            if (
+                baseline_was_folder_link
+                and photo_baseline_record
+                and current_folder_id == str(photo_baseline_record.get("folder_id") or "")
+            ):
                 photo_link = base_img
                 drive_archive_image = True
             else:
@@ -5012,13 +5035,13 @@ async def parse_c5_endpoint(
                     photo_link = resolved_drive_image
                     image_id_match = re.search(r"googleusercontent\.com/d/([a-zA-Z0-9_-]+)", resolved_drive_image)
                     resolved_file_id = image_id_match.group(1) if image_id_match else ""
-                    if photo_baseline_record:
-                        drive_archive_image = resolved_file_id == str(photo_baseline_record.get("file_id") or "")
+                    if baseline_was_folder_link:
+                        if photo_baseline_record:
+                            drive_archive_image = resolved_file_id == str(photo_baseline_record.get("file_id") or "")
+                        else:
+                            drive_archive_image = True
                     else:
-                        # Legacy pull baselines have no Drive file identity.
-                        # Preserve their archive behavior until a new pull
-                        # writes the identity metadata.
-                        drive_archive_image = True
+                        drive_archive_image = False
                 else:
                     photo_link = base_img
                     photo_resolution_error = f"Gambar untuk '{resolver_name or item_name}' tidak ditemukan di folder Drive."
@@ -5774,8 +5797,12 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
 
     # ── Field Character Length Validations (All Platforms) ──
     # Nama item <= 60, Category <= 80, Description <= 250
+    # Note: Skip DELETE_ITEM because deleted items are existing baseline items being removed,
+    # not new mutations to be published.
     invalid_length_errors = []
     for item in request.updates:
+        if "DELETE_ITEM" in (item.changes or []):
+            continue
         target_name = (item.item_name_new or item.item_name or "").strip()
         if len(target_name) > 60:
             invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks 60)")

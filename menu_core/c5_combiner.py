@@ -9,6 +9,11 @@ from menu_core.c5_template_helper import (
     get_c5_headers,
     DATA_START_ROW,
     is_c5_reserved_row,
+    upsert_folder_link_sheet,
+    read_folder_link_entries,
+    FOLDER_LINK_SHEET_NAME,
+    FOLDER_LINK_LABEL_HEADER,
+    FOLDER_LINK_URL_HEADER,
 )
 
 FILE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -248,10 +253,11 @@ def _get_ofd_sort_order(ofd_val):
 
 def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_count=False, db=None):
     """
-    Combines multiple C5 Excel files (Item & Modifier sheets) into a single C5 Excel file.
+    Combines multiple C5 Excel files (Item, Modifier, and Folder Link sheets) into a single C5 Excel file.
     """
     all_items = []
     all_mods = []
+    all_folder_entries = []
     for f in excel_paths:
         if f and os.path.exists(f):
             try:
@@ -265,13 +271,26 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
                     elif 'Outlet Name' in df_item.columns and 'Listing Name' not in df_item.columns:
                         df_item['Listing Name'] = df_item['Outlet Name']
                 if not df_mod.empty:
-                    df_mod = df_mod[~df_mod.iloc[:, 0].astype(str).str.lower().str.contains("don't touch")]
+                    df_mod = df_mod[~df_mod.iloc[:, 0].astype(str).str.contains("don't touch", case=False, na=False)]
                     if 'Listing Name' in df_mod.columns and 'Outlet Name' not in df_mod.columns:
                         df_mod['Outlet Name'] = df_mod['Listing Name']
                     elif 'Outlet Name' in df_mod.columns and 'Listing Name' not in df_mod.columns:
                         df_mod['Listing Name'] = df_mod['Outlet Name']
                 all_items.append(df_item)
                 all_mods.append(df_mod)
+
+                file_folder_entries = read_folder_link_entries(f)
+                if file_folder_entries:
+                    all_folder_entries.extend(file_folder_entries)
+                elif not df_item.empty and 'Photo Link' in df_item.columns:
+                    for _, row_it in df_item.iterrows():
+                        plink = str(row_it.get('Photo Link') or '').strip()
+                        if 'drive.google.com/drive/folders/' in plink:
+                            ofd_v = str(row_it.get('OFD') or '').strip()
+                            ln_v = str(row_it.get('Listing Name') or row_it.get('Outlet Name') or '').strip()
+                            sid_v = _identity_value(row_it.get('SID'))
+                            all_folder_entries.append((f"{ofd_v} | {ln_v} | {sid_v}", plink))
+                            break
             except Exception as e:
                 print(f"[C5 Combiner] Error reading {f}: {e}")
                 
@@ -290,6 +309,12 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
     if 'OFD' in df_combined_mods.columns:
         df_combined_mods['_ofd_sort'] = df_combined_mods['OFD'].map(_get_ofd_sort_order)
         df_combined_mods = df_combined_mods.sort_values(by=['_ofd_sort'], kind='stable').drop(columns=['_ofd_sort']).reset_index(drop=True)
+
+    if all_folder_entries:
+        all_folder_entries = sorted(
+            all_folder_entries,
+            key=lambda entry: _get_ofd_sort_order(str(entry[0] or '').split('|')[0]),
+        )
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
@@ -341,7 +366,9 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
                 if '(%)' in val_str:
                     for r in range(DATA_START_ROW, sheet_mod.max_row + 1):
                         sheet_mod.cell(row=r, column=cell.column).number_format = '0%'
-                        
+
+            upsert_folder_link_sheet(wb, all_folder_entries)
+
             wb.save(output_path)
             restored_count = _restore_offline_prices(output_path, previous_workbook, db=db)
             return {"success": True, "offline_fields_restored": restored_count} if return_restore_count else True
@@ -349,9 +376,14 @@ def combine_c5(excel_paths, output_path, previous_workbook=None, return_restore_
             print(f"[C5 Combiner] Failed writing to template, fallback to raw pandas export: {e}")
             
     try:
+        df_folder_links = pd.DataFrame(
+            all_folder_entries,
+            columns=[FOLDER_LINK_LABEL_HEADER, FOLDER_LINK_URL_HEADER],
+        )
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             df_combined_items.to_excel(writer, sheet_name='Item', index=False)
             df_combined_mods.to_excel(writer, sheet_name='Modifier', index=False)
+            df_folder_links.to_excel(writer, sheet_name=FOLDER_LINK_SHEET_NAME, index=False)
         restored_count = _restore_offline_prices(output_path, previous_workbook, db=db)
         return {"success": True, "offline_fields_restored": restored_count} if return_restore_count else True
     except Exception as ex:
