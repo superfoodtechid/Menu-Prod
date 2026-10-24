@@ -70,6 +70,7 @@ def _boot_push_client(store_metadata: dict, headless: bool = True, force_browser
             headless=headless,
             close_browser=True,
             target_name=target_name,
+            target_store_id=store_id,
             interactive=True
         )
     except Exception as e:
@@ -83,6 +84,7 @@ def _boot_push_client(store_metadata: dict, headless: bool = True, force_browser
                 headless=headless,
                 close_browser=True,
                 target_name="",
+                target_store_id=store_id,
                 interactive=True
             )
         except Exception as ex:

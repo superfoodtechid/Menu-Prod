@@ -64,6 +64,7 @@ def _boot_client(store_metadata: dict, headless: bool = True, force_browser: boo
         headless=headless,
         close_browser=True,
         target_name=target_name,
+        target_store_id=store_id,
         interactive=True
     )
     if not session_data or "shopee_tob_token" not in session_data:
@@ -172,6 +173,7 @@ def edit_dish_upload_image(
             headless=headless,
             close_browser=False,
             target_name=target_name,
+            target_store_id=target_store_id,
             interactive=False
         )
         if not session_data or "driver" not in session_data:

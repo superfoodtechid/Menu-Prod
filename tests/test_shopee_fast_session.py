@@ -278,7 +278,10 @@ class TestShopeeFastSession(unittest.TestCase):
             "nama_portal": "[SR] Bebek bumbu hitam & Ayam crispy rizqna"
         }
 
-        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}):
+        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}), \
+             patch("menu_core.gdrive_service.prepare_and_start_photo_sync", return_value=(None, None)), \
+             patch("openpyxl.load_workbook", side_effect=Exception("skip template")), \
+             patch("shopee.core.pull.pd.ExcelWriter"):
             success, res_path = extract_shopee_menu(store_metadata, output_dir="/tmp/test_shopee_out")
             self.assertTrue(success)
             self.assertEqual(store_metadata["store_id"], "23836720")
@@ -343,7 +346,10 @@ class TestShopeeFastSession(unittest.TestCase):
             "nama_portal": "[SR] Ayam geprek cinta_"
         }
 
-        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}):
+        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}), \
+             patch("menu_core.gdrive_service.prepare_and_start_photo_sync", return_value=(None, None)), \
+             patch("openpyxl.load_workbook", side_effect=Exception("skip template")), \
+             patch("shopee.core.pull.pd.ExcelWriter"):
             success, res_path = extract_shopee_menu(store_metadata, output_dir="/tmp/test_shopee_out")
             self.assertTrue(success)
             self.assertEqual(mock_client.get_store_option_groups.call_count, 2)
