@@ -355,7 +355,7 @@ def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout
     now = time.time()
     username = (store_metadata.get("username") or "").strip()
     store_id = str(store_metadata.get("store_id") or "").strip()
-    cache_key = username or store_id or "default"
+    cache_key = f"{username}_{store_id}" if (username and store_id) else (username or store_id or "default")
 
     # 1. Cek In-Memory Cache
     mem_entry = _IN_MEMORY_SESSION_CACHE.get(cache_key)
@@ -386,6 +386,13 @@ def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout
     except Exception as read_err:
         log.debug(f"Gagal membaca file sesi {session_file}: {read_err}")
         return None
+
+    # Validasi entity_id sesi tersimpan agar tidak menggunakan token outlet lain
+    raw_eid = str(raw_data.get("shopee_tob_entity_id") or "").strip()
+    if store_id and store_id not in ("-", "nan", "none") and raw_eid and raw_eid not in ("-", "nan", "none"):
+        if raw_eid != store_id:
+            log.info(f"ℹ️ [SESSION] Sesi di {session_file.name} memiliki entity_id ({raw_eid}) berbeda dengan target ({store_id}). Melewati fast-path.")
+            return None
 
     tob_token = (raw_data.get("shopee_tob_token") or "").strip()
     if not tob_token:
@@ -430,10 +437,10 @@ def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout
         "validated_at": now,
         "user_data": user_data
     }
-    if username and username != cache_key:
-        _IN_MEMORY_SESSION_CACHE[username] = _IN_MEMORY_SESSION_CACHE[cache_key]
     if real_store_id and real_store_id != cache_key:
         _IN_MEMORY_SESSION_CACHE[real_store_id] = _IN_MEMORY_SESSION_CACHE[cache_key]
+    elif username and not store_id and username != cache_key:
+        _IN_MEMORY_SESSION_CACHE[username] = _IN_MEMORY_SESSION_CACHE[cache_key]
 
     log.info(f"⚡ [FAST-PATH] Berhasil memvalidasi sesi Shopee untuk '{username or real_store_id}' tanpa browser.")
     return fast_session
@@ -446,7 +453,7 @@ def invalidate_shopee_session(store_metadata: dict, base_dir: Path = None) -> No
     username = (store_metadata.get("username") or "").strip()
     store_id = str(store_metadata.get("store_id") or "").strip()
 
-    for k in [username, store_id, "default"]:
+    for k in [f"{username}_{store_id}", username, store_id, "default"]:
         if k:
             _IN_MEMORY_SESSION_CACHE.pop(k, None)
 

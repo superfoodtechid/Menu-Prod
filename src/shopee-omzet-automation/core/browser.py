@@ -686,12 +686,20 @@ def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tup
 def get_all_cookies_dict(driver) -> dict:
     return {c["name"]: c["value"] for c in driver.get_cookies()}
 
-def _trigger_and_extract_tokens(driver) -> tuple:
+def _trigger_and_extract_tokens(driver, expected_entity_id=None) -> tuple:
     # 1. Cek langsung dari sesi aktif browser (hindari page reload jika token sudah ada)
     tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
     if tob_token:
-        log.info(f"⚡ [SESSION] Token fresh sudah tersedia di cookies browser (entity_id: {entity_id}). Melewati trigger page.")
-        return tob_token, entity_id
+        if expected_entity_id and entity_id and str(entity_id).strip() != str(expected_entity_id).strip():
+            log.info(f"🔄 [SESSION] Token cookie entity_id ({entity_id}) tidak sesuai target ({expected_entity_id}). Menghapus cookie lama dan memicu token baru...")
+            try:
+                driver.delete_cookie("shopee_tob_token")
+            except Exception:
+                pass
+            tob_token = None
+        else:
+            log.info(f"⚡ [SESSION] Token fresh sudah tersedia di cookies browser (entity_id: {entity_id}). Melewati trigger page.")
+            return tob_token, entity_id
 
     log.info("🔄 [SESSION] Navigating to business hours settings to trigger fresh token...")
     try:
@@ -699,6 +707,18 @@ def _trigger_and_extract_tokens(driver) -> tuple:
             driver.delete_cookie("shopee_tob_token")
         except Exception:
             pass
+        if expected_entity_id:
+            try:
+                store_str = str(expected_entity_id).strip()
+                for domain in [".shopee.co.id", "partner.shopee.co.id"]:
+                    driver.execute_cdp_cmd('Network.setCookie', {
+                        'name': 'shopee_tob_entity_id',
+                        'value': store_str,
+                        'domain': domain,
+                        'path': '/'
+                    })
+            except Exception as cdp_err:
+                log.debug(f"Could not set shopee_tob_entity_id via CDP: {cdp_err}")
         driver.get(TOKEN_TRIGGER_PAGE)
         for _ in range(15):
             time.sleep(0.5)
@@ -2949,7 +2969,7 @@ def _restore_saved_session(driver, saved: dict, target_username: str = None) -> 
     log.warning("  ⚠️ [SESSION-RESTORE] Pemulihan sesi dari saved tokens belum berhasil mencapai Dashboard.")
     return False
 
-def get_session(username=None, password=None, phone=None, headless=None, close_browser=True, target_name=None, interactive=True) -> dict | None:
+def get_session(username=None, password=None, phone=None, headless=None, close_browser=True, target_name=None, interactive=True, target_store_id=None) -> dict | None:
     headless = resolve_shopee_headless(headless)
     for attempt in range(3):
         log.info(f"🌐 [BROWSER] Launching (headless={headless}, attempt={attempt+1}/3)...")
@@ -3195,7 +3215,10 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
             
             # ── Step 5: Decision - Switch or Stay? ──
             do_switch = False
-            if target_name:
+            if target_store_id and active_id and str(active_id).strip() != str(target_store_id).strip():
+                log.info(f"📍 [MERCHANT] Active merchant ID ({active_id}) != Target store ID ({target_store_id}). Switching...")
+                do_switch = True
+            elif target_name:
                 if active_name.lower() != target_name.lower():
                     log.info(f"📍 [MERCHANT] Current: {active_name} | Target: {target_name}. Switching...")
                     do_switch = True
@@ -3272,8 +3295,10 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                     time.sleep(2)
 
             # ── Step 6: Final Token Extraction ──
-            t, eid = _trigger_and_extract_tokens(driver)
-            if active_id and active_id != "None":
+            t, eid = _trigger_and_extract_tokens(driver, expected_entity_id=target_store_id)
+            if target_store_id:
+                eid = str(target_store_id)
+            elif active_id and active_id != "None":
                 if not eid or do_switch:
                     eid = active_id
                 

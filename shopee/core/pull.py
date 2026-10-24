@@ -145,6 +145,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 headless=headless,
                 close_browser=True,
                 target_name=target_name,
+                target_store_id=store_id,
                 interactive=True
             )
         except Exception as e:
@@ -237,12 +238,13 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
 
         if not catalogs:
             is_auth_error = (
-                client.last_code in (3004, 401, 1000002, 1000003)
+                client.last_code in (3004, 401, 1000002, 1000003, 1130014)
                 or "unauthorized" in str(client.last_error).lower()
                 or "token" in str(client.last_error).lower()
+                or "merchant authority invalid" in str(client.last_error).lower()
             )
             if is_auth_error:
-                print(f"[WARN] Sesi token Shopee kedaluwarsa atau invalid untuk '{username}'. Menghapus session cache dan membuka browser ulang...")
+                print(f"[WARN] Sesi token Shopee kedaluwarsa atau authority invalid (code: {client.last_code}, msg: '{client.last_error}') untuk '{username}'. Menghapus session cache dan membuka browser ulang...")
                 try:
                     if session_file.exists():
                         session_file.unlink()
@@ -260,6 +262,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 headless=headless,
                 close_browser=True,
                 target_name=target_name,
+                target_store_id=store_id,
                 interactive=True
             )
 
