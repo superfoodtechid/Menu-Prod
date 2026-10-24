@@ -86,6 +86,11 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
   const [parseResult, setParseResult] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
 
+  // Input Mode ('file' | 'drive')
+  const [inputMode, setInputMode] = useState("file");
+  const [driveUrl, setDriveUrl] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+
   const formatElapsed = (sec) => {
     const m = Math.floor(sec / 60);
     const s = sec % 60;
@@ -193,11 +198,6 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
       window.location.href = url.toString();
     }
   };
-
-  // Input Mode ('file' | 'drive')
-  const [inputMode, setInputMode] = useState("file");
-  const [driveUrl, setDriveUrl] = useState("");
-  const [isDragging, setIsDragging] = useState(false);
 
   const normalizePlatform = (value) => String(value || "")
     .toLowerCase()
