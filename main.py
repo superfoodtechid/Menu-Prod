@@ -74,7 +74,11 @@ def _run_parse_c5_background(job_id, filename, contents, drive_url=None):
                 return
             job.status = "RUNNING"
             job.progress_pct = 5
-            job.current_step = "Memproses file C5 dan mencocokkan baseline..."
+            job.current_step = (
+                "Mengunduh spreadsheet dari Google Drive / Sheets..."
+                if drive_url and not contents
+                else "Membaca file C5..."
+            )
             job.started_at = datetime.utcnow()
             db.commit()
 
@@ -4104,7 +4108,14 @@ async def parse_c5_endpoint(
     elif drive_url and drive_url.strip():
         filename = "Google Drive C5.xlsx"
         if background_job_id:
+            parse_job = db.query(Job).filter(Job.id == background_job_id).first()
+            if parse_job:
+                parse_job.current_step = "Mengunduh spreadsheet dari Google Drive / Sheets..."
+                db.commit()
             contents, filename = _download_gdrive_or_gsheet_bytes(drive_url.strip())
+            if parse_job:
+                parse_job.current_step = "Membaca sheet Item dan memuat data..."
+                db.commit()
     else:
         raise HTTPException(status_code=400, detail="Harap unggah file Excel C5 (.xlsx) atau masukkan Link Google Drive / Sheets.")
 
@@ -4143,6 +4154,11 @@ async def parse_c5_endpoint(
     if not parse_job:
         raise HTTPException(status_code=404, detail="Parse job tidak ditemukan atau sudah selesai.")
 
+    if parse_job:
+        parse_job.progress_pct = 15
+        parse_job.current_step = "Membuka file Excel dan memuat data..."
+        db.commit()
+
     # Refresh the Drive index once per C5 parse so recently added images are visible.
     _DRIVE_FOLDER_IMAGE_INDEX.clear()
 
@@ -4163,6 +4179,11 @@ async def parse_c5_endpoint(
 
     sheet = wb['Item']
     rows = list(sheet.iter_rows(values_only=True))
+    total_data_rows = max(1, len(rows) - 1)
+    if parse_job:
+        parse_job.progress_pct = 30
+        parse_job.current_step = f"Menganalisis {total_data_rows} baris katalog menu..."
+        db.commit()
     if len(rows) <= 1:
         return {
             "success": True,
@@ -4891,6 +4912,15 @@ async def parse_c5_endpoint(
         if not row or all(v is None for v in row) or is_c5_reserved_row(row):
             continue
 
+        if background_job_id and parse_job and total_data_rows > 0:
+            step_interval = max(25, total_data_rows // 12)
+            if (r_idx - 1) % step_interval == 0:
+                calc_pct = min(92, int(30 + ((r_idx - 1) / total_data_rows) * 62))
+                if calc_pct > parse_job.progress_pct:
+                    parse_job.progress_pct = calc_pct
+                    parse_job.current_step = f"Mencocokkan baris menu ({min(r_idx - 1, total_data_rows)}/{total_data_rows})..."
+                    db.commit()
+
         sid = get_val(row, sid_col) or "STORE-DEFAULT"
         outlet_name = get_val(row, outlet_col) or "Outlet Utama"
         cat_id = get_val(row, cat_id_col)
@@ -5585,6 +5615,11 @@ async def parse_c5_endpoint(
                 logger.info(f"💾 Tersimpan/terupdate {saved_offline} harga offline ke database dari C5.")
         except Exception as e_off:
             logger.warning(f"Gagal menyimpan harga offline ke database: {e_off}")
+
+    if background_job_id and parse_job:
+        parse_job.progress_pct = 95
+        parse_job.current_step = "Menyusun ringkasan pratinjau perubahan..."
+        db.commit()
 
     return {
         "success": True,

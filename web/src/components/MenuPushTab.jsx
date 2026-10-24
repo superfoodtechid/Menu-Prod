@@ -79,8 +79,73 @@ function friendlyPushError(rawMessage) {
 
 export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTab }) {
   const [parsing, setParsing] = useState(false);
+  const [parseStep, setParseStep] = useState("");
+  const [parseElapsedSeconds, setParseElapsedSeconds] = useState(0);
+  const [parseProgressPct, setParseProgressPct] = useState(0);
+  const parseTimerRef = useRef(null);
   const [parseResult, setParseResult] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
+
+  const formatElapsed = (sec) => {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s < 10 ? "0" : ""}${s}`;
+  };
+
+  useEffect(() => {
+    return () => {
+      if (parseTimerRef.current) clearInterval(parseTimerRef.current);
+    };
+  }, []);
+
+  // Calculate dynamic progress percentage and remaining time estimate
+  const parseProgressInfo = useMemo(() => {
+    if (!parsing) {
+      return {
+        percent: 0,
+        remainingText: "",
+        etaTime: "",
+      };
+    }
+
+    const baselineSec = inputMode === "drive" ? 75 : 40;
+    // Simulated progress to keep the bar lively between polling pulses
+    const simulated = Math.min(92, Math.floor((parseElapsedSeconds / baselineSec) * 88));
+    const percent = Math.min(98, Math.max(parseProgressPct || 0, simulated, 5));
+
+    // Dynamic remaining seconds estimation
+    let remainingSec;
+    if (percent >= 15) {
+      const estimatedTotal = parseElapsedSeconds / (percent / 100);
+      remainingSec = Math.max(5, Math.round(estimatedTotal - parseElapsedSeconds));
+    } else {
+      remainingSec = Math.max(10, baselineSec - parseElapsedSeconds);
+    }
+
+    if (parseElapsedSeconds >= baselineSec) {
+      remainingSec = Math.max(5, Math.round(18 / (1 + (parseElapsedSeconds - baselineSec) * 0.05)));
+    }
+
+    let remainingText = "";
+    if (remainingSec < 60) {
+      remainingText = `~${remainingSec} detik`;
+    } else {
+      const m = Math.floor(remainingSec / 60);
+      const s = remainingSec % 60;
+      remainingText = s > 0 ? `~${m} mnt ${s} dtk` : `~${m} menit`;
+    }
+
+    const etaDate = new Date(Date.now() + remainingSec * 1000);
+    const etaHours = String(etaDate.getHours()).padStart(2, "0");
+    const etaMins = String(etaDate.getMinutes()).padStart(2, "0");
+    const etaTime = `${etaHours}:${etaMins} WIB`;
+
+    return {
+      percent,
+      remainingText,
+      etaTime,
+    };
+  }, [parsing, inputMode, parseElapsedSeconds, parseProgressPct]);
 
   // Target platform for Push ('gofood' | 'grab' | 'shopee')
   const [selectedPlatforms, setSelectedPlatforms] = useState(["gofood"]);
@@ -180,6 +245,14 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
     }
 
     setParsing(true);
+    setParseElapsedSeconds(0);
+    setParseProgressPct(5);
+    setParseStep(fileToUpload ? "Membaca file Excel C5..." : "Mengunduh file dari Google Drive / Sheets...");
+    if (parseTimerRef.current) clearInterval(parseTimerRef.current);
+    parseTimerRef.current = setInterval(() => {
+      setParseElapsedSeconds((s) => s + 1);
+    }, 1000);
+
     setErrorMsg("");
     setParseResult(null);
     setSelectedSids([]);
@@ -221,10 +294,18 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
             });
             if (!statusRes.ok) throw new Error(`Status parsing tidak dapat dimuat (HTTP ${statusRes.status}).`);
             parseJob = await statusRes.json();
+            if (typeof parseJob?.progress_pct === "number") {
+              setParseProgressPct(parseJob.progress_pct);
+            }
+            if (parseJob?.current_step) {
+              setParseStep(parseJob.current_step);
+            }
             if (parseJob.status === "FAILED") {
               throw new Error(parseJob.error_message || "Server gagal memproses file C5.");
             }
             if (parseJob.status === "SUCCESS") {
+              setParseProgressPct(100);
+              setParseStep("Pratinjau C5 selesai diproses.");
               const resultRes = await fetch(`${API_BASE_URL}/api/jobs/parse-c5/${parseJobId}/result`, {
                 headers: { "X-API-Key": API_SECRET_KEY || "" }
               });
@@ -271,6 +352,10 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
       console.error("Error parsing C5:", err);
       setErrorMsg(err?.message || "Terjadi kesalahan jaringan atau koneksi terputus saat memproses file C5.");
     } finally {
+      if (parseTimerRef.current) {
+        clearInterval(parseTimerRef.current);
+        parseTimerRef.current = null;
+      }
       setParsing(false);
     }
   };
@@ -690,8 +775,65 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                   disabled={parsing || !driveUrl.trim()}
                   className="primary-action w-full text-xs"
                 >
-                  {parsing ? "Mengunduh & Memproses C5..." : "Ambil & Pratinjau Perubahan"}
+                  {parsing ? `Mengunduh & Memproses C5 (${parseProgressInfo.percent}% • ${formatElapsed(parseElapsedSeconds)})...` : "Ambil & Pratinjau Perubahan"}
                 </button>
+
+                {!parsing && (
+                  <p className="text-center text-[11px] text-slate-500 dark:text-zinc-400">
+                    Perkiraan waktu membaca: <strong>sekitar 1 - 2 menit</strong> tergantung ukuran katalog dan koneksi Google Sheets.
+                  </p>
+                )}
+
+                {parsing && (
+                  <div className="w-full rounded-xl border border-amber-300 bg-amber-50 p-4 text-left dark:border-amber-800/70 dark:bg-amber-950/40">
+                    <div className="flex items-start gap-3">
+                      <svg className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-amber-700 dark:text-amber-400" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      <div className="flex-1 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-bold text-amber-950 dark:text-amber-100">
+                            {parseStep || "Mengunduh & menganalisis file C5..."}
+                          </p>
+                          <span className="font-mono text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                            {parseProgressInfo.percent}%
+                          </span>
+                        </div>
+
+                        {/* Dynamic Animated Progress Bar */}
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-amber-200/90 dark:bg-amber-900/50">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-600 transition-all duration-500 ease-out dark:from-amber-400 dark:to-amber-500"
+                            style={{ width: `${parseProgressInfo.percent}%` }}
+                          />
+                        </div>
+
+                        {/* Dynamic Timer & ETA */}
+                        <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-amber-800 dark:text-amber-300">
+                          <span>
+                            Waktu berjalan: <strong className="font-mono">{formatElapsed(parseElapsedSeconds)}</strong>
+                          </span>
+                          <span>
+                            Tersisa: <strong>{parseProgressInfo.remainingText}</strong> (est. {parseProgressInfo.etaTime})
+                          </span>
+                        </div>
+
+                        <p className="text-[11px] text-amber-700 dark:text-amber-300/80">
+                          {parseElapsedSeconds >= 60
+                            ? "Katalog besar atau multi-outlet memerlukan waktu verifikasi lebih lama. Mohon tetap di halaman ini."
+                            : "Sistem sedang mengunduh spreadsheet, membaca sheet Item, dan mencocokkan perubahan ke baseline menu."}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {errorMsg && (
+                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+                    {errorMsg}
+                  </div>
+                )}
               </form>
             </div>
           ) : (
@@ -739,7 +881,7 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                 </svg>
-                <span>{parsing ? "Memproses File..." : "Pilih File C5"}</span>
+                <span>{parsing ? `Memproses File (${parseProgressInfo.percent}% • ${formatElapsed(parseElapsedSeconds)})...` : "Pilih File C5"}</span>
                 <input
                   type="file"
                   accept=".xlsx,.xls"
@@ -749,13 +891,54 @@ export default function MenuPushTab({ API_BASE_URL, API_SECRET_KEY, onNavigateTa
                 />
               </label>
 
+              {!parsing && (
+                <p className="mt-3 text-center text-[11px] text-slate-500 dark:text-zinc-400">
+                  Perkiraan waktu membaca: <strong>sekitar 30 detik - 1.5 menit</strong> tergantung jumlah baris menu.
+                </p>
+              )}
+
               {parsing && (
-                <div className="mt-4 flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-zinc-400">
-                  <svg className="h-4 w-4 animate-spin text-slate-800 dark:text-zinc-200" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  <span>Membaca sheet Item & mengekstrak perubahan...</span>
+                <div className="mt-4 w-full max-w-md rounded-xl border border-amber-300 bg-amber-50 p-4 text-left dark:border-amber-800/70 dark:bg-amber-950/40">
+                  <div className="flex items-start gap-3">
+                    <svg className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-amber-700 dark:text-amber-400" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    <div className="flex-1 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs font-bold text-amber-950 dark:text-amber-100">
+                          {parseStep || "Membaca file Excel C5..."}
+                        </p>
+                        <span className="font-mono text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                          {parseProgressInfo.percent}%
+                        </span>
+                      </div>
+
+                      {/* Dynamic Animated Progress Bar */}
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-amber-200/90 dark:bg-amber-900/50">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-600 transition-all duration-500 ease-out dark:from-amber-400 dark:to-amber-500"
+                          style={{ width: `${parseProgressInfo.percent}%` }}
+                        />
+                      </div>
+
+                      {/* Dynamic Timer & ETA */}
+                      <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-amber-800 dark:text-amber-300">
+                        <span>
+                          Waktu berjalan: <strong className="font-mono">{formatElapsed(parseElapsedSeconds)}</strong>
+                        </span>
+                        <span>
+                          Tersisa: <strong>{parseProgressInfo.remainingText}</strong> (est. {parseProgressInfo.etaTime})
+                        </span>
+                      </div>
+
+                      <p className="text-[11px] text-amber-700 dark:text-amber-300/80">
+                        {parseElapsedSeconds >= 45
+                          ? "File berukuran besar sedang diverifikasi baris demi baris. Mohon tetap di halaman ini."
+                          : "Sistem sedang membaca sheet Item, mendeteksi Store ID, dan memverifikasi perubahan terhadap baseline."}
+                      </p>
+                    </div>
+                  </div>
                 </div>
               )}
 
