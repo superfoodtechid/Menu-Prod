@@ -346,7 +346,7 @@ def get_push_session(
     headless: bool = True
 ) -> dict | None:
     """
-    Login ke Shopee Partner sebagai {username} menggunakan engine browser teruji.
+    Mengambil sesi push owner yang sudah ada; tidak memulai login/OTP otomatis.
     """
     from core import browser
     session_file = AUTOMATION_DIR / "data" / f"session_{username}.json"
@@ -357,5 +357,6 @@ def get_push_session(
         headless=headless,
         close_browser=True,
         target_name=target_name,
-        interactive=True
+        interactive=False,
+        allow_login=False,
     )

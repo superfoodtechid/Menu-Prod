@@ -174,7 +174,8 @@ def edit_dish_upload_image(
             close_browser=False,
             target_name=target_name,
             target_store_id=target_store_id,
-            interactive=False
+            interactive=False,
+            load_images=True,
         )
         if not session_data or "driver" not in session_data:
             logger.error(f"Gagal menginisialisasi browser session untuk upload gambar item {dish_id}")
@@ -191,61 +192,197 @@ def edit_dish_upload_image(
         time.sleep(5)
         _dismiss_popups(driver)
         
-        wait = WebDriverWait(driver, 15)
+        wait = WebDriverWait(driver, 25)
         file_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
         driver.execute_script("arguments[0].style.display='block'; arguments[0].style.opacity='1';", file_input)
         file_input.send_keys(str(Path(image_path).resolve()))
-        time.sleep(3)
-        
-        # Cek jika ada dialog crop/konfirmasi gambar
-        try:
-            time.sleep(2)
-            crop_selectors = [
-                "//div[contains(@class, 'crop_modal') or contains(@class, 'cropper')]//button[contains(@class, 'shopee-pos-btn-primary') or contains(@class, 'primary')]",
-                "//div[contains(@class, 'crop_modal') or contains(@class, 'cropper')]//button[contains(., 'Konfirmasi') or contains(., 'Confirm') or contains(., 'Simpan') or contains(., 'Save') or contains(., 'Apply') or contains(., 'Selesai') or contains(., 'OK') or contains(., 'Ok')]",
-                "//div[contains(@class, 'shopee-pos-modal-wrap') or contains(@class, 'modal-wrap')]//div[contains(@class, 'footer') or contains(@class, 'modal-footer')]//button[contains(@class, 'primary') or contains(., 'Konfirmasi') or contains(., 'Simpan') or contains(., 'Confirm') or contains(., 'Save')]",
-                "//div[contains(@class, 'crop_modal')]//button[last()]"
-            ]
-            crop_btn = None
-            for sel in crop_selectors:
-                btns = driver.find_elements(By.XPATH, sel)
-                for b in btns:
-                    if b.is_displayed():
-                        crop_btn = b
-                        break
-                if crop_btn:
-                    break
-
-            if crop_btn:
-                driver.execute_script("arguments[0].click();", crop_btn)
-                time.sleep(2)
-                try:
-                    WebDriverWait(driver, 5).until(
-                        EC.invisibility_of_element_located((By.CSS_SELECTOR, ".crop_modal___oSzv_, .crop_modal, div.crop_modal___oSzv_"))
-                    )
-                except Exception:
-                    pass
-        except Exception as ex_crop:
-            logger.info(f"Info dialog crop: {ex_crop}")
-
         time.sleep(1)
 
-        # Klik tombol Save / Simpan
+        # Shopee opens a separate crop dialog after file selection. Scope all
+        # crop actions to that visible dialog; a global "Simpan" selector can
+        # otherwise click the page's Save button behind a still-loading dialog.
+        crop_dialog = None
+        dialog_selectors = (
+            "[role='dialog'], .shopee-pos-modal-wrap, .shopee-modal, "
+            "[class*='crop_modal'], [class*='cropper'], [class*='modal-wrap']"
+        )
+        for _ in range(20):
+            for dialog in driver.find_elements(By.CSS_SELECTOR, dialog_selectors):
+                try:
+                    if dialog.is_displayed() and "potong gambar" in dialog.text.lower():
+                        crop_dialog = dialog
+                        break
+                except Exception:
+                    continue
+            if crop_dialog:
+                break
+            time.sleep(0.5)
+
+        if crop_dialog:
+            # Wait for the image itself to render (not just an enabled button)
+            # and scope the crop action to this dialog. Never save the dish form
+            # while the crop preview is blank or still loading.
+            crop_btn = None
+            preview_ready = False
+            crop_button_xpath = (
+                ".//button[contains(., 'Konfirmasi') or contains(., 'Confirm') "
+                "or contains(., 'Simpan') or contains(., 'Save') "
+                "or contains(., 'Apply') or contains(., 'Selesai') or contains(., 'OK')]"
+            )
+            for _ in range(40):
+                try:
+                    preview_ready = bool(driver.execute_script(
+                        """
+                        const root = arguments[0];
+                        const imgs = Array.from(root.querySelectorAll('img'));
+                        const imageReady = imgs.some(img => img.complete && img.naturalWidth > 0 && img.getClientRects().length);
+                        const canvasReady = Array.from(root.querySelectorAll('canvas')).some(
+                            canvas => canvas.width > 0 && canvas.height > 0 && canvas.getClientRects().length
+                        );
+                        return imageReady || canvasReady;
+                        """,
+                        crop_dialog,
+                    ))
+                    buttons = crop_dialog.find_elements(By.XPATH, crop_button_xpath)
+                    candidate_btn = next((b for b in buttons if b.is_displayed() and b.is_enabled()), None)
+                    if preview_ready and candidate_btn:
+                        crop_btn = candidate_btn
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            if not crop_btn:
+                raise RuntimeError(
+                    "Dialog Potong Gambar tetap kosong/loading; pratinjau foto atau tombol konfirmasi crop tidak siap."
+                )
+
+            driver.execute_script("arguments[0].click();", crop_btn)
+            try:
+                WebDriverWait(driver, 25).until(
+                    lambda d: not any(
+                        dialog.is_displayed() and "potong gambar" in dialog.text.lower()
+                        for dialog in d.find_elements(By.CSS_SELECTOR, dialog_selectors)
+                    )
+                )
+            except Exception:
+                raise RuntimeError("Dialog Potong Gambar tidak tertutup setelah konfirmasi; proses simpan form dibatalkan.")
+
+        # Click only the dish form's primary Save button. Avoid matching a
+        # hidden/overlay button or a crop-modal action left in the DOM.
         save_btn_xpath = (
             "//button[contains(@class, 'shopee-pos-btn-primary') and "
-            "(contains(., 'Save') or contains(., 'Simpan') or .//span[contains(text(), 'Save') or contains(text(), 'Simpan')])]"
-            " | //button[span[contains(text(), 'Save') or contains(text(), 'Simpan')]]"
-            " | //button[contains(., 'Save') or contains(., 'Simpan')]"
+            "(contains(., 'Save') or contains(., 'Simpan') or contains(., 'Ubah'))]"
         )
-        save_btn = wait.until(EC.presence_of_element_located((By.XPATH, save_btn_xpath)))
+        save_btn = wait.until(EC.element_to_be_clickable((By.XPATH, save_btn_xpath)))
         driver.execute_script("arguments[0].scrollIntoView(true);", save_btn)
         time.sleep(0.5)
-        try:
-            save_btn.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", save_btn)
+        # Confirm the button belongs to the page, not any remaining dialog.
+        driver.execute_script(
+            "if (arguments[0].closest('[role=dialog], .shopee-pos-modal-wrap, .shopee-modal')) "
+            "{ throw new Error('Save button belongs to a modal'); }",
+            save_btn,
+        )
+        save_btn.click()
 
-        time.sleep(4)
+        # Some Shopee portal versions ask for a second confirmation after the
+        # dish form's Save button (e.g. "Apakah Anda yakin ... perubahan menu").
+        # Handle both browser-native confirm() and an in-page confirmation
+        # modal, but only click affirmative controls inside that modal.
+        try:
+            alert = driver.switch_to.alert
+            alert_text = (alert.text or "").strip()
+            if alert_text:
+                alert.accept()
+                logger.info("Shopee confirmation alert accepted after saving dish %s: %s", dish_id, alert_text[:200])
+        except Exception:
+            pass
+
+        confirmation_selectors = (
+            "[role='dialog'], .shopee-pos-modal-wrap, .shopee-modal, "
+            ".ant-modal, [class*='modal-wrap'], [class*='confirm']"
+        )
+        confirmation_deadline = time.time() + 5
+        while time.time() < confirmation_deadline:
+            confirmation_handled = False
+            for dialog in driver.find_elements(By.CSS_SELECTOR, confirmation_selectors):
+                try:
+                    if not dialog.is_displayed():
+                        continue
+                    dialog_text = (dialog.text or "").strip()
+                    normalized_text = dialog_text.lower()
+                    asks_confirmation = (
+                        ("yakin" in normalized_text or "sure" in normalized_text or "confirm" in normalized_text)
+                        and any(word in normalized_text for word in ("menu", "perubahan", "change", "save", "simpan"))
+                    )
+                    if not asks_confirmation:
+                        continue
+
+                    affirmative_xpath = (
+                        ".//button[contains(@class, 'primary') or contains(@class, 'confirm') "
+                        "or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'ya') "
+                        "or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'yakin') "
+                        "or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'confirm') "
+                        "or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'simpan') "
+                        "or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'save')]"
+                    )
+                    candidates = [b for b in dialog.find_elements(By.XPATH, affirmative_xpath) if b.is_displayed() and b.is_enabled()]
+                    # Prefer a clearly affirmative button; do not select a
+                    # generic primary button if it is the cancel action.
+                    confirm_btn = next((b for b in candidates if any(
+                        word in (b.text or "").lower() for word in ("ya", "yakin", "confirm", "simpan", "save")
+                    )), None)
+                    if not confirm_btn:
+                        confirm_btn = next((b for b in candidates if "primary" in (b.get_attribute("class") or "").lower()), None)
+                    if not confirm_btn:
+                        raise RuntimeError(f"Konfirmasi perubahan menu muncul tetapi tombol persetujuan tidak ditemukan: {dialog_text[:250]}")
+                    driver.execute_script("arguments[0].click();", confirm_btn)
+                    logger.info("Shopee menu-change confirmation accepted for dish %s.", dish_id)
+                    confirmation_handled = True
+                    break
+                except RuntimeError:
+                    raise
+                except Exception:
+                    continue
+            if confirmation_handled:
+                break
+            time.sleep(0.25)
+
+        # Shopee may take several seconds to process the image and can display
+        # validation errors in toast/alert components. Wait for the request UI
+        # to settle and surface explicit portal errors to the caller.
+        settled = False
+        for _ in range(50):
+            state = driver.execute_script(
+                """
+                const visible = el => !!(el && el.getClientRects().length &&
+                    getComputedStyle(el).visibility !== 'hidden');
+                const notices = Array.from(document.querySelectorAll(
+                    '[role=alert], [class*="toast"], [class*="Toast"], [class*="message"], [class*="Message"], [class*="notification"], [class*="Notification"]'
+                )).filter(visible).map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean);
+                const button = Array.from(document.querySelectorAll('button')).find(el =>
+                    el.className && String(el.className).includes('shopee-pos-btn-primary') &&
+                    /save|simpan|ubah/i.test(el.innerText || el.textContent || '') && visible(el));
+                const busy = !!(button.disabled || button.getAttribute('aria-busy') === 'true' ||
+                    button.querySelector('[class*="loading"], [class*="spin"], [class*="Spin"]'));
+                return {notices, busy};
+                """,
+            )
+            notices = state.get("notices", []) if isinstance(state, dict) else []
+            joined_notices = " ".join(notices)
+            if any(word in joined_notices.lower() for word in ("gagal", "error", "failed", "tidak berhasil")):
+                raise RuntimeError(f"Shopee menolak penyimpanan foto: {joined_notices[:400]}")
+            if any(word in joined_notices.lower() for word in ("berhasil", "success", "saved", "tersimpan")):
+                settled = True
+                break
+            if not (state or {}).get("busy", False):
+                # A short quiet period avoids returning while the portal is
+                # still updating the form after the button spinner disappears.
+                time.sleep(2)
+                settled = True
+                break
+            time.sleep(0.4)
+        if not settled:
+            raise RuntimeError("Portal masih memproses penyimpanan foto setelah 20 detik.")
         return True
     except Exception as e:
         logger.error(f"Gagal mengunggah gambar ke dish ID {dish_id} via portal: {e}")
@@ -256,6 +393,108 @@ def edit_dish_upload_image(
                 driver.quit()
             except Exception:
                 pass
+
+
+def edit_dish_update_name(
+    store_metadata: dict,
+    dish_id: str,
+    new_name: str,
+    headless: bool = True,
+    store_id: str = None,
+) -> bool:
+    """Rename an existing dish through the merchant portal, without price API fields."""
+    target_store_id = str(store_id or store_metadata.get("store_id") or "")
+    username = store_metadata.get("username") or "superfoodapp"
+    password = store_metadata.get("password") or "Master@00@"
+    target_name = _resolve_target_merchant_name(username, store_metadata.get("merchant_name", ""), store_metadata)
+    session_file = resolve_shopee_session(store_metadata, base_dir=WORKSPACE_DIR)
+    browser.set_session_file(session_file)
+    active_account = session_file.stem.replace("session_", "") if session_file.stem.startswith("session_") else username
+    session_data = browser.get_session(
+        username=active_account, password=password, headless=headless,
+        close_browser=True, target_name=target_name, target_store_id=target_store_id,
+        interactive=False, allow_login=False, load_images=False,
+    )
+    if not session_data or "driver" not in session_data:
+        logger.error("Gagal menginisialisasi sesi portal untuk rename dish %s", dish_id)
+        return False
+
+    driver = session_data["driver"]
+    try:
+        edit_url = f"https://partner.shopee.co.id/shopee-pos/menu-management/dish/edit?id={dish_id}&storeId={target_store_id}&defaultTab=sf"
+        driver.get(edit_url)
+        wait = WebDriverWait(driver, 25)
+        _dismiss_popups(driver)
+        name_input = None
+        name_xpath = (
+            "//label[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'nama menu')]/following::input[1]"
+            " | //input[contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'nama menu')]"
+        )
+        try:
+            name_input = wait.until(EC.visibility_of_element_located((By.XPATH, name_xpath)))
+        except Exception:
+            # Portal markup sometimes uses a non-label wrapper; find the text
+            # field inside the nearest visible section titled "Nama Menu".
+            for candidate in driver.find_elements(By.XPATH, "//input[not(@type='file') and (@type='text' or not(@type))]"):
+                try:
+                    context = candidate.find_element(By.XPATH, "./ancestor::*[self::div or self::section][.//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'nama menu')]][1]")
+                    if context.is_displayed():
+                        name_input = candidate
+                        break
+                except Exception:
+                    continue
+        if not name_input:
+            raise RuntimeError("Field Nama Menu tidak ditemukan pada halaman edit.")
+
+        name_input.clear()
+        name_input.send_keys(new_name)
+        save_xpath = "//button[contains(@class, 'shopee-pos-btn-primary') and (contains(., 'Simpan') or contains(., 'Save') or contains(., 'Ubah'))]"
+        save_btn = wait.until(EC.element_to_be_clickable((By.XPATH, save_xpath)))
+        save_btn.click()
+
+        # Accept portal/native confirmation dialogs without touching unrelated dialogs.
+        try:
+            alert = driver.switch_to.alert
+            if alert.text:
+                alert.accept()
+        except Exception:
+            pass
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            handled = False
+            for dialog in driver.find_elements(By.CSS_SELECTOR, "[role='dialog'], .shopee-pos-modal-wrap, .shopee-modal, .ant-modal, [class*='modal-wrap'], [class*='confirm']"):
+                try:
+                    text = (dialog.text or "").strip()
+                    lowered = text.lower()
+                    if not dialog.is_displayed() or not ("yakin" in lowered or "sure" in lowered or "confirm" in lowered):
+                        continue
+                    if not any(word in lowered for word in ("menu", "perubahan", "change", "simpan", "save")):
+                        continue
+                    buttons = dialog.find_elements(By.XPATH, ".//button")
+                    affirmative = next((b for b in buttons if b.is_displayed() and b.is_enabled() and any(w in (b.text or "").lower() for w in ("ya", "yakin", "confirm", "simpan", "save"))), None)
+                    if affirmative:
+                        driver.execute_script("arguments[0].click();", affirmative)
+                        handled = True
+                    else:
+                        raise RuntimeError(f"Dialog konfirmasi rename tidak memiliki tombol persetujuan: {text[:200]}")
+                    break
+                except RuntimeError:
+                    raise
+                except Exception:
+                    continue
+            if handled:
+                break
+            time.sleep(0.25)
+        time.sleep(2)
+        return True
+    except Exception as exc:
+        logger.error("Gagal mengubah nama dish %s melalui portal: %s", dish_id, exc)
+        return False
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 def update_dish(
     client: ShopeeModifyClient,

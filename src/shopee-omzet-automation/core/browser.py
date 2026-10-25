@@ -17,6 +17,7 @@ import re
 import json
 import time
 import random
+import fcntl
 from datetime import datetime
 from pathlib import Path
 
@@ -82,6 +83,59 @@ def unregister_active_driver(d):
     if d:
         with _drivers_lock:
             _ACTIVE_DRIVERS.discard(d)
+
+
+def _acquire_profile_lock(profile_dir: Path, timeout: float = 30.0):
+    """Serialize Chrome sessions that share a persistent user-data directory."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = profile_dir / ".shopee-automation.lock"
+    lock_file = open(lock_path, "a+")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(f"pid={os.getpid()}\n")
+            lock_file.flush()
+            return lock_file
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                lock_file.close()
+                raise TimeoutError(
+                    f"Profil Chrome sedang digunakan oleh job lain: {profile_dir}"
+                )
+            time.sleep(0.25)
+
+
+def _release_profile_lock(lock_file):
+    if not lock_file:
+        return
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        lock_file.close()
+    except Exception:
+        pass
+
+
+def _attach_profile_lock(driver, lock_file):
+    """Keep the profile lock for the complete lifetime of its WebDriver."""
+    original_quit = driver.quit
+    released = False
+
+    def quit_with_profile_unlock():
+        nonlocal released
+        try:
+            return original_quit()
+        finally:
+            if not released:
+                released = True
+                _release_profile_lock(lock_file)
+
+    driver.quit = quit_with_profile_unlock
 
 def kill_all_active_drivers():
     with _drivers_lock:
@@ -606,14 +660,19 @@ def validate_session(tob_token: str, entity_id: str) -> bool:
 
 def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tuple:
     tob_token = None
-    entity_id = None
+    cookie_store_id = None
+    cookie_merchant_id = None
     for c in driver.get_cookies():
         name = c["name"]
         val = c["value"]
         if name in ["shopee_tob_token", "spc_ec", "SPC_EC"]: 
             tob_token = val
-        elif name.lower() in ["shopee_tob_entity_id", "shopee_foody_mid", "x-merchant-id", "spc_merchant_id", "merchant_id", "shopid", "shop_id"]:
-            if val and not entity_id: entity_id = val
+        elif name.lower() == "shopee_tob_entity_id":
+            if val: cookie_store_id = str(val).strip()
+        elif name.lower() in ["shopee_foody_mid", "x-merchant-id", "spc_merchant_id", "merchant_id", "shopid", "shop_id"]:
+            if val and not cookie_merchant_id: cookie_merchant_id = str(val).strip()
+
+    entity_id = cookie_store_id or cookie_merchant_id
 
     if not tob_token:
         try:
@@ -690,8 +749,19 @@ def _trigger_and_extract_tokens(driver, expected_entity_id=None) -> tuple:
     # 1. Cek langsung dari sesi aktif browser (hindari page reload jika token sudah ada)
     tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
     if tob_token:
-        if expected_entity_id and entity_id and str(entity_id).strip() != str(expected_entity_id).strip():
-            log.info(f"🔄 [SESSION] Token cookie entity_id ({entity_id}) tidak sesuai target ({expected_entity_id}). Menghapus cookie lama dan memicu token baru...")
+        # Cek apakah store ID fisik pada cookie berbeda dari target yang diminta
+        cookie_store_id = None
+        try:
+            for c in driver.get_cookies():
+                if c.get("name") == "shopee_tob_entity_id" and c.get("value"):
+                    cookie_store_id = str(c["value"]).strip()
+                    break
+        except Exception:
+            pass
+
+        check_id = cookie_store_id or entity_id
+        if expected_entity_id and check_id and str(check_id).strip() != str(expected_entity_id).strip():
+            log.info(f"🔄 [SESSION] Token cookie entity_id ({check_id}) tidak sesuai target ({expected_entity_id}). Menghapus cookie lama dan memicu token baru...")
             try:
                 driver.delete_cookie("shopee_tob_token")
             except Exception:
@@ -1585,7 +1655,7 @@ def resolve_shopee_headless(headless_override: bool = None) -> bool:
     return True
 
 
-def _init_driver(headless: bool = True):
+def _init_driver(headless: bool = True, load_images: bool = False):
     headless = resolve_shopee_headless(headless)
 
     # Ensure HOME and cache directories point to a writable path in rootless container
@@ -1605,12 +1675,16 @@ def _init_driver(headless: bool = True):
     options.add_argument("--disable-component-update")
     options.add_argument("--mute-audio")
     options.add_argument("--disable-background-networking")
-    options.add_argument("--blink-settings=imagesEnabled=false")
+    if not load_images:
+        options.add_argument("--blink-settings=imagesEnabled=false")
     options.add_argument("--disable-sync")
     options.add_argument("--disable-default-apps")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
-    options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
+    options.add_experimental_option(
+        "prefs",
+        {"profile.managed_default_content_settings.images": 1 if load_images else 2},
+    )
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     if headless:
         options.add_argument("--headless=new")
@@ -1685,14 +1759,19 @@ def _init_driver(headless: bool = True):
         options.add_argument(f"--profile-directory={chosen_sub}")
         log.info(f"🌐 [BROWSER] User data dir: {profile_dir.resolve()} (profile: {chosen_sub})")
 
-    # Delete SingletonLock if it exists to avoid SessionNotCreatedException on Linux
-    singleton_lock = profile_dir / "SingletonLock"
-    try:
-        if os.path.islink(singleton_lock) or os.path.exists(singleton_lock):
-            os.unlink(str(singleton_lock))
-            log.info(f"🧹 Removed Chrome SingletonLock at {singleton_lock}")
-    except Exception as e:
-        log.warning(f"⚠️ Failed to remove SingletonLock: {e}")
+    # Keep Chrome's own SingletonLock intact. Serialize our automation with a
+    # separate advisory lock held for the full WebDriver lifetime.
+    profile_lock = _acquire_profile_lock(profile_dir)
+    chrome_lock = profile_dir / "SingletonLock"
+    chrome_lock_deadline = time.monotonic() + 15
+    while chrome_lock.is_symlink() or chrome_lock.exists():
+        if time.monotonic() >= chrome_lock_deadline:
+            _release_profile_lock(profile_lock)
+            raise RuntimeError(
+                f"Profil Chrome masih terkunci oleh browser lain: {profile_dir}. "
+                "Tutup browser yang memakai profil ini lalu ulangi job."
+            )
+        time.sleep(0.25)
 
     # Check for system Chromium & ChromeDriver (Linux / ARM64 / Docker)
     chromium_path = "/usr/lib/chromium/chromium" if os.path.exists("/usr/lib/chromium/chromium") else ("/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None)
@@ -1702,54 +1781,65 @@ def _init_driver(headless: bool = True):
         options.binary_location = chromium_path
 
     driver = None
-    if chromedriver_path:
-        try:
-            log.info(f"🌐 [BROWSER] Initializing with system ChromeDriver: {chromedriver_path}")
-            driver = webdriver.Chrome(service=Service(chromedriver_path), options=options)
-        except Exception as sys_err:
-            log.warning(f"⚠️ System ChromeDriver init failed: {sys_err}")
-
-    if not driver:
-        try:
-            log.info("🌐 [BROWSER] Initializing with Native Selenium Manager...")
-            driver = webdriver.Chrome(options=options)
-        except Exception as e:
-            log.warning(f"⚠️ Native Chrome init failed: {e}. Trying ChromeDriverManager fallback...")
+    try:
+        if chromedriver_path:
             try:
-                driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-            except Exception as cdm_err:
-                log.warning(f"⚠️ ChromeDriverManager failed: {cdm_err}. Trying CDP mode fallback...")
-                import socket, subprocess
-                s = socket.socket()
-                s.bind(('', 0))
-                cdp_port = s.getsockname()[1]
-                s.close()
+                log.info(f"🌐 [BROWSER] Initializing with system ChromeDriver: {chromedriver_path}")
+                driver = webdriver.Chrome(service=Service(chromedriver_path), options=options)
+            except Exception as sys_err:
+                log.warning(f"⚠️ System ChromeDriver init failed: {sys_err}")
 
-                cmd = [
-                    chromium_path or "chromium",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    f"--remote-debugging-port={cdp_port}",
-                    f"--user-data-dir={profile_dir.resolve()}",
-                    "--profile-directory=shopee_profile"
-                ]
-                if headless:
-                    cmd.append("--headless=new")
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                time.sleep(2.5)
-                
-                # Use clean options instance for CDP attach mode to prevent capability parsing errors
-                cdp_options = Options()
-                cdp_options.add_experimental_option("debuggerAddress", f"127.0.0.1:{cdp_port}")
-                if chromedriver_path:
-                    driver = webdriver.Chrome(service=Service(chromedriver_path), options=cdp_options)
-                else:
-                    driver = webdriver.Chrome(options=cdp_options)
+        if not driver:
+            try:
+                log.info("🌐 [BROWSER] Initializing with Native Selenium Manager...")
+                driver = webdriver.Chrome(options=options)
+            except Exception as e:
+                log.warning(f"⚠️ Native Chrome init failed: {e}. Trying ChromeDriverManager fallback...")
+                try:
+                    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+                except Exception as cdm_err:
+                    log.warning(f"⚠️ ChromeDriverManager failed: {cdm_err}. Trying CDP mode fallback...")
+                    import socket, subprocess
+                    s = socket.socket()
+                    s.bind(('', 0))
+                    cdp_port = s.getsockname()[1]
+                    s.close()
 
-    if driver:
-        driver.set_page_load_timeout(60)
-        register_active_driver(driver)
-    return driver
+                    cmd = [
+                        chromium_path or "chromium",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        f"--remote-debugging-port={cdp_port}",
+                        f"--user-data-dir={profile_dir.resolve()}",
+                        "--profile-directory=shopee_profile"
+                    ]
+                    if headless:
+                        cmd.append("--headless=new")
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    time.sleep(2.5)
+
+                    cdp_options = Options()
+                    cdp_options.add_experimental_option("debuggerAddress", f"127.0.0.1:{cdp_port}")
+                    if chromedriver_path:
+                        driver = webdriver.Chrome(service=Service(chromedriver_path), options=cdp_options)
+                    else:
+                        driver = webdriver.Chrome(options=cdp_options)
+
+        if driver:
+            driver.set_page_load_timeout(60)
+            _attach_profile_lock(driver, profile_lock)
+            register_active_driver(driver)
+            return driver
+        _release_profile_lock(profile_lock)
+        return None
+    except Exception:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        _release_profile_lock(profile_lock)
+        raise
 
 
 # ── Login Logic ────────────────────────────────────────────────────────────────
@@ -2208,9 +2298,6 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
     """
     log.info(f"🔄 [MERCHANT] Switching to: {target_name}...")
     try:
-        # 0. Fast Loader Removal
-        driver.execute_script("document.querySelectorAll('.ant-spin, [class*=\"loading\"], .shopee-loading').forEach(el => el.remove());")
-        
         wait = WebDriverWait(driver, 15)
 
         js_selector_click = """
@@ -2292,16 +2379,26 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
 
         # PHASE 2: Dashboard Switch Logic
         if "/food/dashboard" not in driver.current_url:
+            if any(marker in driver.current_url.lower() for marker in ("/login", "authenticate")):
+                log.warning("  ⚠️ Merchant switch stopped: browser is on an authentication page.")
+                return False
             driver.get(PARTNER_DASHBOARD)
-            time.sleep(2)
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+        except Exception:
+            log.warning("  ⚠️ Dashboard document did not reach readyState=complete (URL: %s).", driver.current_url)
         
-        for switch_attempt in range(3):
+        for switch_attempt in range(2):
             # Use ActionChains to hover Profile then "Pilih Merchant Lain"
             dropdown_opened = False
             try:
                 actions = ActionChains(driver)
                 # 1. Hover/Click merchantName (Profile)
-                profile_menu = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".merchantName")))
+                profile_menu = WebDriverWait(driver, 20).until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, ".merchantName"))
+                )
                 actions.move_to_element(profile_menu).click().perform()
                 time.sleep(1)
                 
@@ -2332,21 +2429,20 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
                         time.sleep(1)
             except Exception as e:
                 err_str = str(e)
-                log.warning(f"  ⚠️ Failed to trigger merchant menu: {err_str}")
-                # Jika elemen .merchantName sama sekali tidak ditemukan (Timeout), 
-                # kemungkinan besar sesi sudah logout atau halaman corrupt. Fail fast!
-                if "TimeoutException" in err_str or "merchantName" not in driver.page_source:
-                    log.warning("  ⚠️ [STALE SESSION] Elemen profil (.merchantName) tidak ditemukan. Sesi kemungkinan kedaluwarsa.")
-                    return False
-                    
-                if switch_attempt == 2:
-                    return False
-                continue
+                log.warning(
+                    "  ⚠️ Failed to trigger merchant menu at %s: %s",
+                    driver.current_url, err_str,
+                )
+                # A missing selector is not proof of an expired session. Only
+                # the caller may reauthenticate after positively detecting an
+                # auth/login page; otherwise stop and report the page state.
+                return False
 
-            # DETEKSI SESI STALE: Jika dropdown tidak terbuka, sesi sudah kedaluwarsa.
-            # Langsung return False agar pipeline memicu recovery (logout + login ulang).
             if not dropdown_opened:
-                log.warning(f"  ⚠️ [STALE SESSION] Dropdown profil tidak terbuka setelah klik — sesi kemungkinan kedaluwarsa.")
+                log.warning(
+                    "  ⚠️ Merchant menu did not open at %s; this is not sufficient evidence that the session expired.",
+                    driver.current_url,
+                )
                 return False
 
             # Use JS to click the target merchant in the revealed list
@@ -2379,8 +2475,8 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
             if found_target:
                 log.debug(f"  ✅ Clicked {target_name} in menu.")
             else:
-                log.warning(f"  ⚠️ Nama outlet '{target_name}' tidak ditemukan di dropdown (Attempt {switch_attempt+1}/3).")
-                if switch_attempt == 2:
+                log.warning(f"  ⚠️ Nama outlet '{target_name}' tidak ditemukan di dropdown (Attempt {switch_attempt+1}/2).")
+                if switch_attempt == 1:
                     msg = f"Nama outlet '{target_name}' tidak terdaftar atau belum ditambahkan (invite) di akun Shopee ini."
                     log.error(f"❌ {msg}")
                     # Mengirimkan error ke Discord secara langsung karena ini fatal dan kita akan langsung abort.
@@ -2969,11 +3065,23 @@ def _restore_saved_session(driver, saved: dict, target_username: str = None) -> 
     log.warning("  ⚠️ [SESSION-RESTORE] Pemulihan sesi dari saved tokens belum berhasil mencapai Dashboard.")
     return False
 
-def get_session(username=None, password=None, phone=None, headless=None, close_browser=True, target_name=None, interactive=True, target_store_id=None) -> dict | None:
+def _session_is_auth_expired(driver) -> bool:
+    """Return true only when the browser is demonstrably on an auth screen."""
+    try:
+        current_url = driver.current_url.lower()
+        if any(marker in current_url for marker in ("/login", "authenticate", "/sso/")):
+            return True
+        has_password = bool(driver.find_elements(By.CSS_SELECTOR, "input[type='password']"))
+        return has_password and "shopee.co.id" in current_url
+    except Exception:
+        return False
+
+
+def get_session(username=None, password=None, phone=None, headless=None, close_browser=True, target_name=None, interactive=True, target_store_id=None, allow_login=True, load_images=False) -> dict | None:
     headless = resolve_shopee_headless(headless)
-    for attempt in range(3):
-        log.info(f"🌐 [BROWSER] Launching (headless={headless}, attempt={attempt+1}/3)...")
-        driver = _init_driver(headless=headless)
+    for attempt in range(2):
+        log.info(f"🌐 [BROWSER] Launching (headless={headless}, attempt={attempt+1}/2)...")
+        driver = _init_driver(headless=headless, load_images=load_images)
         wait = WebDriverWait(driver, 30)
         session_success = False
 
@@ -2981,7 +3089,7 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
             # ── Step 1: Check browser state first (Profile session) ──
             driver.get(PARTNER_DASHBOARD)
             try:
-                WebDriverWait(driver, 4).until(
+                WebDriverWait(driver, 15).until(
                     lambda d: d.get_cookie("shopee_tob_token") is not None
                     or "dashboard" in d.current_url.lower()
                     or "merchant-selector" in d.current_url.lower()
@@ -3008,6 +3116,11 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                     is_same_account = True
 
                 if not is_same_account:
+                    if not allow_login:
+                        raise RuntimeError(
+                            "AUTH_REQUIRED_NO_LOGIN: profil browser aktif bukan milik akun push yang diminta; "
+                            "cookie/profil tidak dihapus dan tidak dilakukan login ulang."
+                        )
                     log.info(f"🔄 [SESSION] Active session is for '{saved_sess.get('username')}', target user is '{username}'. Resetting cookies for target user login...")
                     try: driver.delete_all_cookies()
                     except: pass
@@ -3029,6 +3142,11 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
 
             # ── Step 3: Login if all above failed ──
             if not is_logged_in:
+                if not allow_login:
+                    raise RuntimeError(
+                        f"AUTH_REQUIRED_NO_LOGIN: sesi Shopee untuk akun '{username}' tidak aktif; "
+                        "push dihentikan tanpa membuka alur login/OTP."
+                    )
                 log.info("⚠️ [SESSION] No active session. Navigating to login...")
                 if "/login" not in driver.current_url.lower() and "authenticate" not in driver.current_url.lower():
                     driver.get("https://partner.shopee.co.id/login")
@@ -3036,7 +3154,7 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                 
                 current_url = driver.current_url.lower()
                 if "login" in current_url or "authenticate" in current_url or "about:blank" in current_url:
-                    success = _perform_login(driver, wait, username, password, phone, is_retry=(attempt == 2), interactive=interactive)
+                    success = _perform_login(driver, wait, username, password, phone, is_retry=(attempt == 1), interactive=interactive)
                     if not success:
                         log.error("❌ [AUTH] _perform_login failed.")
                         driver.quit()
@@ -3067,8 +3185,6 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                     if not bypass_success:
                         log.info("📍 [SESSION] Merchant selector detected. Selecting first available merchant...")
                         bypass_js = """
-                            var loaders = document.querySelectorAll('.ant-spin, [class*="loading"], .shopee-loading, .ant-spin-nested-loading');
-                            loaders.forEach(el => el.remove());
                             // Klik elemen wrapper .listItem (bukan inner .merchantInfo) 
                             // karena event onClick menempel di wrapper terluar.
                             var target = document.querySelector('.listItem, .merchant-item, li[class*="item"], [class*="merchant-item"], .ant-list-item');
@@ -3215,18 +3331,37 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
             
             # ── Step 5: Decision - Switch or Stay? ──
             do_switch = False
-            if target_store_id and active_id and str(active_id).strip() != str(target_store_id).strip():
-                log.info(f"📍 [MERCHANT] Active merchant ID ({active_id}) != Target store ID ({target_store_id}). Switching...")
+            active_store_id = None
+            try:
+                for c in driver.get_cookies():
+                    if c.get("name") == "shopee_tob_entity_id" and c.get("value"):
+                        active_store_id = str(c["value"]).strip()
+                        break
+            except Exception:
+                pass
+
+            is_already_target = False
+            if target_name and active_name and active_name.lower().strip() == target_name.lower().strip():
+                is_already_target = True
+            elif target_store_id and active_store_id and active_store_id == str(target_store_id).strip():
+                is_already_target = True
+
+            if is_already_target:
+                log.info(f"✅ [MERCHANT] Already as target: {active_name} (SID: {active_store_id or target_store_id})")
+                do_switch = False
+            elif target_name and active_name and active_name.lower().strip() != target_name.lower().strip():
+                log.info(f"📍 [MERCHANT] Current: {active_name} | Target: {target_name}. Switching...")
+                do_switch = True
+            elif target_store_id and active_store_id and active_store_id != str(target_store_id).strip():
+                log.info(f"📍 [MERCHANT] Active store ID ({active_store_id}) != Target store ID ({target_store_id}). Switching...")
                 do_switch = True
             elif target_name:
-                if active_name.lower() != target_name.lower():
-                    log.info(f"📍 [MERCHANT] Current: {active_name} | Target: {target_name}. Switching...")
-                    do_switch = True
-                elif not active_id or active_id == "None":
-                    log.info(f"⚠️ [MERCHANT] Target is {active_name}, but active_id is missing! Forcing switch to hydrate session cookies...")
+                if not active_id or active_id == "None":
+                    log.info(f"⚠️ [MERCHANT] Target is {target_name}, but active_id is missing! Forcing switch to hydrate session cookies...")
                     do_switch = True
                 else:
                     log.info(f"✅ [MERCHANT] Already as target: {active_name}")
+                    do_switch = False
             else:
                 is_invalid_name = (
                     not active_name or
@@ -3242,9 +3377,14 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
 
             if do_switch:
                 if target_name:
-                    success = auto_switch_merchant(driver, target_name, is_retry=(attempt == 2))
+                    success = auto_switch_merchant(driver, target_name, is_retry=(attempt == 1))
                     if not success:
-                        log.warning(f"⚠️ [MERCHANT] auto_switch_merchant failed for target {target_name}. Initiating logout/relogin recovery...")
+                        if not allow_login:
+                            raise RuntimeError(
+                                "AUTH_REQUIRED_NO_LOGIN: sesi owner kedaluwarsa atau merchant tidak dapat dipilih; "
+                                "push dihentikan tanpa logout, login, atau permintaan OTP."
+                            )
+                        log.warning("⚠️ Pemilihan merchant via UI gagal; mencoba pemulihan via relogin.")
                         recovered = _deliberate_logout_and_relogin(
                             driver,
                             username=username,
@@ -3252,18 +3392,17 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                             phone=phone,
                         )
                         if recovered:
-                            log.info("🔄 [MERCHANT] Recovery successful. Retrying merchant switch...")
-                            success = auto_switch_merchant(driver, target_name, is_retry=(attempt == 2))
+                            log.info("🔄 [MERCHANT] Login ulang berhasil; mencoba merchant sekali lagi.")
+                            success = auto_switch_merchant(driver, target_name, is_retry=(attempt == 1))
                         else:
-                            log.error("❌ Recovery failed.")
-                            success = False
+                            raise RuntimeError("SESSION_RECOVERY_FAILED: login ulang pemulihan sesi gagal.")
                 else:
-                    # When merchant cannot be detected, do a deliberate logout + relogin
-                    # via the Chrome profile. This gives a clean session state without OTP:
-                    #   1. Click profile → select 'Log Out' from dropdown
-                    #   2. Confirm logout
-                    #   3. Chrome profile auto-logs back in (no OTP)
-                    log.info("🔄 [MERCHANT] Unknown/Admin/Missing merchant — initiating logout/relogin recovery...")
+                    if not allow_login:
+                        raise RuntimeError(
+                            "AUTH_REQUIRED_NO_LOGIN: sesi owner kedaluwarsa; "
+                            "push dihentikan tanpa logout, login, atau permintaan OTP."
+                        )
+                    log.info("🔄 Sesi login terkonfirmasi kedaluwarsa; mencoba pemulihan satu kali.")
                     recovered = _deliberate_logout_and_relogin(
                         driver,
                         username=username,
@@ -3271,15 +3410,18 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                         phone=phone,
                     )
                     if recovered:
-                        # After re-entry, run merchant selection normally
                         success = _handle_merchant_selection(driver, active_id_forced=None, interactive=interactive)
                     else:
-                        log.error("❌ Logout/relogin recovery failed. Cannot proceed.")
-                        success = False
+                        raise RuntimeError("SESSION_RECOVERY_FAILED: login ulang pemulihan sesi gagal.")
                 if not success:
-                    log.error("❌ Merchant selection failed.")
-                    driver.quit()
-                    continue
+                    if not allow_login:
+                        raise RuntimeError(
+                            f"MERCHANT_UI_UNAVAILABLE: pemilihan merchant gagal; URL: {driver.current_url}"
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"MERCHANT_SELECTION_FAILED: pemilihan merchant '{target_name}' gagal pada URL {driver.current_url}"
+                        )
 
                 try:
                     new_u_data = driver.execute_async_script(api_js)
@@ -3322,9 +3464,14 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
         except Exception as e:
             err_msg = str(e)
             log.error(f"Browser session error on attempt {attempt+1}: {err_msg}")
-            # Jika errornya adalah merchant tidak ditemukan atau user membatalkan OTP, tidak ada gunanya login ulang 3x. Langsung abort.
-            if "MERCHANT_NOT_FOUND" in err_msg or "user membatalkan otp" in err_msg.lower():
+            # Jika user membatalkan OTP atau jika push tanpa login mengalami kegagalan, langsung abort.
+            if "user membatalkan otp" in err_msg.lower() or "MERCHANT_NOT_FOUND" in err_msg:
                 log.error("❌ Fatal Error: Sesi dibatalkan (merchant tidak ditemukan / user membatalkan OTP). Membatalkan antrean tanpa login ulang.")
+                raise e
+            if not allow_login and any(marker in err_msg for marker in (
+                "MERCHANT_UI_UNAVAILABLE", "SESSION_RECOVERY_FAILED", "AUTH_REQUIRED_NO_LOGIN"
+            )):
+                log.error("❌ Fatal Error: Push tanpa login dihentikan karena merchant tidak tersedia / sesi kedaluwarsa.")
                 raise e
         finally:
             if (close_browser or not session_success) and driver is not None:

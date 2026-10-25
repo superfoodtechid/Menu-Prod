@@ -33,6 +33,7 @@ from menu_core.c5_template_helper import (
     FOLDER_LINK_LABEL_HEADER,
     FOLDER_LINK_URL_HEADER,
 )
+from shopee.core.push_c5 import is_valid_shopee_image_hash
 
 IMG_BASE = "https://down-id.img.susercontent.com/file"
 
@@ -70,6 +71,68 @@ def get_shopee_master_credentials() -> tuple[str, str]:
             pass
 
     return "allvbadmin", "Master!00!"
+
+
+def _attempt_dishes_pull_recovery(
+    client: ShopeeClient,
+    store_id: str,
+    merchant_id: str,
+    target_name: str,
+    extra_cookies: dict
+) -> tuple[list[dict], str, str]:
+    """
+    Pemulihan otomatis saat API dishes merespons 1130014 (authority invalid)
+    atau 1130002 (need to select a store).
+    """
+    catalogs = []
+    current_sid = store_id
+    current_mid = merchant_id
+
+    # 1. Coba resolusi ulang store ID dan merchant ID dari database/cache
+    rec_sid, rec_mid = resolve_shopee_outlet_context(
+        {"store_id": current_sid, "merchant_id": current_mid, "nama_portal": target_name}
+    )
+    if not rec_sid or rec_sid == current_sid:
+        rec_sid, rec_mid = resolve_shopee_outlet_context(
+            {"nama_portal": target_name, "merchant_name": target_name}
+        )
+
+    if rec_sid and (rec_sid != current_sid or rec_mid != current_mid):
+        print(f"[RECOVERY] Mengoreksi store context: sid={current_sid}->{rec_sid}, mid={current_mid}->{rec_mid} (error {client.last_code})")
+        current_sid = rec_sid
+        if rec_mid:
+            current_mid = rec_mid
+            extra_cookies["shopee_foody_mid"] = current_mid
+            client.merchant_id = current_mid
+        extra_cookies["shopee_tob_entity_id"] = str(current_sid)
+        client.entity_id = current_sid
+        catalogs = client.get_store_dishes(current_sid)
+
+    # 2. Jika masih gagal, query daftar store resmi yang diotorisasi akun via API
+    if not catalogs and client.last_code in (1130014, 1130002):
+        try:
+            stores = client.get_stores()
+            if stores:
+                matched_sid = None
+                for s in stores:
+                    s_name = str(s.get("name", "")).lower()
+                    s_id = str(s.get("id", "")).strip()
+                    if target_name.lower() in s_name or s_name in target_name.lower():
+                        matched_sid = s_id
+                        break
+                if not matched_sid:
+                    matched_sid = str(stores[0].get("id", "")).strip()
+
+                if matched_sid and matched_sid != current_sid:
+                    print(f"[RECOVERY] Menggunakan Store ID resmi dari get_stores: {current_sid} -> {matched_sid}")
+                    current_sid = matched_sid
+                    extra_cookies["shopee_tob_entity_id"] = str(current_sid)
+                    client.entity_id = current_sid
+                    catalogs = client.get_store_dishes(current_sid)
+        except Exception as store_err:
+            print(f"[-] Warning: Gagal query get_stores untuk recovery: {store_err}")
+
+    return catalogs, current_sid, current_mid
 
 
 def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = True):
@@ -223,18 +286,13 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         print(f"[*] Menarik data menu ShopeeFood untuk: {target_name} ({store_id})...")
         catalogs = client.get_store_dishes(store_id)
         if not catalogs and client.last_code in (1130014, 1130002):
-            rec_sid, rec_mid = resolve_shopee_outlet_context(
-                {"store_id": store_id, "merchant_id": real_merchant_id, "nama_portal": target_name}
+            catalogs, store_id, real_merchant_id = _attempt_dishes_pull_recovery(
+                client=client,
+                store_id=store_id,
+                merchant_id=real_merchant_id,
+                target_name=target_name,
+                extra_cookies=extra_cookies
             )
-            if rec_sid and (rec_sid != store_id or rec_mid != real_merchant_id):
-                print(f"[RECOVERY] Mengoreksi store context: sid={store_id}->{rec_sid}, mid={real_merchant_id}->{rec_mid} (error code {client.last_code})")
-                store_id = rec_sid
-                real_merchant_id = rec_mid
-                extra_cookies["shopee_foody_mid"] = real_merchant_id
-                extra_cookies["shopee_tob_entity_id"] = str(store_id)
-                client.entity_id = store_id
-                client.merchant_id = real_merchant_id
-                catalogs = client.get_store_dishes(store_id)
 
         if not catalogs:
             is_auth_error = (
@@ -293,17 +351,13 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 print(f"[*] Mencoba ulang menarik data menu ShopeeFood dengan token baru...")
                 catalogs = client.get_store_dishes(store_id)
                 if not catalogs and client.last_code in (1130014, 1130002):
-                    rec_sid, rec_mid = resolve_shopee_outlet_context(
-                        {"store_id": store_id, "merchant_id": new_mid, "nama_portal": target_name}
+                    catalogs, store_id, new_mid = _attempt_dishes_pull_recovery(
+                        client=client,
+                        store_id=store_id,
+                        merchant_id=new_mid,
+                        target_name=target_name,
+                        extra_cookies=extra_cookies
                     )
-                    if rec_sid and (rec_sid != store_id or rec_mid != new_mid):
-                        print(f"[RECOVERY RETRY] Mengoreksi store context: sid={store_id}->{rec_sid}, mid={new_mid}->{rec_mid}")
-                        store_id = rec_sid
-                        client.entity_id = store_id
-                        client.merchant_id = rec_mid
-                        client.extra_cookies["shopee_foody_mid"] = rec_mid
-                        client.extra_cookies["shopee_tob_entity_id"] = str(store_id)
-                        catalogs = client.get_store_dishes(store_id)
 
         if not catalogs:
             err_details = f"code={client.last_code}, msg={client.last_error}" if client.last_code else "katalog kosong"
@@ -358,7 +412,10 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     current_slash_rp = 0
                 
                 available_str = "Available" if available else "Unavailable"
-                picture_url = f"{IMG_BASE}/{picture}" if picture else ""
+                if picture and (str(picture).startswith(("http://", "https://")) or is_valid_shopee_image_hash(picture)):
+                    picture_url = str(picture) if str(picture).startswith(("http://", "https://")) else f"{IMG_BASE}/{picture}"
+                else:
+                    picture_url = ""
                 link_outlet = f"https://shopee.co.id/now-food/shop/{store_id}"
                 
                 dish_info = {

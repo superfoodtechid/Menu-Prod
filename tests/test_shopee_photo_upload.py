@@ -338,7 +338,7 @@ class TestShopeePhotoUpload(unittest.TestCase):
             headless=True
         )
 
-        mock_sync_session.assert_called_once_with(mock_driver, "STORE_777")
+        mock_sync_session.assert_not_called()
         mock_upload_image.assert_called_once()
         upload_call = mock_upload_image.call_args[1]
         self.assertEqual(upload_call["dish_id"], "701")

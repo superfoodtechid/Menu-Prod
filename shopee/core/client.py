@@ -99,6 +99,26 @@ class ShopeeClient:
             print(f"[Shopee API] get_store_option_groups error: {e}")
         return []
 
+    def get_stores(self, page_no: int = 1, page_size: int = 50) -> list[dict]:
+        url = f"{SELLER_BASE}/api/seller/stores"
+        payload = {
+            "store_name": "",
+            "page_size": page_size,
+            "page_no": page_no,
+        }
+        try:
+            resp = self.session.post(url, json=payload, headers=self._seller_headers(), timeout=15)
+            data = resp.json()
+            if data.get("code") == 0:
+                return data.get("data", {}).get("stores", [])
+            else:
+                self.last_code = data.get("code")
+                self.last_error = data.get("msg", "")
+        except Exception as e:
+            self.last_error = str(e)
+            print(f"[Shopee API] get_stores error: {e}")
+        return []
+
 class ShopeeModifyClient:
     def __init__(self, tob_token: str, entity_id: str, extra_cookies: dict = None, merchant_id: str = None, username: str = None):
         self.tob_token     = tob_token
@@ -107,6 +127,7 @@ class ShopeeModifyClient:
         self.username      = username or ""
         self.extra_cookies = extra_cookies or {}
         self.session       = requests.Session()
+        self.user_agent    = USER_AGENT
         self.uploaded_image_hash = ""
         self.last_code = None
         self.last_error = ""
@@ -233,7 +254,29 @@ class ShopeeModifyClient:
         return None
 
     def _preupload_image(self) -> dict | None:
-        payload = {"app_id": 10051}
+        self.last_error = ""
+        timestamp = str(int(time.time()))
+        signature_hash = hashlib.sha256(f"PnjKKY{timestamp}".encode("utf-8")).hexdigest()
+        sign = f"PnjKKY-{signature_hash}-{timestamp}"
+        request_id = uuid.uuid4().hex
+        header_v2 = {
+            "version": 1,
+            "sign": sign,
+            "biz": 4505,
+            "app_version": "mms-2.3.8",
+            "client_region": "ID",
+            "device_model": self.user_agent,
+            "os_type": 2,
+            "request_id": request_id,
+            "sdk_version": "mms-2.3.8",
+        }
+        # The Partner portal sends the MMS HeaderV2 both in _header and as
+        # top-level metadata. Sending only app_id is rejected by MMS with 400.
+        payload = {
+            "_header": header_v2,
+            "count": 1,
+            **header_v2,
+        }
         try:
             resp = self.session.post(MMS_PREUPLOAD, json=payload, headers=self._mms_headers(), timeout=15)
             if resp.status_code != 200:
@@ -246,14 +289,27 @@ class ShopeeModifyClient:
                 return None
 
             if data.get("code") == 0:
-                services = data.get("data", {}).get("upload_services", [])
+                response_data = data.get("data", {})
+                services = response_data.get("upload_services") or response_data.get("services") or []
                 if services:
-                    upload_domain = services[0].get("upload_domain")
-                    return {
-                        "token":         data["data"]["upload_token"],
-                        "img_id":        data["data"]["img_id"],
-                        "upload_domain": upload_domain,
-                    }
+                    service = services[0]
+                    upload_token = response_data.get("upload_token") or service.get("token")
+                    image_ids = response_data.get("img_ids") or []
+                    image_id = response_data.get("img_id") or (image_ids[0] if image_ids else "")
+                    if not image_id:
+                        fingerprints = response_data.get("fingerprint_infos") or []
+                        if fingerprints:
+                            image_id = fingerprints[0].get("img_id") or ""
+                    upload_domain = service.get("upload_domain") or WS_UPLOAD.rsplit("/file/upload", 1)[0]
+                    if upload_token and image_id:
+                        return {
+                            "token": upload_token,
+                            "img_id": image_id,
+                            "upload_domain": upload_domain,
+                        }
+                    self.last_error = "MMS preupload response tidak memiliki upload token atau img_id."
+                else:
+                    self.last_error = "MMS preupload berhasil tetapi tidak mengembalikan layanan upload."
             else:
                 self.last_error = f"MMS preupload API error: code={data.get('code')} msg={data.get('msg')}"
         except Exception as e:

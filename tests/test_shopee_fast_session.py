@@ -2,6 +2,8 @@
 import unittest
 import json
 import time
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from shopee.core.session_utils import (
@@ -14,7 +16,13 @@ from shopee.core.session_utils import (
 )
 from shopee.core.client import ShopeeClient
 from shopee.core.push import _boot_push_client
-from core.browser import _trigger_and_extract_tokens
+from core.browser import (
+    _acquire_profile_lock,
+    _attach_profile_lock,
+    _release_profile_lock,
+    _session_is_auth_expired,
+    _trigger_and_extract_tokens,
+)
 
 
 class TestShopeeFastSession(unittest.TestCase):
@@ -23,6 +31,41 @@ class TestShopeeFastSession(unittest.TestCase):
 
     def tearDown(self):
         _IN_MEMORY_SESSION_CACHE.clear()
+
+    def test_missing_merchant_selector_is_not_treated_as_expired_session(self):
+        driver = MagicMock()
+        driver.current_url = "https://partner.shopee.co.id/food/dashboard"
+        driver.find_elements.return_value = []
+        self.assertFalse(_session_is_auth_expired(driver))
+
+    def test_login_url_is_treated_as_expired_session(self):
+        driver = MagicMock()
+        driver.current_url = "https://partner.shopee.co.id/login"
+        self.assertTrue(_session_is_auth_expired(driver))
+
+    def test_profile_lock_serializes_browser_users(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_dir = Path(temp_dir) / "chrome-profile"
+            first_lock = _acquire_profile_lock(profile_dir)
+            try:
+                with self.assertRaises(TimeoutError):
+                    _acquire_profile_lock(profile_dir, timeout=0.05)
+            finally:
+                _release_profile_lock(first_lock)
+
+            second_lock = _acquire_profile_lock(profile_dir, timeout=0.05)
+            _release_profile_lock(second_lock)
+
+    def test_quitting_driver_releases_profile_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_dir = Path(temp_dir) / "chrome-profile"
+            held_lock = _acquire_profile_lock(profile_dir)
+            driver = MagicMock()
+            _attach_profile_lock(driver, held_lock)
+
+            driver.quit()
+            replacement_lock = _acquire_profile_lock(profile_dir, timeout=0.05)
+            _release_profile_lock(replacement_lock)
 
     @patch("requests.post")
     def test_validate_shopee_token_success(self, mock_post):
@@ -121,6 +164,25 @@ class TestShopeeFastSession(unittest.TestCase):
         self.assertEqual(client.tob_token, "fast_token_999")
         self.assertEqual(client.entity_id, "22459819")
         mock_browser_get_session.assert_not_called()
+
+    @patch("shopee.core.push.browser.get_session", side_effect=RuntimeError("AUTH_REQUIRED_NO_LOGIN: expired"))
+    @patch("shopee.core.push.browser.set_session_file")
+    @patch("shopee.core.push.resolve_shopee_session", return_value=Path("session_superfoodapp.json"))
+    @patch("shopee.core.push.get_fast_shopee_session", return_value=None)
+    def test_push_never_starts_login_when_cached_owner_session_is_invalid(
+        self, mock_fast_session, mock_resolve_session, mock_set_session, mock_get_session
+    ):
+        client, err = _boot_push_client({
+            "username": "superfoodapp",
+            "store_id": "22459819",
+            "merchant_name": "SuperFood",
+        })
+
+        self.assertIsNone(client)
+        self.assertIn("Push tidak melakukan login ulang", err)
+        mock_get_session.assert_called_once()
+        self.assertFalse(mock_get_session.call_args.kwargs["allow_login"])
+        self.assertFalse(mock_get_session.call_args.kwargs["interactive"])
 
     def test_trigger_and_extract_tokens_skips_trigger_page_when_cookie_exists(self):
         mock_driver = MagicMock()
@@ -353,6 +415,65 @@ class TestShopeeFastSession(unittest.TestCase):
             success, res_path = extract_shopee_menu(store_metadata, output_dir="/tmp/test_shopee_out")
             self.assertTrue(success)
             self.assertEqual(mock_client.get_store_option_groups.call_count, 2)
+
+    def test_attempt_dishes_pull_recovery_portal_fallback(self):
+        from shopee.core.pull import _attempt_dishes_pull_recovery
+        mock_client = MagicMock()
+        mock_client.last_code = 1130014
+        mock_client.last_error = "merchant authority invalid"
+
+        def mock_get_dishes(sid):
+            if str(sid) == "21150787":
+                mock_client.last_code = 1130014
+                return []
+            mock_client.last_code = 0
+            return [{"id": "cat_1", "name": "Kategori", "dishes": []}]
+
+        mock_client.get_store_dishes.side_effect = mock_get_dishes
+        extra_cookies = {}
+
+        catalogs, sid, mid = _attempt_dishes_pull_recovery(
+            client=mock_client,
+            store_id="21150787",
+            merchant_id="1455780",
+            target_name="[SR] Ayam geprek cinta_",
+            extra_cookies=extra_cookies
+        )
+
+        self.assertEqual(len(catalogs), 1)
+        self.assertEqual(sid, "1456964")
+        self.assertEqual(mid, "1455780")
+        self.assertEqual(extra_cookies["shopee_tob_entity_id"], "1456964")
+
+    def test_attempt_dishes_pull_recovery_get_stores_fallback(self):
+        from shopee.core.pull import _attempt_dishes_pull_recovery
+        mock_client = MagicMock()
+        mock_client.last_code = 1130014
+        mock_client.last_error = "merchant authority invalid"
+
+        def mock_get_dishes(sid):
+            if str(sid) == "999999":
+                return []
+            mock_client.last_code = 0
+            return [{"id": "cat_1", "name": "Kategori", "dishes": []}]
+
+        mock_client.get_store_dishes.side_effect = mock_get_dishes
+        mock_client.get_stores.return_value = [
+            {"id": "888888", "name": "Toko Eksklusif Target"}
+        ]
+        extra_cookies = {}
+
+        catalogs, sid, mid = _attempt_dishes_pull_recovery(
+            client=mock_client,
+            store_id="999999",
+            merchant_id="123456",
+            target_name="Toko Eksklusif Target",
+            extra_cookies=extra_cookies
+        )
+
+        self.assertEqual(len(catalogs), 1)
+        self.assertEqual(sid, "888888")
+        self.assertEqual(extra_cookies["shopee_tob_entity_id"], "888888")
 
 
 if __name__ == "__main__":

@@ -133,7 +133,8 @@ def _process_photo_fallback_queue(
     queue: list[dict],
     headless: bool = True,
     item_result_cb=None,
-    store_id: str = None
+    store_id: str = None,
+    client: ShopeeModifyClient = None,
 ) -> None:
     """Mengunggah foto yang gagal via API langsung menggunakan otomasi browser Selenium."""
     if not queue:
@@ -157,24 +158,30 @@ def _process_photo_fallback_queue(
             headless=headless,
             close_browser=False,
             target_name=target_name,
-            interactive=False
+            interactive=False,
+            target_store_id=target_store_id,
+            allow_login=False,
+            load_images=True,
         )
         if not session_data or "driver" not in session_data:
             logger.warning("Gagal menginisialisasi browser untuk fallback upload foto.")
             for entry in queue:
+                entry["res_item"]["status"] = "FAILED"
+                entry["res_item"]["error"] = "Gagal menginisialisasi browser untuk fallback upload foto."
                 entry["res_item"]["note"] = (entry["res_item"].get("note", "") + " Gagal init browser fallback foto.").strip()
                 upd = entry.get("update_payload")
                 if item_result_cb and upd:
                     try:
-                        cb_status = entry["res_item"].get("status", "FAILED")
-                        item_result_cb(upd, cb_status, "Gagal init browser fallback foto", applied=entry["res_item"])
+                        item_result_cb(upd, "FAILED", entry["res_item"]["error"], applied=entry["res_item"])
                     except Exception:
                         pass
             return
 
         driver = session_data["driver"]
-        if target_store_id:
-            _sync_store_session(driver, str(target_store_id))
+        # get_session() above already selects and validates target_store_id.
+        # Calling _sync_store_session() here can navigate through dashboard
+        # and business-hours pages before every photo batch, causing visible
+        # white flashes and risking loss of the selected merchant context.
 
         for entry in queue:
             dish_id = entry["dish_id"]
@@ -191,19 +198,63 @@ def _process_photo_fallback_queue(
                     tf.write(img_data)
                     temp_path = tf.name
 
-                upload_ok = edit_dish_upload_image(
-                    store_metadata=store_metadata,
-                    dish_id=str(dish_id),
-                    image_path=temp_path,
-                    headless=headless,
-                    driver=driver,
-                    sync_session=False,
-                    store_id=target_store_id
-                )
+                upload_ok = False
+                verified_picture = ""
+                previous_picture = str(entry.get("previous_picture") or "").strip()
+                for attempt in range(1, 3):
+                    upload_ok = edit_dish_upload_image(
+                        store_metadata=store_metadata,
+                        dish_id=str(dish_id),
+                        image_path=temp_path,
+                        headless=headless,
+                        driver=driver,
+                        sync_session=False,
+                        store_id=target_store_id
+                    )
+                    if not upload_ok:
+                        logger.warning(
+                            "Portal upload attempt %d/2 did not complete for dish %s.",
+                            attempt, dish_id
+                        )
+                        continue
+
+                    if client:
+                        # Clicking Save is not proof that Shopee persisted the
+                        # picture. Confirm the live dish hash changed before
+                        # returning a successful result to the job/audit trail.
+                        for verify_attempt in range(4):
+                            try:
+                                live_dish = client.get_dish_detail(str(dish_id), target_store_id)
+                                live_picture = str((live_dish or {}).get("picture") or "").strip()
+                                if live_picture and live_picture != previous_picture:
+                                    verified_picture = live_picture
+                                    break
+                            except Exception as verify_error:
+                                logger.debug(
+                                    "Photo verification attempt %d/4 failed for dish %s: %s",
+                                    verify_attempt + 1, dish_id, verify_error
+                                )
+                            if verify_attempt < 3:
+                                time.sleep(1.5)
+                        if verified_picture:
+                            break
+                        logger.warning(
+                            "Portal Save was clicked, but Shopee still reports the previous picture for dish %s (attempt %d/2).",
+                            dish_id, attempt
+                        )
+                        upload_ok = False
+                    else:
+                        # Preserve the legacy helper behavior for standalone
+                        # callers that do not provide an API client.
+                        verified_picture = "Uploaded via portal"
+                        break
+
+                    if attempt < 2:
+                        time.sleep(1)
                 if upload_ok:
                     res_item["status"] = "SUCCESS"
                     res_item["error"] = None
-                    res_item["new_photo"] = "Uploaded via portal"
+                    res_item["new_photo"] = verified_picture
                     prev_note = res_item.get("note", "")
                     if "Foto gagal diunggah:" in prev_note or "fallback" in prev_note:
                         res_item["note"] = "Foto berhasil diunggah via portal"
@@ -217,21 +268,22 @@ def _process_photo_fallback_queue(
                             pass
                 else:
                     logger.warning(f"❌ Foto untuk item '{tname}' (ID {dish_id}) gagal diunggah via portal.")
+                    res_item["status"] = "FAILED"
+                    res_item["error"] = res_item.get("error") or "Foto belum terkonfirmasi tersimpan di Shopee setelah fallback portal."
                     res_item["note"] = (res_item.get("note", "") + " Foto gagal diunggah via portal.").strip()
                     if item_result_cb and upd:
                         try:
-                            cb_status = res_item.get("status", "FAILED")
-                            cb_err = res_item.get("error") or "Foto gagal diunggah via portal"
-                            item_result_cb(upd, cb_status, cb_err, applied=res_item)
+                            item_result_cb(upd, "FAILED", res_item["error"], applied=res_item)
                         except Exception:
                             pass
             except Exception as ex:
                 logger.warning(f"Error memproses fallback upload foto item '{tname}': {ex}")
+                res_item["status"] = "FAILED"
+                res_item["error"] = f"Error fallback upload foto: {ex}"
                 res_item["note"] = (res_item.get("note", "") + f" Error fallback foto: {ex}").strip()
                 if item_result_cb and upd:
                     try:
-                        cb_status = res_item.get("status", "FAILED")
-                        item_result_cb(upd, cb_status, f"Error fallback foto: {ex}", applied=res_item)
+                        item_result_cb(upd, "FAILED", res_item["error"], applied=res_item)
                     except Exception:
                         pass
             finally:
@@ -244,10 +296,11 @@ def _process_photo_fallback_queue(
         logger.error(f"Kesalahan fatal pada worker fallback foto: {e}")
         for entry in queue:
             upd = entry.get("update_payload")
+            entry["res_item"]["status"] = "FAILED"
+            entry["res_item"]["error"] = f"Fatal fallback error: {e}"
             if item_result_cb and upd:
                 try:
-                    cb_status = entry["res_item"].get("status", "FAILED")
-                    item_result_cb(upd, cb_status, f"Fatal fallback error: {e}", applied=entry["res_item"])
+                    item_result_cb(upd, "FAILED", entry["res_item"]["error"], applied=entry["res_item"])
                 except Exception:
                     pass
     finally:
@@ -431,6 +484,7 @@ def push_c5_shopee_for_merchant(
                             "res_item": res_item,
                             "target_name": new_name or item_name,
                             "update_payload": upd,
+                            "previous_picture": str((created_dish or {}).get("picture") or ""),
                         })
                 else:
                     logger.error(f"❌ [PUSH_C5] create_dish gagal untuk '{new_name or item_name}': {client.last_error}")
@@ -478,6 +532,29 @@ def push_c5_shopee_for_merchant(
                     item_result_cb(upd, "FAILED", res_item["error"], applied=res_item)
                 except Exception:
                     pass
+            continue
+
+        # For a photo-only push, update the image through the merchant portal
+        # directly. The seller dish-update API requires a full dish object and
+        # can still trigger Shopee's daily price-change guard even when we send
+        # the existing price unchanged. Avoid both the MMS/API update path and
+        # any price-bearing payload in this case.
+        photo_only_push = want_photo and not (want_name or want_category or want_desc or want_price)
+        if photo_only_push and photo_link:
+            logger.info(
+                "📌 [PHOTO ONLY] Mengirim foto '%s' (ID: %s) lewat portal; API update dish dilewati.",
+                item_name, item_id,
+            )
+            photo_fallback_queue.append({
+                "dish_id": str(item_id),
+                "photo_link": photo_link,
+                "res_item": res_item,
+                "target_name": item_name or new_name or item_id,
+                "update_payload": upd,
+                "previous_picture": str(existing_dish.get("picture") or ""),
+            })
+            res_item["note"] = "Push foto saja melalui portal; payload harga tidak dikirim."
+            results.append(res_item)
             continue
 
         orig_catalog_id = int(existing_dish.get("catalog_id") or 0)
@@ -623,6 +700,7 @@ def push_c5_shopee_for_merchant(
                 "res_item": res_item,
                 "target_name": target_name,
                 "update_payload": upd,
+                "previous_picture": str(existing_dish.get("picture") or ""),
             })
 
         results.append(res_item)
@@ -640,7 +718,8 @@ def push_c5_shopee_for_merchant(
             photo_fallback_queue,
             headless=headless,
             item_result_cb=item_result_cb,
-            store_id=store_id
+            store_id=store_id,
+            client=client,
         )
 
     has_any_cat_changes = any(
