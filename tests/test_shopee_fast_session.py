@@ -19,6 +19,9 @@ from shopee.core.push import _boot_push_client
 from core.browser import (
     _acquire_profile_lock,
     _attach_profile_lock,
+    _cleanup_stale_chrome_lock,
+    _extract_pid_from_singleton_lock,
+    _is_pid_running,
     _release_profile_lock,
     _session_is_auth_expired,
     _trigger_and_extract_tokens,
@@ -66,6 +69,58 @@ class TestShopeeFastSession(unittest.TestCase):
             driver.quit()
             replacement_lock = _acquire_profile_lock(profile_dir, timeout=0.05)
             _release_profile_lock(replacement_lock)
+
+    def test_cleanup_stale_chrome_lock_removes_dead_pid_symlink(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_dir = Path(temp_dir) / "chrome-profile"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = profile_dir / "SingletonLock"
+            cookie_path = profile_dir / "SingletonCookie"
+            socket_path = profile_dir / "SingletonSocket"
+
+            # Point to a dead PID
+            lock_path.symlink_to("test-host-99999999")
+            cookie_path.write_text("12345")
+            socket_path.write_text("sock")
+
+            cleaned = _cleanup_stale_chrome_lock(profile_dir)
+            self.assertTrue(cleaned)
+            self.assertFalse(lock_path.is_symlink())
+            self.assertFalse(lock_path.exists())
+            self.assertFalse(cookie_path.exists())
+            self.assertFalse(socket_path.exists())
+
+    def test_cleanup_stale_chrome_lock_preserves_live_pid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_dir = Path(temp_dir) / "chrome-profile"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = profile_dir / "SingletonLock"
+
+            # Point to current running process PID and current hostname
+            import os
+            import socket
+            current_pid = os.getpid()
+            current_host = socket.gethostname()
+            lock_path.symlink_to(f"{current_host}-{current_pid}")
+
+            cleaned = _cleanup_stale_chrome_lock(profile_dir)
+            self.assertFalse(cleaned)
+            self.assertTrue(lock_path.is_symlink())
+
+    def test_cleanup_stale_chrome_lock_cleans_foreign_host_symlink(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_dir = Path(temp_dir) / "chrome-profile"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = profile_dir / "SingletonLock"
+
+            import os
+            current_pid = os.getpid()
+            # Different host name even if PID matches
+            lock_path.symlink_to(f"foreign-container-id-{current_pid}")
+
+            cleaned = _cleanup_stale_chrome_lock(profile_dir)
+            self.assertTrue(cleaned)
+            self.assertFalse(lock_path.is_symlink())
 
     @patch("requests.post")
     def test_validate_shopee_token_success(self, mock_post):

@@ -16,6 +16,7 @@ import os
 import re
 import json
 import time
+import socket
 import random
 import fcntl
 from datetime import datetime
@@ -136,6 +137,86 @@ def _attach_profile_lock(driver, lock_file):
                 _release_profile_lock(lock_file)
 
     driver.quit = quit_with_profile_unlock
+
+
+def _is_pid_running(pid: int) -> bool:
+    """Return True if a process with the given PID is currently active."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _extract_pid_from_singleton_lock(profile_dir: Path):
+    """
+    Extract (hostname, pid) from SingletonLock symlink or file if present.
+    Format on POSIX is typically '<hostname>-<pid>' or '<pid>'.
+    """
+    chrome_lock = profile_dir / "SingletonLock"
+    target = None
+    try:
+        if chrome_lock.is_symlink():
+            target = os.readlink(chrome_lock)
+        elif chrome_lock.exists():
+            target = chrome_lock.read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception:
+        return None, None
+
+    if not target:
+        return None, None
+
+    parts = target.strip().rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0], int(parts[1])
+    elif len(parts) == 1 and parts[0].isdigit():
+        return None, int(parts[0])
+    return None, None
+
+
+def _cleanup_stale_chrome_lock(profile_dir: Path, force: bool = False) -> bool:
+    """
+    Remove stale SingletonLock, SingletonCookie, and SingletonSocket
+    if the owner PID is dead or if forced when no active PID is confirmed.
+    Returns True if stale locks were cleaned, False otherwise.
+    """
+    chrome_lock = profile_dir / "SingletonLock"
+    if not (chrome_lock.is_symlink() or chrome_lock.exists()):
+        return False
+
+    host_in_lock, pid = _extract_pid_from_singleton_lock(profile_dir)
+    current_host = socket.gethostname()
+
+    is_stale = False
+    if pid is not None:
+        if not _is_pid_running(pid):
+            is_stale = True
+        elif host_in_lock and host_in_lock != current_host:
+            # Different container or host - prior container has exited
+            is_stale = True
+    elif force:
+        is_stale = True
+
+    if is_stale:
+        log.warning(
+            f"🧹 [BROWSER] Menghapus stale Chrome lock (target={host_in_lock or 'unknown'}-{pid or 'none'}) di {profile_dir}"
+        )
+        for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            target_path = profile_dir / lock_name
+            try:
+                if target_path.is_symlink() or target_path.exists():
+                    target_path.unlink(missing_ok=True)
+            except Exception as e:
+                log.warning(f"⚠️ Gagal menghapus {lock_name}: {e}")
+        return True
+
+    return False
 
 def kill_all_active_drivers():
     with _drivers_lock:
@@ -1763,9 +1844,14 @@ def _init_driver(headless: bool = True, load_images: bool = False):
     # separate advisory lock held for the full WebDriver lifetime.
     profile_lock = _acquire_profile_lock(profile_dir)
     chrome_lock = profile_dir / "SingletonLock"
+    _cleanup_stale_chrome_lock(profile_dir)
     chrome_lock_deadline = time.monotonic() + 15
     while chrome_lock.is_symlink() or chrome_lock.exists():
+        if _cleanup_stale_chrome_lock(profile_dir):
+            break
         if time.monotonic() >= chrome_lock_deadline:
+            if _cleanup_stale_chrome_lock(profile_dir, force=True):
+                break
             _release_profile_lock(profile_lock)
             raise RuntimeError(
                 f"Profil Chrome masih terkunci oleh browser lain: {profile_dir}. "
