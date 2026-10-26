@@ -346,7 +346,12 @@ def validate_shopee_token(tob_token: str, timeout: float = 2.5) -> tuple[bool, d
     return False, {}
 
 
-def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout: float = 2.5) -> dict | None:
+def get_fast_shopee_session(
+    store_metadata: dict,
+    base_dir: Path = None,
+    timeout: float = 2.5,
+    require_entity_match: bool = False,
+) -> dict | None:
     """
     Mencari dan memvalidasi sesi Shopee aktif dari memory cache atau file session.
     Jika valid, mengembalikan data sesi lengkap siap pakai dalam hitungan milidetik (~0.2s),
@@ -359,6 +364,10 @@ def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout
 
     # 1. Cek In-Memory Cache
     mem_entry = _IN_MEMORY_SESSION_CACHE.get(cache_key)
+    if mem_entry:
+        if require_entity_match and not (mem_entry.get("session_data") or {}).get("entity_verified"):
+            _IN_MEMORY_SESSION_CACHE.pop(cache_key, None)
+            mem_entry = None
     if mem_entry:
         validated_at = mem_entry.get("validated_at", 0)
         age = now - validated_at
@@ -389,6 +398,12 @@ def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout
 
     # Validasi entity_id sesi tersimpan agar tidak menggunakan token outlet lain
     raw_eid = str(raw_data.get("shopee_tob_entity_id") or "").strip()
+    if require_entity_match and store_id and raw_eid != store_id:
+        log.info(
+            "ℹ️ [SESSION] Fast-path PULL dilewati: entity_id sesi tidak terverifikasi untuk target store %s.",
+            store_id,
+        )
+        return None
     if store_id and store_id not in ("-", "nan", "none") and raw_eid and raw_eid not in ("-", "nan", "none"):
         if raw_eid != store_id:
             log.info(f"ℹ️ [SESSION] Sesi di {session_file.name} memiliki entity_id ({raw_eid}) berbeda dengan target ({store_id}). Melewati fast-path.")
@@ -427,6 +442,7 @@ def get_fast_shopee_session(store_metadata: dict, base_dir: Path = None, timeout
     fast_session = {
         "shopee_tob_token": tob_token,
         "shopee_tob_entity_id": real_store_id,
+        "entity_verified": bool(raw_eid and (not store_id or raw_eid == store_id)),
         "merchant_id": real_merchant_id,
         "extra_cookies": extra_cookies,
         "source": "fast_cache"

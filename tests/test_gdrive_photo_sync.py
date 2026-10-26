@@ -16,6 +16,7 @@ from menu_core.gdrive_service import (
     sync_menu_photos_via_appscript,
     sync_menu_photos_to_drive,
     prepare_and_start_photo_sync,
+    prepare_photo_folder,
     update_excel_folder_link,
 )
 from menu_core.c5_template_helper import (
@@ -319,6 +320,71 @@ class TestGDrivePhotoSync(unittest.TestCase):
         self.assertEqual(meta["total_photos"], 1)
         self.assertIsNone(meta["drive_folder_url"])
         self.assertTrue(meta["target_folder_name"].startswith("ShopeeFood | Test Outlet | 1001 |"))
+
+    @patch("menu_core.gdrive_service.is_photo_sync_enabled", return_value=True)
+    @patch("menu_core.gdrive_service.get_drive_service", return_value=None)
+    @patch("menu_core.gdrive_service.update_excel_folder_link", return_value=True)
+    @patch("menu_core.gdrive_service.sync_menu_photos_via_appscript")
+    def test_prepare_photo_folder_resolves_folder_without_uploading_photos(
+        self, mock_appscript, _mock_update_excel, _mock_drive, _mock_enabled
+    ):
+        mock_appscript.return_value = "https://drive.google.com/drive/folders/prepared"
+
+        folder_url, meta = prepare_photo_folder(
+            owner_name="Test Owner",
+            platform="ShopeeFood",
+            listing_name="Test Outlet",
+            sid="1001",
+            dishes=[{"item_name": "Ayam", "photo_url": "https://cdn.example/ayam.jpg", "item_id": "1"}],
+            excel_path="outlet.xlsx",
+            timestamp_str="2026-10-26 10:00",
+        )
+
+        self.assertEqual(folder_url, "https://drive.google.com/drive/folders/prepared")
+        self.assertEqual(meta["status"], "WAITING_FOR_C5")
+        self.assertEqual(meta["total_photos"], 1)
+        self.assertEqual(meta["drive_folder_url"], folder_url)
+        self.assertEqual(mock_appscript.call_args.kwargs["dishes"], [])
+
+    @patch("menu_core.gdrive_service.is_photo_sync_enabled", return_value=True)
+    @patch("menu_core.gdrive_service.get_drive_service", return_value=None)
+    @patch("menu_core.gdrive_service.sync_menu_photos_via_appscript", return_value=None)
+    def test_prepare_photo_folder_failure_does_not_claim_photos_are_waiting(
+        self, _mock_appscript, _mock_drive, _mock_enabled
+    ):
+        folder_url, meta = prepare_photo_folder(
+            owner_name="Test Owner",
+            platform="GrabFood",
+            listing_name="Test Outlet",
+            sid="1001",
+            dishes=[{"item_name": "Ayam", "photo_url": "https://cdn.example/ayam.jpg", "item_id": "1"}],
+        )
+
+        self.assertIsNone(folder_url)
+        self.assertEqual(meta["status"], "FAILED")
+        self.assertIn("Folder foto belum siap", meta["message"])
+
+    @patch("menu_core.gdrive_service.is_photo_sync_enabled", return_value=True)
+    @patch("menu_core.gdrive_service.get_drive_service", return_value=None)
+    @patch("menu_core.gdrive_service.update_excel_folder_link", return_value=False)
+    @patch("menu_core.gdrive_service.sync_menu_photos_via_appscript")
+    def test_prepare_photo_folder_fails_if_workbook_link_cannot_be_saved(
+        self, mock_appscript, _mock_update_excel, _mock_drive, _mock_enabled
+    ):
+        mock_appscript.return_value = "https://drive.google.com/drive/folders/prepared"
+
+        folder_url, meta = prepare_photo_folder(
+            owner_name="Test Owner",
+            platform="GoFood",
+            listing_name="Test Outlet",
+            sid="1001",
+            dishes=[{"item_name": "Ayam", "photo_url": "https://cdn.example/ayam.jpg", "item_id": "1"}],
+            excel_path="outlet.xlsx",
+        )
+
+        self.assertIsNone(folder_url)
+        self.assertEqual(meta["status"], "FAILED")
+        self.assertIn("Tautan folder tidak berhasil disimpan", meta["message"])
 
 
 if __name__ == "__main__":

@@ -542,7 +542,7 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         
     excel_path = os.path.join(output_dir, excel_filename)
 
-    from menu_core.gdrive_service import format_photo_folder_label, prepare_and_start_photo_sync
+    from menu_core.gdrive_service import format_photo_folder_label, prepare_photo_folder
     first_dish = all_dishes[0] if all_dishes else {}
     owner_name = store_metadata.get("owner") or "Default Owner"
     listing_name = first_dish.get('nama_panjang') or store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or "GoFood Outlet"
@@ -669,6 +669,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         except Exception as e_db:
             print(f"   ⚠️ Gagal memuat harga offline dari DB: {e_db}")
 
+    from menu_core.database import normalize_offline_item_name
+
     try:
         wb = openpyxl.load_workbook(template_path)
         sheet_item = wb['Item']
@@ -698,7 +700,6 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                             if item_id_val and (gofood_sid, item_id_val) in db_offline.get('by_id', {}):
                                 off_val = db_offline['by_id'][(gofood_sid, item_id_val)]
                             elif row.get('Item'):
-                                from menu_core.database import normalize_offline_item_name
                                 norm_n = normalize_offline_item_name(row.get('Item'))
                                 if (gofood_sid, norm_n) in db_offline.get('by_name', {}):
                                     off_val = db_offline['by_name'][(gofood_sid, norm_n)]
@@ -746,20 +747,18 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             df_folder_links.to_excel(writer, sheet_name=FOLDER_LINK_SHEET_NAME, index=False)
         
     photo_sync_meta = None
-    if all_dishes:
-        try:
-            _, photo_sync_meta = prepare_and_start_photo_sync(
-                owner_name=owner_name,
-                platform="GoFood",
-                listing_name=listing_name,
-                sid=sid,
-                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes],
-                excel_path=excel_path,
-                job_id=store_metadata.get("job_id"),
-                run_async=True,
-            )
-        except Exception as e_drive:
-            print(f"   ⚠️ Gagal sinkronisasi foto GoFood latar belakang ke Google Drive: {e_drive}")
+    try:
+        _, photo_sync_meta = prepare_photo_folder(
+            owner_name=owner_name,
+            platform="GoFood",
+            listing_name=listing_name,
+            sid=sid,
+            dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes],
+            excel_path=excel_path,
+            job_id=store_metadata.get("job_id"),
+        )
+    except Exception as e_drive:
+        print(f"   ⚠️ Gagal menyiapkan folder foto GoFood: {e_drive}")
 
     print(f"   ✅ Berhasil memproses data menu GoFood!")
     print(f"      - Item Count: {len(df_items)}")

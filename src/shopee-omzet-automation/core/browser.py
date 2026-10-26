@@ -739,33 +739,35 @@ def validate_session(tob_token: str, entity_id: str) -> bool:
 
 # ── Token Extraction ───────────────────────────────────────────────────────────
 
-def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tuple:
+def extract_tokens_from_driver(driver, allow_file_fallback: bool = False, expected_entity_id=None) -> tuple:
     tob_token = None
     cookie_store_id = None
     cookie_merchant_id = None
-    for c in driver.get_cookies():
-        name = c["name"]
-        val = c["value"]
-        if name in ["shopee_tob_token", "spc_ec", "SPC_EC"]: 
-            tob_token = val
+    cookies = driver.get_cookies()
+    # A real TOB token always wins, independent of cookie order. spc_ec is a
+    # different Shopee cookie and must never overwrite the seller token.
+    for c in cookies:
+        name = c.get("name", "")
+        val = c.get("value")
+        if name.lower() == "shopee_tob_token" and val:
+            tob_token = str(val).strip()
         elif name.lower() == "shopee_tob_entity_id":
             if val: cookie_store_id = str(val).strip()
         elif name.lower() in ["shopee_foody_mid", "x-merchant-id", "spc_merchant_id", "merchant_id", "shopid", "shop_id"]:
             if val and not cookie_merchant_id: cookie_merchant_id = str(val).strip()
 
-    entity_id = cookie_store_id or cookie_merchant_id
+    # For a targeted pull, never substitute a group/merchant ID or an
+    # arbitrary numeric storage value for the physical store entity.
+    if expected_entity_id:
+        expected_id = str(expected_entity_id).strip()
+        entity_id = cookie_store_id if cookie_store_id == expected_id else None
+    else:
+        entity_id = cookie_store_id or cookie_merchant_id
 
     if not tob_token:
         try:
             tob_token = driver.execute_script("""
-                function getCookie(name) {
-                    var v = document.cookie.match('(^|;) ?' + name + '=([^;]*)(;|$)');
-                    return v ? v[2] : null;
-                }
-                return getCookie('shopee_tob_token') ||
-                       getCookie('spc_ec') ||
-                       localStorage.getItem('shopee_tob_token') ||
-                       localStorage.getItem('token') ||
+                return localStorage.getItem('shopee_tob_token') ||
                        sessionStorage.getItem('shopee_tob_token') || null;
             """)
         except: pass
@@ -780,7 +782,7 @@ def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tup
                     entity_id = saved.get("shopee_tob_entity_id")
         except: pass
             
-    if not entity_id:
+    if not entity_id and not expected_entity_id:
         try: 
             # Try API first (Most accurate) - using full URL and credentials
             api_js = """
@@ -802,7 +804,7 @@ def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tup
             entity_id = driver.execute_async_script(api_js)
         except: pass
 
-    if not entity_id:
+    if not entity_id and not expected_entity_id:
         try: 
             entity_id = driver.execute_script("""
                 let ids = [];
@@ -826,9 +828,12 @@ def extract_tokens_from_driver(driver, allow_file_fallback: bool = False) -> tup
 def get_all_cookies_dict(driver) -> dict:
     return {c["name"]: c["value"] for c in driver.get_cookies()}
 
-def _trigger_and_extract_tokens(driver, expected_entity_id=None) -> tuple:
+def _trigger_and_extract_tokens(driver, expected_entity_id=None, force_refresh: bool = False) -> tuple:
     # 1. Cek langsung dari sesi aktif browser (hindari page reload jika token sudah ada)
-    tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
+    target_id = str(expected_entity_id).strip() if expected_entity_id else None
+    tob_token, entity_id = (None, None) if force_refresh else extract_tokens_from_driver(
+        driver, allow_file_fallback=False, expected_entity_id=target_id
+    )
     if tob_token:
         # Cek apakah store ID fisik pada cookie berbeda dari target yang diminta
         cookie_store_id = None
@@ -841,14 +846,18 @@ def _trigger_and_extract_tokens(driver, expected_entity_id=None) -> tuple:
             pass
 
         check_id = cookie_store_id or entity_id
-        if expected_entity_id and check_id and str(check_id).strip() != str(expected_entity_id).strip():
+        if target_id and check_id and check_id != target_id:
             log.info(f"🔄 [SESSION] Token cookie entity_id ({check_id}) tidak sesuai target ({expected_entity_id}). Menghapus cookie lama dan memicu token baru...")
             try:
                 driver.delete_cookie("shopee_tob_token")
             except Exception:
                 pass
+            try:
+                driver.execute_script("localStorage.removeItem('shopee_tob_token'); sessionStorage.removeItem('shopee_tob_token');")
+            except Exception:
+                pass
             tob_token = None
-        else:
+        elif not target_id or check_id == target_id:
             log.info(f"⚡ [SESSION] Token fresh sudah tersedia di cookies browser (entity_id: {entity_id}). Melewati trigger page.")
             return tob_token, entity_id
 
@@ -856,6 +865,10 @@ def _trigger_and_extract_tokens(driver, expected_entity_id=None) -> tuple:
     try:
         try:
             driver.delete_cookie("shopee_tob_token")
+        except Exception:
+            pass
+        try:
+            driver.execute_script("localStorage.removeItem('shopee_tob_token'); sessionStorage.removeItem('shopee_tob_token');")
         except Exception:
             pass
         if expected_entity_id:
@@ -873,13 +886,22 @@ def _trigger_and_extract_tokens(driver, expected_entity_id=None) -> tuple:
         driver.get(TOKEN_TRIGGER_PAGE)
         for _ in range(15):
             time.sleep(0.5)
-            tob_token, entity_id = extract_tokens_from_driver(driver, allow_file_fallback=False)
+            tob_token, entity_id = extract_tokens_from_driver(
+                driver, allow_file_fallback=False, expected_entity_id=target_id
+            )
             if tob_token:
-                log.info(f"✅ Fresh token extracted successfully from business-hours. (entity_id: {entity_id})")
+                if target_id and entity_id != target_id:
+                    continue
+                log.info(f"✅ TOB token extracted for target entity {entity_id or 'unknown'} from business-hours.")
                 return tob_token, entity_id
     except Exception as e:
         log.warning(f"⚠️ Error during business-hours trigger: {e}")
-    return extract_tokens_from_driver(driver, allow_file_fallback=False)
+    tob_token, entity_id = extract_tokens_from_driver(
+        driver, allow_file_fallback=False, expected_entity_id=target_id
+    )
+    if target_id and entity_id != target_id:
+        return None, None
+    return tob_token, entity_id
 
 
 def get_otp_code(username: str, phone: str = "", timeout: int = 3600, error_msg: str = "", driver=None) -> str:
@@ -2388,7 +2410,7 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
 
         js_selector_click = """
             // PHASE 1: Selalu klik merchant pertama di list untuk bypass selector page.
-            // Tujuannya hanya keluar dari halaman ini — PHASE 2 yang handle switch ke target.
+            // Tujuannya hanya keluar dari halaman ini - PHASE 2 yang handle switch ke target.
             // Merchant baru (yang perlu di-accept) selalu muncul di posisi paling atas.
             var listItems = document.querySelectorAll('.listItem, .merchant-item, li[class*="item"]');
             for (var i = 0; i < listItems.length; i++) {
@@ -2477,14 +2499,34 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
             log.warning("  ⚠️ Dashboard document did not reach readyState=complete (URL: %s).", driver.current_url)
         
         for switch_attempt in range(2):
+            # Dismiss any overlapping Ant Design popups/modals/banners before finding profile_menu
+            try:
+                driver.execute_script("""
+                    var popups = document.querySelectorAll('.ant-modal-close, button.close, [aria-label="Close"], .ant-notification-notice-close');
+                    popups.forEach(function(el) {
+                        if (el && typeof el.click === 'function') el.click();
+                    });
+                """)
+            except Exception:
+                pass
+
             # Use ActionChains to hover Profile then "Pilih Merchant Lain"
             dropdown_opened = False
             try:
                 actions = ActionChains(driver)
                 # 1. Hover/Click merchantName (Profile)
-                profile_menu = WebDriverWait(driver, 20).until(
-                    EC.visibility_of_element_located((By.CSS_SELECTOR, ".merchantName"))
-                )
+                profile_menu = None
+                for sel in [".merchantName", "[class*='merchantName']", ".user-info", ".ant-dropdown-trigger"]:
+                    try:
+                        profile_menu = WebDriverWait(driver, 10 if sel == ".merchantName" else 3).until(
+                            EC.visibility_of_element_located((By.CSS_SELECTOR, sel))
+                        )
+                        if profile_menu:
+                            break
+                    except Exception:
+                        continue
+                if not profile_menu:
+                    raise Exception("Profile menu trigger element not found on dashboard.")
                 actions.move_to_element(profile_menu).click().perform()
                 time.sleep(1)
                 
@@ -3163,7 +3205,11 @@ def _session_is_auth_expired(driver) -> bool:
         return False
 
 
-def get_session(username=None, password=None, phone=None, headless=None, close_browser=True, target_name=None, interactive=True, target_store_id=None, allow_login=True, load_images=False) -> dict | None:
+def get_session(
+    username=None, password=None, phone=None, headless=None, close_browser=True,
+    target_name=None, interactive=True, target_store_id=None, allow_login=True,
+    load_images=False, strict_entity_context=False, force_token_refresh=False,
+) -> dict | None:
     headless = resolve_shopee_headless(headless)
     for attempt in range(2):
         log.info(f"🌐 [BROWSER] Launching (headless={headless}, attempt={attempt+1}/2)...")
@@ -3555,7 +3601,12 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
                     time.sleep(2)
 
             # ── Step 6: Final Token Extraction ──
-            t, eid = _trigger_and_extract_tokens(driver, expected_entity_id=target_store_id)
+            expected_token_entity = target_store_id if strict_entity_context else None
+            t, eid = _trigger_and_extract_tokens(
+                driver,
+                expected_entity_id=expected_token_entity,
+                force_refresh=force_token_refresh,
+            )
             if target_store_id:
                 eid = str(target_store_id)
             elif active_id and active_id != "None":
