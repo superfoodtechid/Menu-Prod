@@ -1079,6 +1079,8 @@ def prepare_photo_folder(
     excel_path: Optional[str] = None,
     job_id: Optional[str] = None,
     timestamp_str: Optional[str] = None,
+    workbook: Optional[Any] = None,
+    skip_excel_update: bool = False,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """Create/resolve the photo folder and record its URL without uploading photos."""
     if not timestamp_str:
@@ -1134,8 +1136,12 @@ def prepare_photo_folder(
         if not folder_url:
             raise RuntimeError("Google Drive tidak mengembalikan tautan folder.")
 
-        if not update_excel_folder_link(excel_path, folder_label, folder_url):
-            raise RuntimeError("Tautan folder tidak berhasil disimpan ke file C5 outlet.")
+        if workbook is not None:
+            from menu_core.c5_template_helper import upsert_folder_link_sheet
+            upsert_folder_link_sheet(workbook, [(folder_label, folder_url)])
+        elif not skip_excel_update and excel_path:
+            if not update_excel_folder_link(excel_path, folder_label, folder_url):
+                raise RuntimeError("Tautan folder tidak berhasil disimpan ke file C5 outlet.")
         eta = calculate_photo_sync_eta(total_photos)
         metadata.update(eta)
         metadata.update({

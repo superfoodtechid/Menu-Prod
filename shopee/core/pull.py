@@ -706,6 +706,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         listing_name = raw_resto_final or raw_outlet or "ShopeeFood Outlet"
         sid = str(store_metadata.get("store_id") or "").strip()
         folder_label = format_photo_folder_label("ShopeeFood", listing_name, sid)
+        photo_sync_meta = None
 
         try:
             wb = openpyxl.load_workbook(template_path)
@@ -810,10 +811,25 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                         sheet_mod.cell(row=new_row_idx, column=col_idx, value=val)
                 new_row_idx += 1
 
-            folder_entries = [(folder_label, "")]
-            upsert_folder_link_sheet(wb, folder_entries)
+            photo_sync_meta = None
+            try:
+                folder_url, photo_sync_meta = prepare_photo_folder(
+                    owner_name=owner_name,
+                    platform="ShopeeFood",
+                    listing_name=listing_name,
+                    sid=sid,
+                    dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes],
+                    excel_path=excel_path,
+                    job_id=store_metadata.get("job_id"),
+                    workbook=wb,
+                )
+            except Exception as e_drive:
+                print(f"[⚠️] Gagal menyiapkan folder foto ShopeeFood: {e_drive}")
+                folder_entries = [(folder_label, "")]
+                upsert_folder_link_sheet(wb, folder_entries)
 
             wb.save(excel_path)
+            wb.close()
             if prev_user_data:
                 print(f"[+] Berhasil menyimpan file catalog dengan data user yang di-preserve ke: {excel_path}")
             else:
@@ -822,8 +838,23 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         except Exception as ex_err:
             print(f"[-] Gagal menulis ke template O.C5: {ex_err}. Fallback ke Excel biasa.")
             # Fallback to standard excel writer if template fails
+            if photo_sync_meta is None:
+                try:
+                    _, photo_sync_meta = prepare_photo_folder(
+                        owner_name=owner_name,
+                        platform="ShopeeFood",
+                        listing_name=listing_name,
+                        sid=sid,
+                        dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes],
+                        excel_path=excel_path,
+                        job_id=store_metadata.get("job_id"),
+                        skip_excel_update=True,
+                    )
+                except Exception as e_drive:
+                    print(f"[⚠️] Gagal menyiapkan folder foto ShopeeFood fallback: {e_drive}")
+            resolved_folder_url = (photo_sync_meta or {}).get("drive_folder_url") or ""
             df_folder_links = pd.DataFrame(
-                [[folder_label, ""]],
+                [[folder_label, resolved_folder_url]],
                 columns=[FOLDER_LINK_LABEL_HEADER, FOLDER_LINK_URL_HEADER],
             )
             with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
@@ -831,20 +862,6 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 df_mods.to_excel(writer, sheet_name='Modifier', index=False)
                 df_folder_links.to_excel(writer, sheet_name=FOLDER_LINK_SHEET_NAME, index=False)
 
-        photo_sync_meta = None
-        try:
-            _, photo_sync_meta = prepare_photo_folder(
-                owner_name=owner_name,
-                platform="ShopeeFood",
-                listing_name=listing_name,
-                sid=sid,
-                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes],
-                excel_path=excel_path,
-                job_id=store_metadata.get("job_id"),
-            )
-        except Exception as e_drive:
-            print(f"[⚠️] Gagal sinkronisasi foto latar belakang ke Google Drive: {e_drive}")
-            
         return True, {
             'items_csv': None,
             'mods_csv': None,
