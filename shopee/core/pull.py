@@ -19,6 +19,7 @@ from core import browser
 from shopee.core.session_utils import (
     get_fast_shopee_session,
     invalidate_shopee_session,
+    validate_shopee_token,
     resolve_shopee_merchant_id,
     resolve_shopee_outlet_context,
 )
@@ -212,7 +213,9 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         fast_meta.setdefault("username", master_user)
         fast_meta.setdefault("store_id", store_id)
         fast_meta.setdefault("nama_portal", target_name)
-        fast_sess = get_fast_shopee_session(fast_meta, base_dir=WORKSPACE_DIR)
+        fast_sess = get_fast_shopee_session(
+            fast_meta, base_dir=WORKSPACE_DIR, require_entity_match=True
+        )
         if fast_sess and fast_sess.get("shopee_tob_token"):
             print(f"⚡ [FAST-PATH PULL] Menggunakan sesi master Shopee aktif untuk '{master_user}' (~0.2s).")
             session_data = fast_sess
@@ -227,7 +230,8 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 close_browser=True,
                 target_name=target_name,
                 target_store_id=store_id,
-                interactive=True
+                interactive=True,
+                strict_entity_context=True,
             )
         except Exception as e:
             if "user membatalkan otp" in str(e).lower() or _is_cancelled():
@@ -240,6 +244,13 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
     
     if not session_data or "shopee_tob_token" not in session_data:
         return False, "Gagal menginisialisasi browser atau memilih merchant."
+
+    session_entity_id = str(session_data.get("shopee_tob_entity_id") or "").strip()
+    if store_id and session_entity_id != str(store_id).strip():
+        return False, (
+            f"Sesi Shopee tidak cocok dengan outlet target (store_id={store_id}, "
+            f"session_entity_id={session_entity_id or 'kosong'}); token tidak digunakan."
+        )
         
     tob_token = session_data["shopee_tob_token"]
     extra_cookies = session_data.get("extra_cookies", {})
@@ -287,10 +298,8 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
     if store_id:
         extra_cookies["shopee_tob_entity_id"] = str(store_id)
 
-    print(f"[DEBUG PULL] tob_token: {tob_token[:30]}...")
-    print(f"[DEBUG PULL] entity_id: {store_id}")
-    print(f"[DEBUG PULL] merchant_id: {real_merchant_id}")
-    print(f"[DEBUG PULL] extra_cookies: {extra_cookies}")
+    session_source = session_data.get("source", "browser")
+    print(f"[PULL SESSION] source={session_source}, store_id={store_id}, merchant_id={real_merchant_id}")
     
     client = ShopeeClient(
         tob_token=tob_token,
@@ -302,7 +311,14 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         
     try:
         print(f"[*] Menarik data menu ShopeeFood untuk: {target_name} ({store_id})...")
-        catalogs = client.get_store_dishes(store_id)
+        token_valid, _ = validate_shopee_token(tob_token, timeout=8)
+        if token_valid:
+            catalogs = client.get_store_dishes(store_id)
+        else:
+            catalogs = []
+            client.last_code = 1130001
+            client.last_error = "token invalid (preflight validation failed)"
+            print(f"[PULL SESSION] Token preflight ditolak untuk store_id={store_id}; memulai satu kali pemulihan sesi.")
         if not catalogs and client.last_code in (1130014, 1130002):
             rec_cats, rec_sid, rec_mid = _attempt_dishes_pull_recovery(
                 client=client,
@@ -318,13 +334,13 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
 
         if not catalogs:
             is_auth_error = (
-                client.last_code in (3004, 401, 1000002, 1000003, 1130014)
+                client.last_code in (3004, 401, 1000002, 1000003, 1130001, 1130014)
                 or "unauthorized" in str(client.last_error).lower()
                 or "token" in str(client.last_error).lower()
                 or "merchant authority invalid" in str(client.last_error).lower()
             )
             if is_auth_error:
-                print(f"[WARN] Sesi token Shopee kedaluwarsa atau authority invalid (code: {client.last_code}, msg: '{client.last_error}') untuk '{username}'. Menghapus session cache dan membuka browser ulang...")
+                print(f"[WARN] Sesi Shopee ditolak (code: {client.last_code}, reason: '{client.last_error}') untuk '{username}', store_id={store_id}. Membersihkan cache dan mencoba satu pemulihan browser...")
                 try:
                     if session_file.exists():
                         session_file.unlink()
@@ -343,8 +359,16 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 close_browser=True,
                 target_name=target_name,
                 target_store_id=store_id,
-                interactive=True
+                interactive=True,
+                strict_entity_context=True,
+                force_token_refresh=True,
             )
+
+            if session_data and store_id and str(session_data.get("shopee_tob_entity_id") or "").strip() != str(store_id).strip():
+                print(f"[PULL SESSION] Pemulihan menghasilkan entity yang tidak cocok; retry katalog dibatalkan untuk store_id={store_id}.")
+                session_data = None
+                client.last_code = 1130001
+                client.last_error = "token/session entity mismatch after recovery"
 
             if session_data and "shopee_tob_token" in session_data:
                 tob_token = session_data["shopee_tob_token"]
@@ -352,8 +376,6 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     store_metadata,
                     session_data=session_data
                 )
-                if resolved_sid:
-                    store_id = resolved_sid
                 new_mid = resolved_mid or real_merchant_id
                 extra_cookies = session_data.get("extra_cookies", {}).copy()
                 extra_cookies["shopee_user_name"] = username
@@ -370,8 +392,15 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     merchant_id=new_mid,
                     username=username
                 )
-                print(f"[*] Mencoba ulang menarik data menu ShopeeFood dengan token baru...")
-                catalogs = client.get_store_dishes(store_id)
+                print(f"[*] Memvalidasi sesi hasil pemulihan untuk store_id={store_id}...")
+                retry_token_valid, _ = validate_shopee_token(tob_token, timeout=8)
+                if retry_token_valid:
+                    print(f"[*] Mencoba ulang menarik data menu ShopeeFood satu kali...")
+                    catalogs = client.get_store_dishes(store_id)
+                else:
+                    client.last_code = 1130001
+                    client.last_error = "token invalid setelah satu kali pemulihan"
+                    catalogs = []
                 if not catalogs and client.last_code in (1130014, 1130002):
                     rec_cats, rec_sid, rec_mid = _attempt_dishes_pull_recovery(
                         client=client,
@@ -672,7 +701,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             except Exception as prev_err:
                 print(f"[⚠️] Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
 
-        from menu_core.gdrive_service import format_photo_folder_label, prepare_and_start_photo_sync
+        from menu_core.gdrive_service import format_photo_folder_label, prepare_photo_folder
         owner_name = store_metadata.get("owner") or "Default Owner"
         listing_name = raw_resto_final or raw_outlet or "ShopeeFood Outlet"
         sid = str(store_metadata.get("store_id") or "").strip()
@@ -804,7 +833,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
 
         photo_sync_meta = None
         try:
-            _, photo_sync_meta = prepare_and_start_photo_sync(
+            _, photo_sync_meta = prepare_photo_folder(
                 owner_name=owner_name,
                 platform="ShopeeFood",
                 listing_name=listing_name,
@@ -812,7 +841,6 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes],
                 excel_path=excel_path,
                 job_id=store_metadata.get("job_id"),
-                run_async=True,
             )
         except Exception as e_drive:
             print(f"[⚠️] Gagal sinkronisasi foto latar belakang ke Google Drive: {e_drive}")

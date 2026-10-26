@@ -329,7 +329,9 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
 
           const photoSyncStatus = job.result_metadata?.photo_sync?.status;
           const isTerminal = job.status === "SUCCESS" || job.status === "FAILED" || job.status === "CANCELLED";
-          const isPhotoSyncPending = job.status === "SUCCESS" && photoSyncStatus === "PROCESSING";
+          const isPhotoSyncPending = job.status === "SUCCESS" && [
+            "PREPARING_FOLDER", "WAITING_FOR_C5", "PROCESSING"
+          ].includes(photoSyncStatus);
           if (isTerminal && !isPhotoSyncPending) {
             clearInterval(pollingIntervalsRef.current[jobId]);
             delete pollingIntervalsRef.current[jobId];
@@ -341,6 +343,20 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
           delete pollingIntervalsRef.current[jobId];
         });
     }, 2000);
+  };
+
+  const handleStartPhotoSync = async (jobId) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}/start-photo-sync`, {
+        method: "POST",
+        headers: { "X-API-Key": API_SECRET_KEY || "" },
+      });
+      if (res.ok) {
+        pollJobStatus(jobId);
+      }
+    } catch (err) {
+      console.error("Failed to start standalone photo sync:", err);
+    }
   };
 
   // Trigger Pull Jobs for all checked branches
@@ -835,6 +851,11 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                       {combinedResult.preservation_warning}
                     </p>
                   )}
+                  {combinedResult.gspread_status === "FAILED" && (
+                    <p role="alert" className="rounded-lg border border-red-300 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+                      C5 gabungan gagal dikirim ke Google Drive. Pengumpulan foto belum dimulai.
+                    </p>
+                  )}
                 </div>
                 <div className="flex flex-col gap-2 shrink-0 sm:w-auto w-full">
                   {combinedResult.gspread_url ? (
@@ -926,10 +947,10 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                     </div>
                   )}
 
-                  {job.status === "SUCCESS" && job.result_metadata?.photo_sync && job.result_metadata.photo_sync.total_photos > 0 && (
+                  {job.result_metadata?.photo_sync && !["DISABLED", "SKIPPED"].includes(job.result_metadata.photo_sync.status) && (
                     <div
                       className={`rounded-lg border p-3 text-[13px] ${
-                        job.result_metadata.photo_sync.status === "PROCESSING"
+                        ["PREPARING_FOLDER", "WAITING_FOR_C5", "PROCESSING"].includes(job.result_metadata.photo_sync.status)
                           ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/40 dark:text-amber-200"
                           : job.result_metadata.photo_sync.status === "FAILED"
                           ? "border-red-300 bg-red-50 text-red-800 dark:border-red-800/70 dark:bg-red-950/40 dark:text-red-200"
@@ -938,13 +959,39 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                         <div className="space-y-0.5">
+                          {job.result_metadata.photo_sync.status === "PREPARING_FOLDER" && (
+                            <p className="font-semibold">Menyiapkan folder foto di Google Drive</p>
+                          )}
+                          {job.result_metadata.photo_sync.status === "WAITING_FOR_C5" && (
+                            <>
+                              {combinedResult?.gspread_status === "FAILED" ? (
+                                <p className="font-semibold">C5 gagal dikirim; foto belum dikumpulkan</p>
+                              ) : (
+                                <>
+                                  <p className="font-semibold">Menunggu C5 gabungan terkirim</p>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <p className="text-xs text-amber-800 dark:text-amber-300">
+                                      {job.result_metadata.photo_sync.total_photos} foto akan dikumpulkan setelah pengiriman C5 berhasil.
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartPhotoSync(job.id)}
+                                      className="text-xs font-semibold underline hover:text-amber-950 dark:hover:text-amber-100"
+                                    >
+                                      Unggah foto sekarang
+                                    </button>
+                                  </div>
+                                </>
+                              )}
+                            </>
+                          )}
                           {job.result_metadata.photo_sync.status === "PROCESSING" && (
                             <>
                               <p className="font-semibold">
-                                Pengumpulan {job.result_metadata.photo_sync.total_photos} foto ke Google Drive berjalan di latar belakang
+                                Mengumpulkan {job.result_metadata.photo_sync.total_photos} foto ke Google Drive
                               </p>
                               <p className="text-xs text-amber-800 dark:text-amber-300">
-                                Perkiraan selesai pukul <strong>{job.result_metadata.photo_sync.estimated_completion}</strong>. File Excel C5 sudah dapat diunduh sekarang.
+                                Perkiraan selesai pukul <strong>{job.result_metadata.photo_sync.estimated_completion}</strong>.
                               </p>
                             </>
                           )}
@@ -966,7 +1013,7 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                             </p>
                           )}
                         </div>
-                        {job.result_metadata.photo_sync.drive_folder_url && job.result_metadata.photo_sync.status !== "FAILED" && (
+                        {job.result_metadata.photo_sync.drive_folder_url && (
                           <a
                             href={job.result_metadata.photo_sync.drive_folder_url}
                             target="_blank"

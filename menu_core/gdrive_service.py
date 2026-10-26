@@ -1068,3 +1068,177 @@ def prepare_and_start_photo_sync(
 
     initial_meta["drive_folder_url"] = folder_url
     return folder_url, initial_meta
+
+
+def prepare_photo_folder(
+    owner_name: str,
+    platform: str,
+    listing_name: str,
+    sid: str,
+    dishes: List[Dict[str, Any]],
+    excel_path: Optional[str] = None,
+    job_id: Optional[str] = None,
+    timestamp_str: Optional[str] = None,
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Create/resolve the photo folder and record its URL without uploading photos."""
+    if not timestamp_str:
+        timestamp_str = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y-%m-%d %H:%M")
+    photo_tasks = _extract_photo_tasks(dishes)
+    total_photos = len(photo_tasks)
+    folder_label = format_photo_folder_label(platform, listing_name, sid, timestamp_str)
+    metadata = {
+        "status": "PREPARING_FOLDER",
+        "total_photos": total_photos,
+        "uploaded_photos": 0,
+        "drive_folder_url": None,
+        "target_folder_name": folder_label,
+        "owner_name": owner_name,
+        "platform": platform,
+        "listing_name": listing_name,
+        "sid": str(sid),
+        "timestamp_str": timestamp_str,
+        "excel_path": excel_path,
+    }
+    if job_id:
+        _update_job_photo_sync_metadata(job_id, metadata)
+
+    if not is_photo_sync_enabled():
+        metadata.update({
+            "status": "DISABLED",
+            "message": "Sinkronisasi foto Google Drive dinonaktifkan melalui konfigurasi server.",
+        })
+        return None, metadata
+
+    try:
+        folder_id = folder_url = None
+        drive_service = get_drive_service()
+        if drive_service:
+            folder_id, folder_url = resolve_menu_foto_folder(
+                drive_service, owner_name, platform, listing_name, sid, timestamp_str
+            )
+
+        if not folder_url:
+            # The Apps Script resolves the hierarchy even when files is empty.
+            folder_url = sync_menu_photos_via_appscript(
+                owner_name=owner_name,
+                platform=platform,
+                listing_name=listing_name,
+                sid=sid,
+                dishes=[],
+                timestamp_str=timestamp_str,
+                run_async=False,
+                excel_path=None,
+                job_id=None,
+            )
+
+        if not folder_url:
+            raise RuntimeError("Google Drive tidak mengembalikan tautan folder.")
+
+        if not update_excel_folder_link(excel_path, folder_label, folder_url):
+            raise RuntimeError("Tautan folder tidak berhasil disimpan ke file C5 outlet.")
+        eta = calculate_photo_sync_eta(total_photos)
+        metadata.update(eta)
+        metadata.update({
+            "status": "WAITING_FOR_C5" if total_photos else "SKIPPED",
+            "drive_folder_url": folder_url,
+            "message": None if total_photos else "Tidak ada foto menu untuk diunggah.",
+        })
+        if job_id:
+            _update_job_photo_sync_metadata(job_id, metadata)
+        return folder_url, metadata
+    except Exception as exc:
+        logger.warning("Photo folder preparation failed for SID %s: %s", sid, exc)
+        metadata.update({
+            "status": "FAILED",
+            "message": f"Folder foto belum siap; foto tidak akan diunggah. {exc}",
+        })
+        if job_id:
+            _update_job_photo_sync_metadata(job_id, metadata)
+        return None, metadata
+
+
+def start_deferred_photo_sync(job_id: str) -> bool:
+    """Start a prepared photo upload once the combined C5 has reached Drive."""
+    import uuid
+    from menu_core.database import SessionLocal, Job
+
+    try:
+        parsed_id = uuid.UUID(str(job_id))
+        with SessionLocal() as db:
+            job = db.query(Job).filter(Job.id == parsed_id).with_for_update().first()
+            if not job:
+                return False
+            result = dict(job.result_metadata or {})
+            photo_meta = dict(result.get("photo_sync") or {})
+            if photo_meta.get("status") != "WAITING_FOR_C5":
+                return False
+            photo_meta.update(calculate_photo_sync_eta(int(photo_meta.get("total_photos") or 0)))
+            photo_meta["status"] = "PROCESSING"
+            photo_meta["message"] = None
+            result["photo_sync"] = photo_meta
+            job.result_metadata = result
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(job, "result_metadata")
+            db.commit()
+
+        def _worker():
+            try:
+                with SessionLocal() as db:
+                    job = db.query(Job).filter(Job.id == parsed_id).first()
+                    result = dict(job.result_metadata or {}) if job else {}
+                    meta = dict(result.get("photo_sync") or {})
+                excel_path = meta.get("excel_path") or result.get("excel_path")
+                if not excel_path or not os.path.exists(excel_path):
+                    raise FileNotFoundError("File PULL tidak ditemukan untuk mengunggah foto.")
+
+                import openpyxl
+                workbook = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+                try:
+                    if "Item" not in workbook.sheetnames:
+                        raise ValueError("Sheet Item tidak ditemukan pada file PULL.")
+                    sheet = workbook["Item"]
+                    headers = {str(c.value).strip(): c.column - 1 for c in sheet[1] if c.value}
+                    dishes = []
+                    for row in sheet.iter_rows(min_row=3, values_only=True):
+                        item_name = row[headers["Item"]] if "Item" in headers and headers["Item"] < len(row) else ""
+                        item_id = row[headers["Item ID"]] if "Item ID" in headers and headers["Item ID"] < len(row) else ""
+                        photo_url = row[headers["Photo Link"]] if "Photo Link" in headers and headers["Photo Link"] < len(row) else ""
+                        if photo_url:
+                            dishes.append({"item_name": str(item_name or ""), "item_id": str(item_id or ""), "photo_url": str(photo_url)})
+                finally:
+                    workbook.close()
+
+                prepared_count = int(meta.get("total_photos") or 0)
+                actual_count = len(_extract_photo_tasks(dishes))
+                if prepared_count and actual_count != prepared_count:
+                    logger.info(
+                        "Jumlah foto pada file outlet disesuaikan dari %d menjadi %d untuk job %s.",
+                        prepared_count,
+                        actual_count,
+                        job_id,
+                    )
+                folder_url = sync_menu_photos_to_drive(
+                    owner_name=meta["owner_name"],
+                    platform=meta["platform"],
+                    listing_name=meta["listing_name"],
+                    sid=meta["sid"],
+                    dishes=dishes,
+                    timestamp_str=meta["timestamp_str"],
+                    run_async=False,
+                    excel_path=excel_path,
+                    job_id=str(parsed_id),
+                )
+                if not folder_url:
+                    raise RuntimeError("Folder Drive tidak dapat ditemukan saat memulai unggah foto.")
+            except Exception as exc:
+                logger.exception("Deferred photo sync failed for job %s", job_id)
+                _update_job_photo_sync_metadata(str(parsed_id), {
+                    "status": "FAILED",
+                    "message": f"Gagal memulai pengumpulan foto setelah C5 terkirim: {exc}",
+                })
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+    except Exception as exc:
+        logger.warning("Could not start deferred photo sync for job %s: %s", job_id, exc)
+        return False

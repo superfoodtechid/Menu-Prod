@@ -227,7 +227,8 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
         except Exception as e_db:
             print(f"   ⚠️ Gagal memuat harga offline dari DB: {e_db}")
 
-    from menu_core.gdrive_service import format_photo_folder_label, prepare_and_start_photo_sync
+    from menu_core.gdrive_service import format_photo_folder_label, prepare_photo_folder
+    from menu_core.database import normalize_offline_item_name
     owner_name = store_metadata.get("owner") or "Default Owner"
     listing_name = nama_resto or "GrabFood Outlet"
     sid = str(store_id or "").strip()
@@ -304,7 +305,6 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
                 if item_id_str and (store_id, item_id_str) in db_offline.get('by_id', {}):
                     off_val = db_offline['by_id'][(store_id, item_id_str)]
                 elif item.get('Nama item'):
-                    from menu_core.database import normalize_offline_item_name
                     norm_n = normalize_offline_item_name(item.get('Nama item'))
                     if (store_id, norm_n) in db_offline.get('by_name', {}):
                         off_val = db_offline['by_name'][(store_id, norm_n)]
@@ -399,7 +399,7 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
 
     photo_sync_meta = None
     try:
-        _, photo_sync_meta = prepare_and_start_photo_sync(
+        _, photo_sync_meta = prepare_photo_folder(
             owner_name=owner_name,
             platform="GrabFood",
             listing_name=listing_name,
@@ -407,7 +407,6 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
             dishes=[{"item_name": it.get("Nama item"), "photo_url": it.get("Link foto"), "item_id": it.get("Item ID")} for it in matched_items],
             excel_path=excel_path,
             job_id=store_metadata.get("job_id"),
-            run_async=True,
         )
     except Exception as e_drive:
         print(f"   ⚠️ Gagal sinkronisasi foto GrabFood latar belakang ke Google Drive: {e_drive}")

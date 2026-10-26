@@ -182,6 +182,23 @@ def startup_event():
     cleanup_zombie_chromium()
     logger.info("🚀 Initializing database tables...")
     init_db()
+
+    # Auto-cleanup orphaned jobs from previous server crash/restart
+    try:
+        from menu_core.database import SessionLocal, Job
+        from datetime import datetime
+        with SessionLocal() as db_session:
+            orphaned = db_session.query(Job).filter(Job.status.in_(["RUNNING", "PENDING"])).all()
+            if orphaned:
+                for j in orphaned:
+                    j.status = "FAILED"
+                    j.error_message = "Dibatalkan karena server restart"
+                    j.current_step = "Dibatalkan karena server restart"
+                    j.completed_at = datetime.utcnow()
+                db_session.commit()
+                logger.info(f"🧹 Cleaned up {len(orphaned)} orphaned jobs (set to FAILED)")
+    except Exception as cleanup_err:
+        logger.warning(f"⚠️ Failed to cleanup orphaned jobs on startup: {cleanup_err}")
     # Ensure persistent shopee profile & session sync from /app/data
     try:
         import shutil
@@ -2113,6 +2130,21 @@ def cancel_job_endpoint(job_id: uuid.UUID, db: Session = Depends(get_db)):
 
     return {"status": "SUCCESS", "message": f"Job {job_id} cancelled"}
 
+@app.post("/api/jobs/{job_id}/start-photo-sync")
+def trigger_standalone_photo_sync(job_id: uuid.UUID, db: Session = Depends(get_db)):
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from menu_core.gdrive_service import start_deferred_photo_sync
+    started = start_deferred_photo_sync(str(job_id))
+    if not started:
+        raise HTTPException(
+            status_code=400,
+            detail="Sinkronisasi foto tidak dapat dimulai atau job tidak dalam status menunggu C5.",
+        )
+    return {"status": "SUCCESS", "message": f"Sinkronisasi foto untuk job {job_id} telah dimulai di latar belakang."}
+
 @app.get("/api/jobs", response_model=List[JobResponse])
 def list_jobs(db: Session = Depends(get_db)):
     return db.query(Job).order_by(Job.created_at.desc()).limit(50).all()
@@ -2220,6 +2252,7 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
     combine_id = str(uuid.uuid4())
     drive_filename = excel_filename
 
+    photo_job_ids = [str(jid) for jid in (request.job_ids or [])]
     COMBINE_STATUS[combine_id] = {
         "status": "UPLOADING",
         "excel_path": combined_path,
@@ -2234,6 +2267,11 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
             COMBINE_STATUS[combine_id]["gspread_url"] = url
             COMBINE_STATUS[combine_id]["status"] = "SUCCESS" if url else "FAILED"
             logger.info("Upload file gabungan C5 selesai: %s", url)
+            if url:
+                from menu_core.gdrive_service import start_deferred_photo_sync
+                for photo_job_id in photo_job_ids:
+                    if not start_deferred_photo_sync(photo_job_id):
+                        logger.info("Photo sync job %s tidak menunggu C5 atau tidak dapat dimulai.", photo_job_id)
         except Exception as exc:
             logger.error("Error upload file gabungan C5 ke Google Drive: %s", exc)
             COMBINE_STATUS[combine_id]["status"] = "FAILED"

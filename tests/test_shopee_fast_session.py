@@ -3,6 +3,8 @@ import unittest
 import json
 import time
 import tempfile
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -25,12 +27,16 @@ from core.browser import (
     _release_profile_lock,
     _session_is_auth_expired,
     _trigger_and_extract_tokens,
+    extract_tokens_from_driver,
 )
 
 
 class TestShopeeFastSession(unittest.TestCase):
     def setUp(self):
         _IN_MEMORY_SESSION_CACHE.clear()
+        validator_patch = patch("shopee.core.pull.validate_shopee_token", return_value=(True, {}))
+        validator_patch.start()
+        self.addCleanup(validator_patch.stop)
 
     def tearDown(self):
         _IN_MEMORY_SESSION_CACHE.clear()
@@ -178,11 +184,34 @@ class TestShopeeFastSession(unittest.TestCase):
         self.assertEqual(sess["shopee_tob_entity_id"], "22459819")
         self.assertEqual(sess["merchant_id"], "11511947")
         self.assertEqual(sess["source"], "fast_cache")
+        self.assertTrue(sess["entity_verified"])
 
         # Second call should use in-memory cache directly
         mock_validate.reset_mock()
         sess_mem = get_fast_shopee_session(metadata)
         self.assertEqual(sess_mem["shopee_tob_token"], "token_abc_123")
+        mock_validate.assert_not_called()
+
+    @patch("shopee.core.session_utils.validate_shopee_token")
+    @patch("shopee.core.session_utils.resolve_shopee_session")
+    def test_fast_pull_session_requires_matching_saved_entity(self, mock_resolve, mock_validate):
+        mock_path = MagicMock()
+        mock_path.exists.return_value = True
+        mock_path.name = "session_superfoodapp.json"
+        mock_path.read_text.return_value = json.dumps({
+            "username": "superfoodapp",
+            "shopee_tob_token": "token_abc_123",
+            "extra_cookies": {},
+        })
+        mock_resolve.return_value = mock_path
+        mock_validate.return_value = (True, {"merchantId": "11511947"})
+
+        result = get_fast_shopee_session(
+            {"username": "superfoodapp", "store_id": "22459819"},
+            require_entity_match=True,
+        )
+
+        self.assertIsNone(result)
         mock_validate.assert_not_called()
 
     @patch("shopee.core.session_utils.validate_shopee_token")
@@ -253,6 +282,50 @@ class TestShopeeFastSession(unittest.TestCase):
         # Ensure it did NOT delete cookies or navigate to TOKEN_TRIGGER_PAGE
         mock_driver.delete_cookie.assert_not_called()
         mock_driver.get.assert_not_called()
+
+    def test_extract_tokens_prefers_tob_cookie_independent_of_cookie_order(self):
+        driver = MagicMock()
+        driver.get_cookies.return_value = [
+            {"name": "shopee_tob_token", "value": "seller_token"},
+            {"name": "spc_ec", "value": "unrelated_cookie"},
+            {"name": "shopee_tob_entity_id", "value": "22459819"},
+        ]
+
+        token, entity_id = extract_tokens_from_driver(driver, expected_entity_id="22459819")
+
+        self.assertEqual(token, "seller_token")
+        self.assertEqual(entity_id, "22459819")
+        driver.execute_script.assert_not_called()
+
+    def test_extract_tokens_does_not_use_spc_ec_as_tob_token(self):
+        driver = MagicMock()
+        driver.get_cookies.return_value = [
+            {"name": "spc_ec", "value": "unrelated_cookie"},
+            {"name": "shopee_tob_entity_id", "value": "22459819"},
+        ]
+        driver.execute_script.return_value = None
+
+        token, entity_id = extract_tokens_from_driver(
+            driver, allow_file_fallback=False, expected_entity_id="22459819"
+        )
+
+        self.assertIsNone(token)
+        self.assertEqual(entity_id, "22459819")
+
+    def test_extract_tokens_rejects_entity_cookie_not_matching_target(self):
+        driver = MagicMock()
+        driver.get_cookies.return_value = [
+            {"name": "shopee_tob_token", "value": "seller_token"},
+            {"name": "shopee_tob_entity_id", "value": "old_store"},
+            {"name": "shopee_foody_mid", "value": "merchant_group"},
+        ]
+
+        token, entity_id = extract_tokens_from_driver(
+            driver, expected_entity_id="target_store"
+        )
+
+        self.assertEqual(token, "seller_token")
+        self.assertIsNone(entity_id)
 
     def test_shopee_client_headers_and_cookies(self):
         client = ShopeeClient(
@@ -331,10 +404,78 @@ class TestShopeeFastSession(unittest.TestCase):
                 "nama_portal": "[SR] Ayam geprek cinta_"
             }
             # Fast-path mock to provide initial session
-            with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}):
+            with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token", "shopee_tob_entity_id": "1456964"}):
                 extract_shopee_menu(store_metadata, output_dir="/tmp/test_shopee_out")
                 # Ensure unlink was NOT called for code 1130002
                 mock_unlink.assert_not_called()
+
+    @patch("shopee.core.pull.browser.get_session")
+    @patch("shopee.core.pull.ShopeeClient")
+    def test_extract_shopee_menu_retries_token_invalid_once(self, mock_client_cls, mock_get_session):
+        from shopee.core.pull import extract_shopee_menu
+
+        mock_client = MagicMock()
+        mock_client.get_store_dishes.return_value = []
+        mock_client.last_code = 1130001
+        mock_client.last_error = "token invalid"
+        mock_client_cls.return_value = mock_client
+        mock_get_session.return_value = {
+            "shopee_tob_token": "refreshed_token",
+            "shopee_tob_entity_id": "1456964",
+            "merchant_id": "1455780",
+            "extra_cookies": {},
+        }
+
+        store_metadata = {"store_id": "1456964", "nama_portal": "[SR] Ayam geprek cinta_"}
+        with patch(
+            "shopee.core.pull.get_fast_shopee_session",
+            return_value={"shopee_tob_token": "old_token", "shopee_tob_entity_id": "1456964"},
+        ), patch("shopee.core.pull.Path.unlink"), patch("shopee.core.pull.invalidate_shopee_session"):
+            captured = io.StringIO()
+            with redirect_stdout(captured):
+                success, error = extract_shopee_menu(store_metadata, output_dir="/tmp/test_shopee_out")
+
+        self.assertFalse(success)
+        self.assertIn("1130001", error)
+        self.assertEqual(mock_get_session.call_count, 1)
+        self.assertTrue(mock_get_session.call_args.kwargs["force_token_refresh"])
+        self.assertTrue(mock_get_session.call_args.kwargs["strict_entity_context"])
+        self.assertEqual(mock_client.get_store_dishes.call_count, 2)
+        self.assertNotIn("old_token", captured.getvalue())
+        self.assertNotIn("refreshed_token", captured.getvalue())
+        self.assertNotIn("extra_cookies", captured.getvalue())
+
+    @patch("shopee.core.pull.browser.get_session")
+    @patch("shopee.core.pull.ShopeeClient")
+    def test_extract_shopee_menu_stops_if_recovered_entity_mismatches(self, mock_client_cls, mock_get_session):
+        from shopee.core.pull import extract_shopee_menu
+
+        mock_client = MagicMock()
+        mock_client.get_store_dishes.return_value = []
+        mock_client.last_code = 1130001
+        mock_client.last_error = "token invalid"
+        mock_client_cls.return_value = mock_client
+        mock_get_session.return_value = {
+            "shopee_tob_token": "refreshed_token",
+            "shopee_tob_entity_id": "wrong_store",
+            "merchant_id": "1455780",
+            "extra_cookies": {},
+        }
+
+        with patch(
+            "shopee.core.pull.get_fast_shopee_session",
+            return_value={"shopee_tob_token": "old_token", "shopee_tob_entity_id": "1456964"},
+        ), patch("shopee.core.pull.Path.unlink"), patch("shopee.core.pull.invalidate_shopee_session"):
+            success, error = extract_shopee_menu(
+                {"store_id": "1456964", "nama_portal": "[SR] Ayam geprek cinta_"},
+                output_dir="/tmp/test_shopee_out",
+            )
+
+        self.assertFalse(success)
+        self.assertIn("1130001", error)
+        mock_client.get_store_dishes.assert_called_once()
+        mock_get_session.assert_called_once()
+        self.assertEqual(mock_get_session.call_args.kwargs["force_token_refresh"], True)
 
     def test_resolve_shopee_outlet_context(self):
         # 1. Store ID is actually Group ID 23988560 (Bebek Bumbu Hitam Penyetan Rizqna)
@@ -395,7 +536,7 @@ class TestShopeeFastSession(unittest.TestCase):
             "nama_portal": "[SR] Bebek bumbu hitam & Ayam crispy rizqna"
         }
 
-        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}), \
+        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token", "shopee_tob_entity_id": "23836720"}), \
              patch("menu_core.gdrive_service.prepare_and_start_photo_sync", return_value=(None, None)), \
              patch("openpyxl.load_workbook", side_effect=Exception("skip template")), \
              patch("shopee.core.pull.pd.ExcelWriter"):
@@ -463,7 +604,7 @@ class TestShopeeFastSession(unittest.TestCase):
             "nama_portal": "[SR] Ayam geprek cinta_"
         }
 
-        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token"}), \
+        with patch("shopee.core.pull.get_fast_shopee_session", return_value={"shopee_tob_token": "valid_token", "shopee_tob_entity_id": "1456964"}), \
              patch("menu_core.gdrive_service.prepare_and_start_photo_sync", return_value=(None, None)), \
              patch("openpyxl.load_workbook", side_effect=Exception("skip template")), \
              patch("shopee.core.pull.pd.ExcelWriter"):
