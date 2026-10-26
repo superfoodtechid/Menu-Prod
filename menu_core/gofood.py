@@ -670,6 +670,7 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             print(f"   ⚠️ Gagal memuat harga offline dari DB: {e_db}")
 
     from menu_core.database import normalize_offline_item_name
+    photo_sync_meta = None
 
     try:
         wb = openpyxl.load_workbook(template_path)
@@ -726,10 +727,24 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                             val = str(val)
                     sheet_mod.cell(row=r_idx + DATA_START_ROW, column=headers_mod[col_name], value=val)
 
-        folder_entries = [(folder_label, "")]
-        upsert_folder_link_sheet(wb, folder_entries)
+        try:
+            folder_url, photo_sync_meta = prepare_photo_folder(
+                owner_name=owner_name,
+                platform="GoFood",
+                listing_name=listing_name,
+                sid=sid,
+                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes],
+                excel_path=excel_path,
+                job_id=store_metadata.get("job_id"),
+                workbook=wb,
+            )
+        except Exception as e_drive:
+            print(f"   ⚠️ Gagal menyiapkan folder foto GoFood: {e_drive}")
+            folder_entries = [(folder_label, "")]
+            upsert_folder_link_sheet(wb, folder_entries)
 
         wb.save(excel_path)
+        wb.close()
         if prev_user_data:
             merged_count = sum(1 for iid in prev_user_data if any(str(row.get('Item ID', '')).strip() == iid for _, row in df_items.iterrows()))
             print(f"   ✅ Berhasil menyimpan file catalog dengan {merged_count} baris data user yang di-preserve.")
@@ -737,28 +752,29 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             print(f"   ✅ Berhasil menyimpan file catalog menggunakan template O.C5 ke: {excel_path}")
     except Exception as ex_err:
         print(f"   [-] Gagal menulis ke template O.C5: {ex_err}. Fallback ke Excel biasa.")
+        if photo_sync_meta is None:
+            try:
+                _, photo_sync_meta = prepare_photo_folder(
+                    owner_name=owner_name,
+                    platform="GoFood",
+                    listing_name=listing_name,
+                    sid=sid,
+                    dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes],
+                    excel_path=excel_path,
+                    job_id=store_metadata.get("job_id"),
+                    skip_excel_update=True,
+                )
+            except Exception as e_drive:
+                print(f"   ⚠️ Gagal menyiapkan folder foto GoFood fallback: {e_drive}")
+        resolved_folder_url = (photo_sync_meta or {}).get("drive_folder_url") or ""
         df_folder_links = pd.DataFrame(
-            [[folder_label, ""]],
+            [[folder_label, resolved_folder_url]],
             columns=[FOLDER_LINK_LABEL_HEADER, FOLDER_LINK_URL_HEADER],
         )
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
             df_items.to_excel(writer, sheet_name='Item', index=False)
             df_mods.to_excel(writer, sheet_name='Modifier', index=False)
             df_folder_links.to_excel(writer, sheet_name=FOLDER_LINK_SHEET_NAME, index=False)
-        
-    photo_sync_meta = None
-    try:
-        _, photo_sync_meta = prepare_photo_folder(
-            owner_name=owner_name,
-            platform="GoFood",
-            listing_name=listing_name,
-            sid=sid,
-            dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes],
-            excel_path=excel_path,
-            job_id=store_metadata.get("job_id"),
-        )
-    except Exception as e_drive:
-        print(f"   ⚠️ Gagal menyiapkan folder foto GoFood: {e_drive}")
 
     print(f"   ✅ Berhasil memproses data menu GoFood!")
     print(f"      - Item Count: {len(df_items)}")

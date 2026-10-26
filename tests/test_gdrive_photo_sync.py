@@ -386,6 +386,33 @@ class TestGDrivePhotoSync(unittest.TestCase):
         self.assertEqual(meta["status"], "FAILED")
         self.assertIn("Tautan folder tidak berhasil disimpan", meta["message"])
 
+    @patch("menu_core.gdrive_service.is_photo_sync_enabled", return_value=True)
+    @patch("menu_core.gdrive_service.get_drive_service", return_value=None)
+    @patch("menu_core.gdrive_service.sync_menu_photos_via_appscript")
+    def test_prepare_photo_folder_with_in_memory_workbook(
+        self, mock_appscript, _mock_drive, _mock_enabled
+    ):
+        mock_appscript.return_value = "https://drive.google.com/drive/folders/mem_test"
+        wb = openpyxl.Workbook()
+
+        folder_url, meta = prepare_photo_folder(
+            owner_name="Test Owner",
+            platform="GrabFood",
+            listing_name="Test Outlet",
+            sid="1001",
+            dishes=[{"item_name": "Ayam", "photo_url": "https://cdn.example/ayam.jpg", "item_id": "1"}],
+            excel_path="outlet.xlsx",
+            workbook=wb,
+        )
+
+        self.assertEqual(folder_url, "https://drive.google.com/drive/folders/mem_test")
+        self.assertEqual(meta["status"], "WAITING_FOR_C5")
+        self.assertIn(FOLDER_LINK_SHEET_NAME, wb.sheetnames)
+        entries = read_folder_link_entries(wb)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0][1], "https://drive.google.com/drive/folders/mem_test")
+        wb.close()
+
 
 if __name__ == "__main__":
     unittest.main()
