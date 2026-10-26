@@ -366,6 +366,12 @@ class CombineC5Request(BaseModel):
     job_ids: Optional[List[str]] = None
     outlet_name: Optional[str] = None
 
+class RetryCombineC5Request(BaseModel):
+    combine_id: Optional[str] = None
+    job_ids: Optional[List[str]] = None
+    outlet_name: Optional[str] = None
+    recombine: Optional[bool] = False
+
 class C5PushItemUpdate(BaseModel):
     sid: Optional[str] = ""
     outlet_name: Optional[str] = ""
@@ -2170,18 +2176,53 @@ def download_job_file(job_id: uuid.UUID, db: Session = Depends(get_db)):
 
 COMBINE_STATUS: Dict[str, Dict[str, Any]] = {}
 
-@app.post("/api/jobs/combine-c5")
-def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)):
+def _trigger_bg_combined_upload(
+    combine_id: str,
+    combined_path: str,
+    clean_owner_name: str,
+    drive_filename: str,
+    photo_job_ids: List[str]
+):
+    def _bg_upload_worker():
+        try:
+            from upload_drive import upload_combined_to_drive
+            logger.info("Memulai upload file gabungan C5 ke Google Drive di latar belakang (combine_id=%s)...", combine_id)
+            url = upload_combined_to_drive(combined_path, clean_owner_name, custom_filename=drive_filename)
+            COMBINE_STATUS[combine_id]["gspread_url"] = url
+            COMBINE_STATUS[combine_id]["status"] = "SUCCESS" if url else "FAILED"
+            logger.info("Upload file gabungan C5 selesai (combine_id=%s): %s", combine_id, url)
+            if url:
+                from menu_core.gdrive_service import start_deferred_photo_sync
+                for photo_job_id in photo_job_ids:
+                    if not start_deferred_photo_sync(photo_job_id):
+                        logger.info("Photo sync job %s tidak menunggu C5 atau tidak dapat dimulai.", photo_job_id)
+        except Exception as exc:
+            logger.error("Error upload file gabungan C5 ke Google Drive: %s", exc)
+            COMBINE_STATUS[combine_id]["status"] = "FAILED"
+            COMBINE_STATUS[combine_id]["error"] = str(exc)
+
+    threading.Thread(target=_bg_upload_worker, daemon=True).start()
+
+
+def _execute_combine_and_upload(
+    job_ids: Optional[List[str]],
+    outlet_name: Optional[str],
+    db: Session,
+    clean_override_owner: Optional[str] = None
+) -> Dict[str, Any]:
     from menu_core.c5_combiner import combine_c5
-    from upload_drive import upload_combined_to_drive, find_latest_combined_c5_url
+    from upload_drive import find_latest_combined_c5_url
     from datetime import datetime
+    import re
+    from urllib.parse import quote
 
     excel_paths = []
-    outlet_name = (request.outlet_name or "").strip()
-    owner_name = None
+    resolved_outlet_name = (outlet_name or "").strip()
+    owner_name = clean_override_owner
 
-    if request.job_ids:
-        for jid in request.job_ids:
+    photo_job_ids = []
+    if job_ids:
+        for jid in job_ids:
             try:
                 j_uuid = uuid.UUID(str(jid))
                 job = db.query(Job).filter(Job.id == j_uuid).first()
@@ -2189,20 +2230,20 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
                     epath = job.result_metadata["excel_path"]
                     if os.path.exists(epath) and epath not in excel_paths:
                         excel_paths.append(epath)
+                    photo_job_ids.append(str(job.id))
                 if not owner_name and job and job.outlet:
                     owner_name = job.outlet.owner or job.outlet.merchant_name or job.outlet.nama_outlet
             except Exception as ex:
                 logger.warning(f"Error resolving job ID {jid}: {ex}")
 
     if not owner_name:
-        owner_name = outlet_name if outlet_name else "Combined Outlet"
+        owner_name = resolved_outlet_name if resolved_outlet_name else "Combined Outlet"
 
-    import re
     clean_owner_name = "".join(c for c in owner_name if c.isalnum() or c in (' ', '_', '-')).strip()
-    clean_outlet_filename = "".join(c for c in (outlet_name or owner_name) if c.isalnum() or c in (' ', '_', '-')).strip()
+    clean_outlet_filename = "".join(c for c in (resolved_outlet_name or owner_name) if c.isalnum() or c in (' ', '_', '-')).strip()
     clean_folder_name = re.sub(r'\s+', ' ', clean_outlet_filename).lower()
 
-    if not excel_paths and outlet_name:
+    if not excel_paths and resolved_outlet_name:
         exports_root = BASE_DIR / "data" / "exports"
         for p in exports_root.glob(f"**/{clean_folder_name}/**/*.xlsx"):
             if "combined" not in str(p) and str(p) not in excel_paths:
@@ -2221,7 +2262,6 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
     previous_workbook = None
     preservation_warning = None
 
-    # Prioritize local existing combined workbook on server (instant, 0ms latency)
     older_combined_files = sorted(
         (path for path in combined_dir.glob("C5.*.xlsx") if str(path) != combined_path),
         key=lambda path: path.stat().st_mtime,
@@ -2252,34 +2292,25 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
     combine_id = str(uuid.uuid4())
     drive_filename = excel_filename
 
-    photo_job_ids = [str(jid) for jid in (request.job_ids or [])]
     COMBINE_STATUS[combine_id] = {
         "status": "UPLOADING",
         "excel_path": combined_path,
         "excel_filename": excel_filename,
+        "clean_owner_name": clean_owner_name,
+        "drive_filename": drive_filename,
+        "photo_job_ids": photo_job_ids,
         "gspread_url": None,
+        "error": None,
     }
 
-    def _bg_upload_combined():
-        try:
-            logger.info("Memulai upload file gabungan C5 ke Google Drive di latar belakang...")
-            url = upload_combined_to_drive(combined_path, clean_owner_name, custom_filename=drive_filename)
-            COMBINE_STATUS[combine_id]["gspread_url"] = url
-            COMBINE_STATUS[combine_id]["status"] = "SUCCESS" if url else "FAILED"
-            logger.info("Upload file gabungan C5 selesai: %s", url)
-            if url:
-                from menu_core.gdrive_service import start_deferred_photo_sync
-                for photo_job_id in photo_job_ids:
-                    if not start_deferred_photo_sync(photo_job_id):
-                        logger.info("Photo sync job %s tidak menunggu C5 atau tidak dapat dimulai.", photo_job_id)
-        except Exception as exc:
-            logger.error("Error upload file gabungan C5 ke Google Drive: %s", exc)
-            COMBINE_STATUS[combine_id]["status"] = "FAILED"
-            COMBINE_STATUS[combine_id]["error"] = str(exc)
+    _trigger_bg_combined_upload(
+        combine_id=combine_id,
+        combined_path=combined_path,
+        clean_owner_name=clean_owner_name,
+        drive_filename=drive_filename,
+        photo_job_ids=photo_job_ids,
+    )
 
-    threading.Thread(target=_bg_upload_combined, daemon=True).start()
-
-    from urllib.parse import quote
     return {
         "ok": True,
         "combine_id": combine_id,
@@ -2293,6 +2324,136 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
         "combined_count": len(excel_paths),
         "outlet_name": owner_name
     }
+
+
+@app.post("/api/jobs/combine-c5")
+def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)):
+    return _execute_combine_and_upload(request.job_ids, request.outlet_name, db)
+
+
+@app.post("/api/jobs/combine-c5/retry")
+def retry_combine_c5_endpoint(request: Optional[RetryCombineC5Request] = None, db: Session = Depends(get_db)):
+    req = request or RetryCombineC5Request()
+
+    # Skenario 1: combine_id diberikan
+    if req.combine_id:
+        info = COMBINE_STATUS.get(req.combine_id)
+        if not info:
+            # Fallback: Cari apakah ada file yang cocok di folder exports/combined
+            clean_search = "".join(c for c in (req.outlet_name or "") if c.isalnum() or c in (' ', '_', '-')).strip()
+            combined_root = BASE_DIR / "data" / "exports" / "combined"
+            candidates = sorted(
+                combined_root.glob(f"**/*{clean_search}*/*.xlsx") if clean_search else combined_root.glob("**/*.xlsx"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if candidates:
+                found_path = str(candidates[0])
+                found_filename = os.path.basename(found_path)
+                owner_guess = req.outlet_name or "Combined Outlet"
+                info = {
+                    "status": "UPLOADING",
+                    "excel_path": found_path,
+                    "excel_filename": found_filename,
+                    "clean_owner_name": owner_guess,
+                    "drive_filename": found_filename,
+                    "photo_job_ids": req.job_ids or [],
+                    "gspread_url": None,
+                    "error": None,
+                }
+                COMBINE_STATUS[req.combine_id] = info
+
+        if info:
+            combined_path = info.get("excel_path")
+            clean_owner_name = info.get("clean_owner_name") or "Combined Outlet"
+            drive_filename = info.get("drive_filename") or info.get("excel_filename")
+            photo_job_ids = info.get("photo_job_ids", [])
+
+            if not req.recombine and combined_path and os.path.exists(combined_path):
+                # File lokal masih ada, retry upload ke Google Drive
+                info["status"] = "UPLOADING"
+                info["error"] = None
+                _trigger_bg_combined_upload(
+                    combine_id=req.combine_id,
+                    combined_path=combined_path,
+                    clean_owner_name=clean_owner_name,
+                    drive_filename=drive_filename,
+                    photo_job_ids=photo_job_ids,
+                )
+                from urllib.parse import quote
+                return {
+                    "ok": True,
+                    "combine_id": req.combine_id,
+                    "excel_filename": info.get("excel_filename"),
+                    "excel_path": combined_path,
+                    "gspread_status": "UPLOADING",
+                    "download_url": f"/api/jobs/download-file?path={quote(combined_path)}&filename={quote(info.get('excel_filename', 'combined.xlsx'))}",
+                    "message": "Upload file gabungan C5 ke Google Drive sedang dicoba ulang di latar belakang."
+                }
+            elif req.job_ids:
+                return _execute_combine_and_upload(req.job_ids, req.outlet_name, db)
+
+    # Skenario 2: job_ids diberikan langsung
+    if req.job_ids:
+        return _execute_combine_and_upload(req.job_ids, req.outlet_name, db)
+
+    # Skenario 3: Auto-discover job_ids dari batch penarikan terakhir yang SUCCESS
+    query = db.query(Job).filter(
+        Job.job_type == "PULL",
+        Job.status == "SUCCESS",
+        Job.result_metadata.isnot(None)
+    ).order_by(Job.completed_at.desc())
+
+    if req.outlet_name:
+        term = f"%{req.outlet_name.strip()}%"
+        query = query.join(Outlet, Job.outlet_id == Outlet.id).filter(
+            or_(
+                Outlet.nama_outlet.ilike(term),
+                Outlet.merchant_name.ilike(term),
+                Outlet.owner.ilike(term),
+            )
+        )
+
+    recent_jobs = query.limit(25).all()
+    valid_jobs = []
+    base_time = None
+    for j in recent_jobs:
+        if j.result_metadata and j.result_metadata.get("excel_path"):
+            if base_time is None and j.completed_at:
+                base_time = j.completed_at
+            if base_time and j.completed_at:
+                diff_hours = abs((base_time - j.completed_at).total_seconds()) / 3600.0
+                if diff_hours <= 4.0:
+                    valid_jobs.append(j)
+            else:
+                valid_jobs.append(j)
+
+    if not valid_jobs:
+        raise HTTPException(
+            status_code=400,
+            detail="Tidak ada riwayat penarikan menu (PULL) yang berhasil ditemukan untuk digabungkan secara otomatis."
+        )
+
+    auto_job_ids = [str(j.id) for j in valid_jobs]
+    logger.info("Auto-discover retry combine C5 menemukan %d job: %s", len(auto_job_ids), auto_job_ids)
+    return _execute_combine_and_upload(auto_job_ids, req.outlet_name, db)
+
+
+@app.post("/api/jobs/combine-c5/{combine_id}/retry")
+def retry_combine_c5_by_id_endpoint(combine_id: str, db: Session = Depends(get_db)):
+    return retry_combine_c5_endpoint(RetryCombineC5Request(combine_id=combine_id), db)
+
+
+@app.get("/api/jobs/combine-c5/retry")
+def retry_combine_c5_get_endpoint(
+    combine_id: Optional[str] = Query(None),
+    outlet_name: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    return retry_combine_c5_endpoint(
+        RetryCombineC5Request(combine_id=combine_id, outlet_name=outlet_name),
+        db,
+    )
 
 
 @app.get("/api/jobs/combine-c5/{combine_id}/status")
