@@ -475,6 +475,30 @@ class TestShopeeFastSession(unittest.TestCase):
         self.assertEqual(sid, "888888")
         self.assertEqual(extra_cookies["shopee_tob_entity_id"], "888888")
 
+    def test_attempt_dishes_pull_recovery_no_blind_stores_fallback(self):
+        from shopee.core.pull import _attempt_dishes_pull_recovery
+        mock_client = MagicMock()
+        mock_client.last_code = 1130014
+        mock_client.last_error = "merchant authority invalid"
+        mock_client.get_store_dishes.return_value = []
+        mock_client.get_stores.return_value = [
+            {"id": "1456964", "name": "[SR] Ayam geprek cinta_"}
+        ]
+        extra_cookies = {}
+
+        catalogs, sid, mid = _attempt_dishes_pull_recovery(
+            client=mock_client,
+            store_id="22459819",
+            merchant_id="11511947",
+            target_name="SuperFood",
+            extra_cookies=extra_cookies
+        )
+
+        self.assertEqual(catalogs, [])
+        self.assertEqual(sid, "22459819")
+        self.assertEqual(mid, "11511947")
+        self.assertNotIn("shopee_tob_entity_id", extra_cookies)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -542,26 +542,12 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         
     excel_path = os.path.join(output_dir, excel_filename)
 
-    drive_folder_url = None
-    photo_sync_meta = None
-    if all_dishes:
-        try:
-            from menu_core.gdrive_service import prepare_and_start_photo_sync
-            owner_name = store_metadata.get("owner") or "Default Owner"
-            first_dish = all_dishes[0]
-            listing_name = first_dish.get('nama_panjang') or store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or "GoFood Outlet"
-            sid = str(first_dish.get('store_id') or store_metadata.get('store_id') or "").strip()
-            drive_folder_url, photo_sync_meta = prepare_and_start_photo_sync(
-                owner_name=owner_name,
-                platform="GoFood",
-                listing_name=listing_name,
-                sid=sid,
-                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes],
-                excel_path=excel_path,
-                job_id=store_metadata.get("job_id"),
-            )
-        except Exception as e_drive:
-            print(f"⚠️ Gagal sinkronisasi foto GoFood ke Google Drive: {e_drive}")
+    from menu_core.gdrive_service import format_photo_folder_label, prepare_and_start_photo_sync
+    first_dish = all_dishes[0] if all_dishes else {}
+    owner_name = store_metadata.get("owner") or "Default Owner"
+    listing_name = first_dish.get('nama_panjang') or store_metadata.get('nama_resto_final') or store_metadata.get('nama_outlet') or "GoFood Outlet"
+    sid = str(first_dish.get('store_id') or store_metadata.get('store_id') or "").strip()
+    folder_label = format_photo_folder_label("GoFood", listing_name, sid)
 
     # Build standard output DataFrames
     item_cols = [
@@ -739,8 +725,7 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                             val = str(val)
                     sheet_mod.cell(row=r_idx + DATA_START_ROW, column=headers_mod[col_name], value=val)
 
-        folder_label = (photo_sync_meta or {}).get("target_folder_name") or ""
-        folder_entries = [(folder_label, drive_folder_url)] if drive_folder_url else []
+        folder_entries = [(folder_label, "")]
         upsert_folder_link_sheet(wb, folder_entries)
 
         wb.save(excel_path)
@@ -751,9 +736,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             print(f"   ✅ Berhasil menyimpan file catalog menggunakan template O.C5 ke: {excel_path}")
     except Exception as ex_err:
         print(f"   [-] Gagal menulis ke template O.C5: {ex_err}. Fallback ke Excel biasa.")
-        folder_label = (photo_sync_meta or {}).get("target_folder_name") or ""
         df_folder_links = pd.DataFrame(
-            [[folder_label, drive_folder_url]] if drive_folder_url else [],
+            [[folder_label, ""]],
             columns=[FOLDER_LINK_LABEL_HEADER, FOLDER_LINK_URL_HEADER],
         )
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
@@ -761,6 +745,22 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
             df_mods.to_excel(writer, sheet_name='Modifier', index=False)
             df_folder_links.to_excel(writer, sheet_name=FOLDER_LINK_SHEET_NAME, index=False)
         
+    photo_sync_meta = None
+    if all_dishes:
+        try:
+            _, photo_sync_meta = prepare_and_start_photo_sync(
+                owner_name=owner_name,
+                platform="GoFood",
+                listing_name=listing_name,
+                sid=sid,
+                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("item_id")} for d in all_dishes],
+                excel_path=excel_path,
+                job_id=store_metadata.get("job_id"),
+                run_async=True,
+            )
+        except Exception as e_drive:
+            print(f"   ⚠️ Gagal sinkronisasi foto GoFood latar belakang ke Google Drive: {e_drive}")
+
     print(f"   ✅ Berhasil memproses data menu GoFood!")
     print(f"      - Item Count: {len(df_items)}")
     return True, {

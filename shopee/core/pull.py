@@ -87,6 +87,10 @@ def _attempt_dishes_pull_recovery(
     catalogs = []
     current_sid = store_id
     current_mid = merchant_id
+    orig_sid_cookie = extra_cookies.get("shopee_tob_entity_id")
+    orig_mid_cookie = extra_cookies.get("shopee_foody_mid")
+    orig_client_eid = client.entity_id
+    orig_client_mid = client.merchant_id
 
     # 1. Coba resolusi ulang store ID dan merchant ID dari database/cache
     rec_sid, rec_mid = resolve_shopee_outlet_context(
@@ -120,8 +124,6 @@ def _attempt_dishes_pull_recovery(
                     if target_name.lower() in s_name or s_name in target_name.lower():
                         matched_sid = s_id
                         break
-                if not matched_sid:
-                    matched_sid = str(stores[0].get("id", "")).strip()
 
                 if matched_sid and matched_sid != current_sid:
                     print(f"[RECOVERY] Menggunakan Store ID resmi dari get_stores: {current_sid} -> {matched_sid}")
@@ -132,7 +134,23 @@ def _attempt_dishes_pull_recovery(
         except Exception as store_err:
             print(f"[-] Warning: Gagal query get_stores untuk recovery: {store_err}")
 
-    return catalogs, current_sid, current_mid
+    if catalogs:
+        return catalogs, current_sid, current_mid
+
+    # Jika pemulihan gagal menemukan katalog, kembalikan state awal tanpa mengotori cookie / client
+    if orig_sid_cookie is not None:
+        extra_cookies["shopee_tob_entity_id"] = orig_sid_cookie
+    else:
+        extra_cookies.pop("shopee_tob_entity_id", None)
+
+    if orig_mid_cookie is not None:
+        extra_cookies["shopee_foody_mid"] = orig_mid_cookie
+    else:
+        extra_cookies.pop("shopee_foody_mid", None)
+
+    client.entity_id = orig_client_eid
+    client.merchant_id = orig_client_mid
+    return [], store_id, merchant_id
 
 
 def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = True):
@@ -286,13 +304,17 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         print(f"[*] Menarik data menu ShopeeFood untuk: {target_name} ({store_id})...")
         catalogs = client.get_store_dishes(store_id)
         if not catalogs and client.last_code in (1130014, 1130002):
-            catalogs, store_id, real_merchant_id = _attempt_dishes_pull_recovery(
+            rec_cats, rec_sid, rec_mid = _attempt_dishes_pull_recovery(
                 client=client,
                 store_id=store_id,
                 merchant_id=real_merchant_id,
                 target_name=target_name,
                 extra_cookies=extra_cookies
             )
+            if rec_cats:
+                catalogs = rec_cats
+                store_id = rec_sid
+                real_merchant_id = rec_mid
 
         if not catalogs:
             is_auth_error = (
@@ -351,13 +373,17 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 print(f"[*] Mencoba ulang menarik data menu ShopeeFood dengan token baru...")
                 catalogs = client.get_store_dishes(store_id)
                 if not catalogs and client.last_code in (1130014, 1130002):
-                    catalogs, store_id, new_mid = _attempt_dishes_pull_recovery(
+                    rec_cats, rec_sid, rec_mid = _attempt_dishes_pull_recovery(
                         client=client,
                         store_id=store_id,
                         merchant_id=new_mid,
                         target_name=target_name,
                         extra_cookies=extra_cookies
                     )
+                    if rec_cats:
+                        catalogs = rec_cats
+                        store_id = rec_sid
+                        new_mid = rec_mid
 
         if not catalogs:
             err_details = f"code={client.last_code}, msg={client.last_error}" if client.last_code else "katalog kosong"
@@ -646,24 +672,11 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
             except Exception as prev_err:
                 print(f"[⚠️] Gagal membaca C5 sebelumnya untuk merge: {prev_err}")
 
-        drive_folder_url = None
-        photo_sync_meta = None
-        try:
-            from menu_core.gdrive_service import prepare_and_start_photo_sync
-            owner_name = store_metadata.get("owner") or "Default Owner"
-            listing_name = raw_resto_final or raw_outlet or "ShopeeFood Outlet"
-            sid = str(store_metadata.get("store_id") or "").strip()
-            drive_folder_url, photo_sync_meta = prepare_and_start_photo_sync(
-                owner_name=owner_name,
-                platform="ShopeeFood",
-                listing_name=listing_name,
-                sid=sid,
-                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes],
-                excel_path=excel_path,
-                job_id=store_metadata.get("job_id"),
-            )
-        except Exception as e_drive:
-            print(f"[⚠️] Gagal sinkronisasi foto ke Google Drive: {e_drive}")
+        from menu_core.gdrive_service import format_photo_folder_label, prepare_and_start_photo_sync
+        owner_name = store_metadata.get("owner") or "Default Owner"
+        listing_name = raw_resto_final or raw_outlet or "ShopeeFood Outlet"
+        sid = str(store_metadata.get("store_id") or "").strip()
+        folder_label = format_photo_folder_label("ShopeeFood", listing_name, sid)
 
         try:
             wb = openpyxl.load_workbook(template_path)
@@ -768,8 +781,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                         sheet_mod.cell(row=new_row_idx, column=col_idx, value=val)
                 new_row_idx += 1
 
-            folder_label = (photo_sync_meta or {}).get("target_folder_name") or ""
-            folder_entries = [(folder_label, drive_folder_url)] if drive_folder_url else []
+            folder_entries = [(folder_label, "")]
             upsert_folder_link_sheet(wb, folder_entries)
 
             wb.save(excel_path)
@@ -781,15 +793,29 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         except Exception as ex_err:
             print(f"[-] Gagal menulis ke template O.C5: {ex_err}. Fallback ke Excel biasa.")
             # Fallback to standard excel writer if template fails
-            folder_label = (photo_sync_meta or {}).get("target_folder_name") or ""
             df_folder_links = pd.DataFrame(
-                [[folder_label, drive_folder_url]] if drive_folder_url else [],
+                [[folder_label, ""]],
                 columns=[FOLDER_LINK_LABEL_HEADER, FOLDER_LINK_URL_HEADER],
             )
             with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
                 df_items.to_excel(writer, sheet_name='Item', index=False)
                 df_mods.to_excel(writer, sheet_name='Modifier', index=False)
                 df_folder_links.to_excel(writer, sheet_name=FOLDER_LINK_SHEET_NAME, index=False)
+
+        photo_sync_meta = None
+        try:
+            _, photo_sync_meta = prepare_and_start_photo_sync(
+                owner_name=owner_name,
+                platform="ShopeeFood",
+                listing_name=listing_name,
+                sid=sid,
+                dishes=[{"item_name": d.get("nama_item"), "photo_url": d.get("link_foto"), "item_id": d.get("dish_id")} for d in all_dishes],
+                excel_path=excel_path,
+                job_id=store_metadata.get("job_id"),
+                run_async=True,
+            )
+        except Exception as e_drive:
+            print(f"[⚠️] Gagal sinkronisasi foto latar belakang ke Google Drive: {e_drive}")
             
         return True, {
             'items_csv': None,

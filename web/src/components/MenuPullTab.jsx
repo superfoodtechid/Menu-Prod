@@ -85,6 +85,30 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
       if (res.ok) {
         const data = await res.json();
         setCombinedResult(data);
+
+        // If Google Drive upload is still in progress in background, poll for gspread_url
+        if (data.combine_id && data.gspread_status === "UPLOADING") {
+          const pollCombine = setInterval(async () => {
+            try {
+              const statusRes = await fetch(`${API_BASE_URL}/api/jobs/combine-c5/${data.combine_id}/status`, {
+                headers: { "X-API-Key": API_SECRET_KEY || "" }
+              });
+              if (statusRes.ok) {
+                const statusData = await statusRes.json();
+                if (statusData.status === "SUCCESS" || statusData.status === "FAILED") {
+                  clearInterval(pollCombine);
+                  setCombinedResult((prev) => (prev ? {
+                    ...prev,
+                    gspread_url: statusData.gspread_url,
+                    gspread_status: statusData.status,
+                  } : prev));
+                }
+              }
+            } catch (pollErr) {
+              clearInterval(pollCombine);
+            }
+          }, 2000);
+        }
       } else {
         const errData = await res.json();
         console.error("Gagal menggabungkan C5:", errData.detail);
@@ -782,7 +806,7 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
-              <span>Menggabungkan file C5 per outlet & mengunggah ke Google Sheets...</span>
+              <span>Menggabungkan file C5 per outlet...</span>
             </div>
           )}
 
@@ -813,7 +837,7 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                   )}
                 </div>
                 <div className="flex flex-col gap-2 shrink-0 sm:w-auto w-full">
-                  {combinedResult.gspread_url && (
+                  {combinedResult.gspread_url ? (
                     <a
                       href={combinedResult.gspread_url}
                       target="_blank"
@@ -825,7 +849,15 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                       </svg>
                       <span>Buka Combined Google Sheets</span>
                     </a>
-                  )}
+                  ) : combinedResult.gspread_status === "UPLOADING" ? (
+                    <div className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-amber-300 bg-amber-50/70 dark:border-amber-800/60 dark:bg-amber-950/30 px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300 w-full">
+                      <svg className="w-3.5 h-3.5 animate-spin text-amber-600 dark:text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      <span>Menyiapkan Google Sheets di latar belakang...</span>
+                    </div>
+                  ) : null}
                   <a
                     href={`${API_BASE_URL}${combinedResult.download_url}`}
                     download={combinedResult.excel_filename}
@@ -964,19 +996,32 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                     </div>
                   )}
 
-                  {job.status === "SUCCESS" && job.result_metadata?.gspread_url && (
-                    <div className="pt-2 border-t border-zinc-100 flex justify-end gap-2">
+                  {job.status === "SUCCESS" && (
+                    <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800 flex flex-wrap justify-end gap-2">
                       <a
-                        href={job.result_metadata.gspread_url}
+                        href={`${API_BASE_URL}/api/jobs/download/${job.id}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="secondary-action gap-1.5 px-3 py-1.5 text-[13px]"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-red-700 px-3 py-1.5 text-[13px] font-semibold text-white shadow-sm transition hover:bg-red-800"
                       >
-                        <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                          <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2m-7 14H6v-2h6v2zm8-4H6v-2h14v2zm0-4H6V7h14v2z" />
+                        <svg className="w-3.5 h-3.5 fill-none stroke-current stroke-2 shrink-0" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                         </svg>
-                        Buka Google Sheets
+                        <span>Unduh Excel C5</span>
                       </a>
+                      {job.result_metadata?.gspread_url && (
+                        <a
+                          href={job.result_metadata.gspread_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="secondary-action gap-1.5 px-3 py-1.5 text-[13px]"
+                        >
+                          <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2m-7 14H6v-2h6v2zm8-4H6v-2h14v2zm0-4H6V7h14v2z" />
+                          </svg>
+                          Buka Google Sheets
+                        </a>
+                      )}
                     </div>
                   )}
                 </div>

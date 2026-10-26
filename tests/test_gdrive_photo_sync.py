@@ -16,6 +16,7 @@ from menu_core.gdrive_service import (
     sync_menu_photos_via_appscript,
     sync_menu_photos_to_drive,
     prepare_and_start_photo_sync,
+    update_excel_folder_link,
 )
 from menu_core.c5_template_helper import (
     upsert_folder_link_sheet,
@@ -87,6 +88,7 @@ class TestGDrivePhotoSync(unittest.TestCase):
         self.assertEqual(res["fileName"], "Ayam Bakar.jpg")
         self.assertIn("fileContent", res)
 
+    @patch.dict(os.environ, {"GOOGLE_DRIVE_API_KEY": ""}, clear=False)
     @patch("menu_core.gdrive_service.dotenv_values")
     @patch("menu_core.gdrive_service.requests.post")
     @patch("menu_core.gdrive_service.requests.get")
@@ -119,6 +121,7 @@ class TestGDrivePhotoSync(unittest.TestCase):
         self.assertEqual(folder_url, "https://drive.google.com/drive/folders/folder_appscript_123")
         mock_get.assert_not_called()
 
+    @patch.dict(os.environ, {"GOOGLE_DRIVE_API_KEY": ""}, clear=False)
     @patch("menu_core.gdrive_service.dotenv_values")
     @patch("menu_core.gdrive_service.requests.post")
     @patch("menu_core.gdrive_service.requests.get")
@@ -267,6 +270,55 @@ class TestGDrivePhotoSync(unittest.TestCase):
             self.assertEqual(header_row[0], FOLDER_LINK_LABEL_HEADER)
             self.assertEqual(header_row[1], FOLDER_LINK_URL_HEADER)
             wb_comb.close()
+
+    def test_update_excel_folder_link(self):
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Item"
+            ws.append(["Item ID", "Item", "Photo Link"])
+            wb.save(tmp_path)
+            wb.close()
+
+            ok = update_excel_folder_link(
+                tmp_path,
+                "ShopeeFood | Bebek | 123 | 2026-10-26 07:00",
+                "https://drive.google.com/drive/folders/folder_123"
+            )
+            self.assertTrue(ok)
+
+            entries = read_folder_link_entries(tmp_path)
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0][0], "ShopeeFood | Bebek | 123 | 2026-10-26 07:00")
+            self.assertEqual(entries[0][1], "https://drive.google.com/drive/folders/folder_123")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    @patch("menu_core.gdrive_service.is_photo_sync_enabled", return_value=True)
+    @patch("menu_core.gdrive_service.sync_menu_photos_to_drive")
+    def test_prepare_and_start_photo_sync_async_decoupling(self, mock_sync_drive, _mock_enabled):
+        mock_sync_drive.return_value = "https://drive.google.com/drive/folders/async_url"
+
+        folder_url, meta = prepare_and_start_photo_sync(
+            owner_name="Test Owner",
+            platform="ShopeeFood",
+            listing_name="Test Outlet",
+            sid="1001",
+            dishes=[{"item_name": "Ayam", "photo_url": "https://cdn.shopee.co.id/ayam.jpg", "item_id": "1"}],
+            run_async=True,
+        )
+
+        # Non-blocking returns immediately with status PROCESSING
+        self.assertIsNone(folder_url)
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta["status"], "PROCESSING")
+        self.assertEqual(meta["total_photos"], 1)
+        self.assertIsNone(meta["drive_folder_url"])
+        self.assertTrue(meta["target_folder_name"].startswith("ShopeeFood | Test Outlet | 1001 |"))
 
 
 if __name__ == "__main__":

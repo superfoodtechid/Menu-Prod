@@ -3332,19 +3332,48 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
             # ── Step 5: Decision - Switch or Stay? ──
             do_switch = False
             active_store_id = None
+            active_foody_mid = None
             try:
                 for c in driver.get_cookies():
-                    if c.get("name") == "shopee_tob_entity_id" and c.get("value"):
-                        active_store_id = str(c["value"]).strip()
-                        break
+                    c_name = c.get("name")
+                    c_val = str(c.get("value") or "").strip()
+                    if c_name == "shopee_tob_entity_id" and c_val:
+                        active_store_id = c_val
+                    elif c_name == "shopee_foody_mid" and c_val:
+                        active_foody_mid = c_val
             except Exception:
                 pass
 
+            target_sid_str = str(target_store_id).strip() if target_store_id else None
+            active_id_str = str(active_id).strip() if active_id and active_id != "None" else None
+
+            # Cek apakah cookie sesi di browser sinkron dengan target merchant/store
+            cookie_conflict = False
+            if active_store_id:
+                if target_sid_str and active_store_id != target_sid_str:
+                    # Cookie berbeda dari target store ID
+                    # Jika juga tidak sama dengan merchant ID aktif, berarti cookie dari merchant lain
+                    if not active_id_str or active_store_id != active_id_str:
+                        cookie_conflict = True
+                elif not target_sid_str and active_id_str and active_store_id != active_id_str:
+                    cookie_conflict = True
+
+            if active_foody_mid and active_id_str and active_foody_mid != active_id_str:
+                cookie_conflict = True
+
             is_already_target = False
             if target_name and active_name and active_name.lower().strip() == target_name.lower().strip():
-                is_already_target = True
-            elif target_store_id and active_store_id and active_store_id == str(target_store_id).strip():
-                is_already_target = True
+                if not cookie_conflict:
+                    is_already_target = True
+                else:
+                    log.info(
+                        f"📍 [MERCHANT] UI terdeteksi '{active_name}', tetapi cookie sesi "
+                        f"(SID: {active_store_id}, MID: {active_foody_mid}) tidak sinkron dengan target "
+                        f"(SID: {target_sid_str}, MID: {active_id_str}). Memaksa switch via UI..."
+                    )
+            elif target_sid_str and active_store_id and active_store_id == target_sid_str:
+                if not cookie_conflict:
+                    is_already_target = True
 
             if is_already_target:
                 log.info(f"✅ [MERCHANT] Already as target: {active_name} (SID: {active_store_id or target_store_id})")
@@ -3352,8 +3381,11 @@ def get_session(username=None, password=None, phone=None, headless=None, close_b
             elif target_name and active_name and active_name.lower().strip() != target_name.lower().strip():
                 log.info(f"📍 [MERCHANT] Current: {active_name} | Target: {target_name}. Switching...")
                 do_switch = True
-            elif target_store_id and active_store_id and active_store_id != str(target_store_id).strip():
-                log.info(f"📍 [MERCHANT] Active store ID ({active_store_id}) != Target store ID ({target_store_id}). Switching...")
+            elif cookie_conflict:
+                log.info(f"📍 [MERCHANT] Cookie sesi tidak sinkron dengan target. Memaksa switch ke '{target_name}'...")
+                do_switch = True
+            elif target_sid_str and active_store_id and active_store_id != target_sid_str:
+                log.info(f"📍 [MERCHANT] Active store ID ({active_store_id}) != Target store ID ({target_sid_str}). Switching...")
                 do_switch = True
             elif target_name:
                 if not active_id or active_id == "None":
