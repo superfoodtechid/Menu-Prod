@@ -61,7 +61,7 @@ def _boot_push_client(store_metadata: dict, headless: bool = True, force_browser
     browser.set_session_file(session_file)
     active_account = session_file.stem.replace("session_", "") if session_file.stem.startswith("session_") else username
     
-    print(f"[*] [PUSH] Membuka browser (headless={headless}) untuk akun '{active_account}' (target: '{username}'), merchant: '{target_name}', session: '{session_file.name}'...")
+    print(f"[*] [PUSH] Memeriksa sesi browser yang sudah ada (headless={headless}) untuk akun '{active_account}', merchant: '{target_name}'...")
     session_data = None
     try:
         session_data = browser.get_session(
@@ -71,26 +71,11 @@ def _boot_push_client(store_metadata: dict, headless: bool = True, force_browser
             close_browser=True,
             target_name=target_name,
             target_store_id=store_id,
-            interactive=True
+            interactive=False,
+            allow_login=False
         )
     except Exception as e:
-        if "user membatalkan otp" in str(e).lower():
-            return None, "user membatalkan otp"
-        print(f"[WARN] get_session with target_name '{target_name}' failed ({e}). Retrying without target_name filter...")
-        try:
-            session_data = browser.get_session(
-                username=active_account,
-                password=password,
-                headless=headless,
-                close_browser=True,
-                target_name="",
-                target_store_id=store_id,
-                interactive=True
-            )
-        except Exception as ex:
-            if "user membatalkan otp" in str(ex).lower():
-                return None, "user membatalkan otp"
-            return None, f"Gagal menginisialisasi browser session: {ex}"
+        return None, f"Push tidak melakukan login ulang. Sesi owner perlu diperbarui melalui alur yang diotorisasi: {e}"
 
     if not session_data or "shopee_tob_token" not in session_data:
         return None, f"Gagal menginisialisasi browser session untuk akun '{username}'"

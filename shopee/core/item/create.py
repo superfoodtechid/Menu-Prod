@@ -28,15 +28,16 @@ def _build_dish_payload(
     
     if existing_dish:
         # Jika tidak ada perubahan harga (hanya ubah nama/kategori/deskripsi/foto),
-        # kirim payload bersih persis seperti cURL web portal Shopee Partner (tanpa list_price & promo)
-        # agar tidak memicu sistem validasi kuota batas perubahan harga harian.
+        # field 'price' tetap wajib dikirim karena memiliki tag 'required' pada validator Shopee.
+        # Kirim nilai harga existing agar tidak memicu kuota harian perubahan harga.
         if not include_price_mutation:
+            price_val = str(int(price * 100000)) if price is not None else str(existing_dish.get("price", "0"))
             dish_payload = {
                 "name": name if (name is not None and str(name).strip() != "") else existing_dish.get("name", ""),
+                "price": price_val,
                 "available": available if available is not None else existing_dish.get("available", True),
                 "catalog_id": str(catalog_id or existing_dish.get("catalog_id", "")),
                 "description": description if description is not None else existing_dish.get("description", ""),
-                "price": str(existing_dish.get("price", "0")),
                 "picture": picture if (picture is not None and str(picture).strip() != "") else existing_dish.get("picture", ""),
                 "time_for_sales": existing_dish.get("time_for_sales") or time_for_sales,
                 "listing_status": existing_dish.get("listing_status", 1),

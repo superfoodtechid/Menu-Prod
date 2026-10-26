@@ -212,9 +212,10 @@ class TestShopeePushFlags(unittest.TestCase):
 
         self.assertEqual(payload["name"], "Es Jeruk Jumbo")
         self.assertEqual(payload["id"], "3148482929458688")
-        self.assertEqual(payload["price"], "1800000000")
         self.assertEqual(payload["rank"], 2)
-        # Verify pricing and promo mutation keys are omitted
+        # Price field is required by Shopee backend validator, should match existing price
+        self.assertEqual(payload["price"], "1800000000")
+        # No promo or list_price mutation fields should be sent for metadata-only updates.
         self.assertNotIn("list_price", payload)
         self.assertNotIn("item_discount", payload)
         self.assertNotIn("discount_type", payload)

@@ -126,20 +126,27 @@ function doPost(e) {
       try {
         responses = UrlFetchApp.fetchAll(fetchRequests);
       } catch (fetchAllErr) {
-        for (var k = 0; k < urlItems.length; k++) {
-          failedFiles.push({
-            fileName: urlItems[k].item.fileName || ("file_" + urlItems[k].index + ".jpg"),
-            fileUrl: urlItems[k].url,
-            itemId: urlItems[k].item.itemId || "",
-            reason: String(fetchAllErr)
-          });
-        }
         responses = [];
+        for (var k = 0; k < fetchRequests.length; k++) {
+          try {
+            var singleResp = UrlFetchApp.fetch(fetchRequests[k].url, fetchRequests[k]);
+            responses.push(singleResp);
+          } catch (singleErr) {
+            responses.push(null);
+            failedFiles.push({
+              fileName: urlItems[k].item.fileName || ("file_" + urlItems[k].index + ".jpg"),
+              fileUrl: urlItems[k].url,
+              itemId: urlItems[k].item.itemId || "",
+              reason: String(singleErr)
+            });
+          }
+        }
       }
 
       for (var m = 0; m < responses.length; m++) {
         var entryObj = urlItems[m];
         var resp = responses[m];
+        if (!resp) continue;
         var fNameUrl = entryObj.item.fileName || ("file_" + entryObj.index + ".jpg");
         try {
           var code = resp.getResponseCode();

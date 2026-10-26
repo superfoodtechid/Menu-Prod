@@ -225,6 +225,25 @@ def _restore_cdn_urls_in_excel(excel_path: Optional[str], dishes: List[Dict[str,
         logger.warning("Failed to restore CDN photo URLs in Excel %s: %s", excel_path, exc)
 
 
+def update_excel_folder_link(excel_path: Optional[str], folder_label: str, folder_url: str) -> bool:
+    """Safely update the 'Folder Link' sheet in an existing Excel file without blocking execution."""
+    if not excel_path or not os.path.exists(excel_path) or not folder_url:
+        return False
+    try:
+        import openpyxl
+        from menu_core.c5_template_helper import upsert_folder_link_sheet
+
+        wb = openpyxl.load_workbook(excel_path)
+        upsert_folder_link_sheet(wb, [(folder_label, folder_url)])
+        wb.save(excel_path)
+        wb.close()
+        logger.info(f"Updated Folder Link in {excel_path}: {folder_label} -> {folder_url}")
+        return True
+    except Exception as exc:
+        logger.warning(f"Failed to update Folder Link in {excel_path}: {exc}")
+        return False
+
+
 def _update_job_photo_sync_metadata(job_id: Optional[str], photo_sync_meta: Dict[str, Any]) -> None:
     """Update Job.result_metadata['photo_sync'] in the database from a background thread."""
     if not job_id:
@@ -763,6 +782,11 @@ def sync_menu_photos_via_appscript(
 
         logger.info(f"Drive folder resolved: {folder_url}")
 
+        if job_id:
+            _update_job_photo_sync_metadata(job_id, {"drive_folder_url": folder_url})
+        if excel_path:
+            update_excel_folder_link(excel_path, target_folder_name, folder_url)
+
         if not photo_tasks:
             return folder_url
 
@@ -892,6 +916,12 @@ def sync_menu_photos_to_drive(
                 timestamp_str=timestamp_str
             )
             if folder_id and folder_url:
+                target_folder_name = format_photo_folder_label(platform, listing_name, sid, timestamp_str)
+                if job_id:
+                    _update_job_photo_sync_metadata(job_id, {"drive_folder_url": folder_url})
+                if excel_path:
+                    update_excel_folder_link(excel_path, target_folder_name, folder_url)
+
                 if run_async and photo_tasks:
                     threading.Thread(
                         target=_execute_sa_photo_uploads,
@@ -945,10 +975,11 @@ def prepare_and_start_photo_sync(
     excel_path: Optional[str] = None,
     job_id: Optional[str] = None,
     timestamp_str: Optional[str] = None,
+    run_async: bool = True,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """
-    Resolve the Google Drive folder immediately (~2s), start background photo collection,
-    and return (drive_folder_url, photo_sync_metadata) for the frontend UI.
+    Start menu photo sync to Google Drive in the background and return immediately.
+    The Excel file can be saved right away without waiting for Drive folder creation.
     """
     photo_tasks = _extract_photo_tasks(dishes)
     total_photos = len(photo_tasks)
@@ -975,6 +1006,46 @@ def prepare_and_start_photo_sync(
         }
 
     eta_info = calculate_photo_sync_eta(total_photos)
+    initial_meta = {
+        "status": "PROCESSING",
+        "total_photos": total_photos,
+        "uploaded_photos": 0,
+        "estimated_seconds": eta_info["estimated_seconds"],
+        "estimated_completion": eta_info["estimated_completion"],
+        "estimated_completion_iso": eta_info["estimated_completion_iso"],
+        "drive_folder_url": None,
+        "target_folder_name": target_folder_name,
+    }
+
+    if job_id:
+        _update_job_photo_sync_metadata(job_id, initial_meta)
+
+    if run_async:
+        def _async_worker():
+            try:
+                sync_menu_photos_to_drive(
+                    owner_name=owner_name,
+                    platform=platform,
+                    listing_name=listing_name,
+                    sid=sid,
+                    dishes=dishes,
+                    timestamp_str=timestamp_str,
+                    run_async=False,
+                    excel_path=excel_path,
+                    job_id=job_id,
+                )
+            except Exception as exc:
+                logger.error(f"Error in background photo sync: {exc}")
+                if job_id:
+                    _update_job_photo_sync_metadata(job_id, {
+                        "status": "FAILED",
+                        "message": f"Sinkronisasi foto latar belakang gagal: {exc}",
+                    })
+
+        bg_thread = threading.Thread(target=_async_worker, daemon=True)
+        bg_thread.start()
+        return None, initial_meta
+
     folder_url = sync_menu_photos_to_drive(
         owner_name=owner_name,
         platform=platform,
@@ -982,7 +1053,7 @@ def prepare_and_start_photo_sync(
         sid=sid,
         dishes=dishes,
         timestamp_str=timestamp_str,
-        run_async=True,
+        run_async=False,
         excel_path=excel_path,
         job_id=job_id,
     )
@@ -995,13 +1066,5 @@ def prepare_and_start_photo_sync(
             "message": "Gagal membuat folder Google Drive. Kolom Photo Link di Excel menggunakan link CDN asli.",
         }
 
-    return folder_url, {
-        "status": "PROCESSING",
-        "total_photos": total_photos,
-        "uploaded_photos": 0,
-        "estimated_seconds": eta_info["estimated_seconds"],
-        "estimated_completion": eta_info["estimated_completion"],
-        "estimated_completion_iso": eta_info["estimated_completion_iso"],
-        "drive_folder_url": folder_url,
-        "target_folder_name": target_folder_name,
-    }
+    initial_meta["drive_folder_url"] = folder_url
+    return folder_url, initial_meta

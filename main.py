@@ -2136,6 +2136,8 @@ def download_job_file(job_id: uuid.UUID, db: Session = Depends(get_db)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+COMBINE_STATUS: Dict[str, Dict[str, Any]] = {}
+
 @app.post("/api/jobs/combine-c5")
 def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)):
     from menu_core.c5_combiner import combine_c5
@@ -2186,23 +2188,24 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
 
     previous_workbook = None
     preservation_warning = None
-    automatic_previous_url = find_latest_combined_c5_url(clean_owner_name)
-    if automatic_previous_url:
+
+    # Prioritize local existing combined workbook on server (instant, 0ms latency)
+    older_combined_files = sorted(
+        (path for path in combined_dir.glob("C5.*.xlsx") if str(path) != combined_path),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if older_combined_files:
+        previous_workbook = str(older_combined_files[0])
+
+    if previous_workbook is None:
         try:
-            previous_workbook, _ = _download_gdrive_or_gsheet_bytes(automatic_previous_url)
+            automatic_previous_url = find_latest_combined_c5_url(clean_owner_name, timeout=3)
+            if automatic_previous_url:
+                previous_workbook, _ = _download_gdrive_or_gsheet_bytes(automatic_previous_url, timeout=5)
         except Exception as exc:
             logger.warning("Tidak dapat membaca C5 terbaru yang ditemukan di Drive (%s).", type(exc).__name__)
-            preservation_warning = "C5 gabungan terbaru di Drive tidak dapat dibaca. Nilai harga offline mungkin hanya dipulihkan dari salinan lokal."
-
-    # Keep a local fallback for older runs and downloaded workbooks saved on the server.
-    if previous_workbook is None:
-        older_combined_files = sorted(
-            (path for path in combined_dir.glob("C5.*.xlsx") if str(path) != combined_path),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        if older_combined_files:
-            previous_workbook = str(older_combined_files[0])
+            preservation_warning = "C5 gabungan terbaru di Drive tidak dapat dibaca. Nilai harga offline dipulihkan dari salinan lokal atau database."
 
     combine_result = combine_c5(
         excel_paths,
@@ -2214,23 +2217,52 @@ def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)
     if not combine_result or not combine_result.get("success"):
         raise HTTPException(status_code=500, detail="Gagal menggabungkan file C5.")
 
+    combine_id = str(uuid.uuid4())
     drive_filename = excel_filename
 
-    # Upload to Google Drive using folderName: Owner Name, fileName: C5. YYYY-MM-DD HH:MM <Nama Owner>.xlsx
-    gspread_url = upload_combined_to_drive(combined_path, clean_owner_name, custom_filename=drive_filename)
+    COMBINE_STATUS[combine_id] = {
+        "status": "UPLOADING",
+        "excel_path": combined_path,
+        "excel_filename": excel_filename,
+        "gspread_url": None,
+    }
+
+    def _bg_upload_combined():
+        try:
+            logger.info("Memulai upload file gabungan C5 ke Google Drive di latar belakang...")
+            url = upload_combined_to_drive(combined_path, clean_owner_name, custom_filename=drive_filename)
+            COMBINE_STATUS[combine_id]["gspread_url"] = url
+            COMBINE_STATUS[combine_id]["status"] = "SUCCESS" if url else "FAILED"
+            logger.info("Upload file gabungan C5 selesai: %s", url)
+        except Exception as exc:
+            logger.error("Error upload file gabungan C5 ke Google Drive: %s", exc)
+            COMBINE_STATUS[combine_id]["status"] = "FAILED"
+            COMBINE_STATUS[combine_id]["error"] = str(exc)
+
+    threading.Thread(target=_bg_upload_combined, daemon=True).start()
 
     from urllib.parse import quote
     return {
         "ok": True,
+        "combine_id": combine_id,
         "excel_filename": excel_filename,
         "excel_path": combined_path,
-        "gspread_url": gspread_url,
+        "gspread_url": None,
+        "gspread_status": "UPLOADING",
         "preservation_warning": preservation_warning,
         "offline_fields_restored": combine_result.get("offline_fields_restored", 0),
         "download_url": f"/api/jobs/download-file?path={quote(combined_path)}&filename={quote(excel_filename)}",
         "combined_count": len(excel_paths),
         "outlet_name": owner_name
     }
+
+
+@app.get("/api/jobs/combine-c5/{combine_id}/status")
+def get_combine_c5_status(combine_id: str):
+    info = COMBINE_STATUS.get(combine_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Combine job not found")
+    return info
 
 def calculate_price_steps(current_price: float, target_price: float, max_step_pct: float = 0.15) -> list[int]:
     """Calculates intermediate prices to reach target_price without any single step exceeding max_step_pct change."""
@@ -3938,7 +3970,7 @@ def run_push_c5_job(job_id: uuid.UUID, selected_sids: list, updates_list: list):
 
 
 
-def _download_gdrive_or_gsheet_bytes(url: str) -> tuple[bytes, str]:
+def _download_gdrive_or_gsheet_bytes(url: str, timeout: int = 30) -> tuple[bytes, str]:
     """Mengunduh file C5 XLSX dari link Google Drive atau Google Sheets."""
     import re
     import urllib.request
@@ -3981,7 +4013,7 @@ def _download_gdrive_or_gsheet_bytes(url: str) -> tuple[bytes, str]:
 
     try:
         req = urllib.request.Request(export_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             # Cegah DoS / download raksasa (max 20 MB)
             max_bytes = 20 * 1024 * 1024
             data = resp.read(max_bytes + 1)

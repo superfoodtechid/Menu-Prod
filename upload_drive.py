@@ -91,7 +91,7 @@ def upload_combined_to_drive(file_path: str, outlet_name: str, custom_filename: 
         return None
 
 
-def find_latest_combined_c5_url(outlet_name: str) -> Optional[str]:
+def find_latest_combined_c5_url(outlet_name: str, timeout: int = 4) -> Optional[str]:
     """Find the newest C5 workbook in the configured Drive owner folder."""
     try:
         env_vals = dotenv_values()
@@ -115,7 +115,7 @@ def find_latest_combined_c5_url(outlet_name: str) -> Optional[str]:
             **common_params,
             "q": f"'{parent_id}' in parents and name = '{escaped_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
             "fields": "files(id,name,mimeType)",
-        }, timeout=20)
+        }, timeout=timeout)
         folder_response.raise_for_status()
         folders = folder_response.json().get("files", [])
         folder = next((item for item in folders if item.get("name") == clean_folder_name), None)
@@ -127,7 +127,7 @@ def find_latest_combined_c5_url(outlet_name: str) -> Optional[str]:
             "q": f"'{folder['id']}' in parents and trashed = false",
             "orderBy": "modifiedTime desc",
             "fields": "files(id,name,mimeType,modifiedTime,webViewLink)",
-        }, timeout=20)
+        }, timeout=timeout)
         files_response.raise_for_status()
         c5_files = [
             item for item in files_response.json().get("files", [])
