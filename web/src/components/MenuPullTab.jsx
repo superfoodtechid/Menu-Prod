@@ -289,12 +289,15 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
       clearInterval(pollingIntervalsRef.current[jobId]);
     }
 
+    let consecutiveErrors = 0;
+
     pollingIntervalsRef.current[jobId] = setInterval(() => {
       fetch(`${API_BASE_URL}/api/jobs/${jobId}`, {
         headers: { "X-API-Key": API_SECRET_KEY || "" }
       })
         .then((res) => {
           if (!res.ok) throw new Error("Failed to fetch job status");
+          consecutiveErrors = 0;
           return res.json();
         })
         .then((job) => {
@@ -338,9 +341,13 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
           }
         })
         .catch((err) => {
-          console.error(err);
-          clearInterval(pollingIntervalsRef.current[jobId]);
-          delete pollingIntervalsRef.current[jobId];
+          consecutiveErrors += 1;
+          console.warn(`[POLL] Transient error polling job ${jobId} (${consecutiveErrors}/20):`, err);
+          if (consecutiveErrors >= 20) {
+            console.error(`[POLL] Stopped polling job ${jobId} after 20 consecutive failures.`);
+            clearInterval(pollingIntervalsRef.current[jobId]);
+            delete pollingIntervalsRef.current[jobId];
+          }
         });
     }, 2000);
   };
@@ -966,6 +973,13 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                             <>
                               {combinedResult?.gspread_status === "FAILED" ? (
                                 <p className="font-semibold">C5 gagal dikirim; foto belum dikumpulkan</p>
+                              ) : job.status !== "SUCCESS" ? (
+                                <>
+                                  <p className="font-semibold">Menyiapkan data menu & folder foto...</p>
+                                  <p className="text-xs text-amber-800 dark:text-amber-300">
+                                    Folder Google Drive siap. Foto akan dikumpulkan setelah C5 selesai.
+                                  </p>
+                                </>
                               ) : (
                                 <>
                                   <p className="font-semibold">Menunggu C5 gabungan terkirim</p>

@@ -27,6 +27,7 @@ class ShopeeClient:
         self.user_agent    = USER_AGENT
         self.last_code     = None
         self.last_error    = ""
+        self.last_http_status = None
 
     def _seller_headers(self, override_entity_id: str = None) -> dict:
         eid = str(override_entity_id or self.entity_id or "")
@@ -66,18 +67,27 @@ class ShopeeClient:
         url = f"{SELLER_BASE}/api/seller/store/dishes"
         try:
             resp = self.session.get(url, headers=self._seller_headers(override_entity_id=store_id), timeout=15)
-            print(f"[DEBUG] get_store_dishes response status: {resp.status_code}")
-            print(f"[DEBUG] get_store_dishes response text: {resp.text[:500]}")
+            self.last_http_status = resp.status_code
+            if resp.status_code in (401, 403):
+                self.last_code = resp.status_code
+                self.last_error = "Catalog API menolak autentikasi (HTTP auth status)."
+                return []
+            if not resp.ok:
+                self.last_code = None
+                self.last_error = f"Catalog API mengembalikan HTTP {resp.status_code}."
+                return []
             data = resp.json()
             self.last_code = data.get("code")
-            self.last_error = data.get("msg", "")
+            self.last_error = "" if self.last_code == 0 else f"Catalog API error code {self.last_code}."
             if self.last_code == 0:
                 return data.get("data", {}).get("catalogs", [])
             else:
-                print(f"[DEBUG] API error code: {self.last_code}, msg: {self.last_error}")
+                print(f"[Shopee API] Catalog request rejected: HTTP {resp.status_code}, code={self.last_code}.")
         except Exception as e:
-            self.last_error = str(e)
-            print(f"[Shopee API] get_store_dishes error: {e}")
+            self.last_http_status = None
+            self.last_code = None
+            self.last_error = f"Catalog request failed ({type(e).__name__})."
+            print(f"[Shopee API] Catalog request failed ({type(e).__name__}).")
         return []
 
     def get_store_option_groups(self, store_id: str, dish_ids: list = None) -> list[dict]:
