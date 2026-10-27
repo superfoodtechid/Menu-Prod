@@ -19,7 +19,6 @@ from core import browser
 from shopee.core.session_utils import (
     get_fast_shopee_session,
     invalidate_shopee_session,
-    validate_shopee_token,
     resolve_shopee_merchant_id,
     resolve_shopee_outlet_context,
 )
@@ -311,14 +310,9 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         
     try:
         print(f"[*] Menarik data menu ShopeeFood untuk: {target_name} ({store_id})...")
-        token_valid, _ = validate_shopee_token(tob_token, timeout=8)
-        if token_valid:
-            catalogs = client.get_store_dishes(store_id)
-        else:
-            catalogs = []
-            client.last_code = 1130001
-            client.last_error = "token invalid (preflight validation failed)"
-            print(f"[PULL SESSION] Token preflight ditolak untuk store_id={store_id}; memulai satu kali pemulihan sesi.")
+        # The catalog API is authoritative for PULL; a separate GetUserInfo
+        # preflight can reject valid partner sessions and has different context.
+        catalogs = client.get_store_dishes(store_id)
         if not catalogs and client.last_code in (1130014, 1130002):
             rec_cats, rec_sid, rec_mid = _attempt_dishes_pull_recovery(
                 client=client,
@@ -333,11 +327,8 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                 real_merchant_id = rec_mid
 
         if not catalogs:
-            is_auth_error = (
-                client.last_code in (3004, 401, 1000002, 1000003, 1130001, 1130014)
-                or "unauthorized" in str(client.last_error).lower()
-                or "token" in str(client.last_error).lower()
-                or "merchant authority invalid" in str(client.last_error).lower()
+            is_auth_error = client.last_http_status in (401, 403) or client.last_code in (
+                3004, 1000002, 1000003, 1130001
             )
             if is_auth_error:
                 print(f"[WARN] Sesi Shopee ditolak (code: {client.last_code}, reason: '{client.last_error}') untuk '{username}', store_id={store_id}. Membersihkan cache dan mencoba satu pemulihan browser...")
@@ -349,20 +340,24 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     print(f"[-] Gagal menghapus session file: {del_err}")
 
                 invalidate_shopee_session({"username": master_user, "store_id": store_id})
+            should_refresh_browser = is_auth_error
+            if should_refresh_browser:
+                session_data = None
+                print(f"[PULL SESSION] API katalog menolak sesi secara eksplisit (code={client.last_code}, HTTP={client.last_http_status}); mencoba satu pemulihan browser untuk '{target_name}'.")
+                session_data = browser.get_session(
+                    username=username,
+                    password=password,
+                    headless=headless,
+                    close_browser=True,
+                    target_name=target_name,
+                    target_store_id=store_id,
+                    interactive=True,
+                    strict_entity_context=True,
+                    force_token_refresh=True,
+                )
             else:
-                print(f"[WARN] Penarikan katalog gagal (code: {client.last_code}, msg: '{client.last_error}'). Merefresh sesi via browser dengan target '{target_name}'...")
-
-            session_data = browser.get_session(
-                username=username,
-                password=password,
-                headless=headless,
-                close_browser=True,
-                target_name=target_name,
-                target_store_id=store_id,
-                interactive=True,
-                strict_entity_context=True,
-                force_token_refresh=True,
-            )
+                session_data = None
+                print(f"[PULL SESSION] Katalog gagal tanpa penolakan autentikasi eksplisit (code={client.last_code}, HTTP={client.last_http_status}); tidak melakukan relogin otomatis.")
 
             if session_data and store_id and str(session_data.get("shopee_tob_entity_id") or "").strip() != str(store_id).strip():
                 print(f"[PULL SESSION] Pemulihan menghasilkan entity yang tidak cocok; retry katalog dibatalkan untuk store_id={store_id}.")
@@ -392,15 +387,8 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     merchant_id=new_mid,
                     username=username
                 )
-                print(f"[*] Memvalidasi sesi hasil pemulihan untuk store_id={store_id}...")
-                retry_token_valid, _ = validate_shopee_token(tob_token, timeout=8)
-                if retry_token_valid:
-                    print(f"[*] Mencoba ulang menarik data menu ShopeeFood satu kali...")
-                    catalogs = client.get_store_dishes(store_id)
-                else:
-                    client.last_code = 1130001
-                    client.last_error = "token invalid setelah satu kali pemulihan"
-                    catalogs = []
+                print(f"[*] Mencoba ulang endpoint katalog satu kali untuk store_id={store_id}...")
+                catalogs = client.get_store_dishes(store_id)
                 if not catalogs and client.last_code in (1130014, 1130002):
                     rec_cats, rec_sid, rec_mid = _attempt_dishes_pull_recovery(
                         client=client,

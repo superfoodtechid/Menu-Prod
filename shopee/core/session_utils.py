@@ -338,7 +338,8 @@ def validate_shopee_token(tob_token: str, timeout: float = 2.5) -> tuple[bool, d
         resp = requests.post(url, headers=headers, json={}, timeout=timeout)
         if resp.status_code == 200:
             body = resp.json()
-            if body.get("code") == 0 and body.get("data"):
+            code = body.get("errorCode") if "errorCode" in body else body.get("code")
+            if code == 0 and body.get("data"):
                 return True, body.get("data") or {}
     except Exception as e:
         log.debug(f"Pemeriksaan cepat token Shopee gagal: {e}")
@@ -413,11 +414,15 @@ def get_fast_shopee_session(
     if not tob_token:
         return None
 
-    # 3. Validasi token via HTTP GetUserInfo
-    is_valid, user_data = validate_shopee_token(tob_token, timeout=timeout)
-    if not is_valid:
-        log.info(f"⚠️ [SESSION] Token tersimpan di {session_file.name} sudah kedaluwarsa. Memerlukan refresh via browser.")
-        return None
+    # PULL validates the candidate against the actual catalog endpoint. GetUserInfo
+    # can reject a usable partner token (or time out), so it must not gate this path.
+    if require_entity_match:
+        user_data = {}
+    else:
+        is_valid, user_data = validate_shopee_token(tob_token, timeout=timeout)
+        if not is_valid:
+            log.info(f"⚠️ [SESSION] Token tersimpan di {session_file.name} belum tervalidasi. Memerlukan refresh via browser.")
+            return None
 
     real_store_id = str(store_id) if (store_id and store_id != "-" and store_id.lower() != "nan") else ""
     if not real_store_id and user_data.get("store_id"):
@@ -427,7 +432,10 @@ def get_fast_shopee_session(
 
     real_merchant_id = str(user_data.get("merchantId") or raw_data.get("merchant_id") or "")
     if not real_merchant_id or (real_store_id and real_merchant_id == real_store_id):
-        resolved_mid = resolve_shopee_merchant_id(store_metadata, session_data=raw_data, tob_token=tob_token)
+        if require_entity_match:
+            _, resolved_mid = resolve_shopee_outlet_context(store_metadata, session_data=raw_data)
+        else:
+            resolved_mid = resolve_shopee_merchant_id(store_metadata, session_data=raw_data, tob_token=tob_token)
         if resolved_mid:
             real_merchant_id = resolved_mid
 

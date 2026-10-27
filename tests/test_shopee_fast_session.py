@@ -34,9 +34,6 @@ from core.browser import (
 class TestShopeeFastSession(unittest.TestCase):
     def setUp(self):
         _IN_MEMORY_SESSION_CACHE.clear()
-        validator_patch = patch("shopee.core.pull.validate_shopee_token", return_value=(True, {}))
-        validator_patch.start()
-        self.addCleanup(validator_patch.stop)
 
     def tearDown(self):
         _IN_MEMORY_SESSION_CACHE.clear()
@@ -216,6 +213,34 @@ class TestShopeeFastSession(unittest.TestCase):
 
     @patch("shopee.core.session_utils.validate_shopee_token")
     @patch("shopee.core.session_utils.resolve_shopee_session")
+    def test_fast_pull_session_uses_matching_entity_as_catalog_candidate(self, mock_resolve, mock_validate):
+        mock_path = MagicMock()
+        mock_path.exists.return_value = True
+        mock_path.name = "session_superfoodapp.json"
+        mock_path.read_text.return_value = json.dumps({
+            "username": "superfoodapp",
+            "shopee_tob_token": "candidate_token",
+            "shopee_tob_entity_id": "22459819",
+            "merchant_id": "11511947",
+            "extra_cookies": {},
+        })
+        mock_resolve.return_value = mock_path
+        mock_validate.return_value = (False, {})
+
+        result = get_fast_shopee_session(
+            {"username": "superfoodapp", "store_id": "22459819"},
+            require_entity_match=True,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["shopee_tob_token"], "candidate_token")
+        self.assertEqual(result["shopee_tob_entity_id"], "22459819")
+        self.assertEqual(result["merchant_id"], "11511947")
+        self.assertTrue(result["entity_verified"])
+        mock_validate.assert_not_called()
+
+    @patch("shopee.core.session_utils.validate_shopee_token")
+    @patch("shopee.core.session_utils.resolve_shopee_session")
     def test_get_fast_shopee_session_expired(self, mock_resolve, mock_validate):
         mock_path = MagicMock()
         mock_path.exists.return_value = True
@@ -367,7 +392,7 @@ class TestShopeeFastSession(unittest.TestCase):
 
         self.assertEqual(res, [])
         self.assertEqual(client.last_code, 1130002)
-        self.assertEqual(client.last_error, "need to select a store")
+        self.assertEqual(client.last_error, "Catalog API error code 1130002.")
 
     def test_resolve_shopee_merchant_id_from_cache(self):
         # 1. By store_id (Ayam Geprek Cinta)

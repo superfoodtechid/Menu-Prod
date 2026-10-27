@@ -672,6 +672,20 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     from menu_core.database import normalize_offline_item_name
     photo_sync_meta = None
 
+    job_id = store_metadata.get('job_id')
+    if job_id:
+        try:
+            from menu_core.database import SessionLocal, Job
+            import uuid
+            with SessionLocal() as db_sess:
+                db_j = db_sess.query(Job).filter(Job.id == uuid.UUID(str(job_id))).first()
+                if db_j and db_j.status == "RUNNING":
+                    db_j.progress_pct = 75
+                    db_j.current_step = "Menyusun dan menyimpan file Excel C5..."
+                    db_sess.commit()
+        except Exception:
+            pass
+
     try:
         wb = openpyxl.load_workbook(template_path)
         sheet_item = wb['Item']
