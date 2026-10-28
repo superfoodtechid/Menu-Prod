@@ -1192,13 +1192,13 @@ def login_outlet(outlet_info, proxy_config=None, disable_cache=False):
                         current_url = page.url
                         if "/menu-items" in current_url:
                             print("   🤖 Halaman sudah berada di Menu Items. Menunggu capture...")
-                    elif store_id_clean:
-                        print(f"   🤖 Langsung navigasi ke halaman menu outlet {store_id_clean}...")
-                        try:
-                            safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/menu-items", wait_until="domcontentloaded", timeout=25000)
-                        except Exception as nav_direct_err:
-                            print(f"   ⚠️ Navigasi langsung /menu-items timeout ({nav_direct_err}). Mencoba fallback via /gofood...")
-                            safe_goto_with_retry(page, "https://portal.gofoodmerchant.co.id/gofood", wait_until="domcontentloaded", timeout=25000)
+                        elif store_id_clean:
+                            print(f"   🤖 Langsung navigasi ke halaman menu outlet {store_id_clean}...")
+                            try:
+                                safe_goto_with_retry(page, f"https://portal.gofoodmerchant.co.id/gofood/{store_id_clean}/menu-items", wait_until="domcontentloaded", timeout=25000)
+                            except Exception as nav_direct_err:
+                                print(f"   ⚠️ Navigasi langsung /menu-items timeout ({nav_direct_err}). Mencoba fallback via /gofood...")
+                                safe_goto_with_retry(page, "https://portal.gofoodmerchant.co.id/gofood", wait_until="domcontentloaded", timeout=25000)
                     else:
                         print("   🤖 Mengklik tab Menu di sidebar...")
                         tutup_semua_popup(page)

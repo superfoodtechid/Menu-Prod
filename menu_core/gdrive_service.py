@@ -1082,7 +1082,12 @@ def prepare_photo_folder(
     workbook: Optional[Any] = None,
     skip_excel_update: bool = False,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
-    """Create/resolve the photo folder and record its URL without uploading photos."""
+    """Create/resolve the photo folder and record its URL without uploading photos.
+
+    Folder preparation stays in the pull job so the URL is present in the
+    source workbook before C5 files are combined. Photo file uploads are
+    started separately after the combined workbook is ready.
+    """
     if not timestamp_str:
         timestamp_str = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y-%m-%d %H:%M")
     photo_tasks = _extract_photo_tasks(dishes)

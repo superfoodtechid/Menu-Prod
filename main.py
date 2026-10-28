@@ -853,6 +853,70 @@ PLATFORM_LOCKS = {
 # to prevent server memory exhaustion (OOM crashes)
 GLOBAL_BROWSER_SEMAPHORE = threading.BoundedSemaphore(value=2)
 
+
+def run_gofood_extraction_isolated(job_id, store_metadata, output_dir, db):
+    """Run the GoFood pull outside Uvicorn's worker thread with a hard timeout."""
+    import multiprocessing
+    import queue
+    import time
+
+    from menu_core.gofood import run_gofood_extraction_worker
+    from menu_core.job_control import is_job_cancelled
+
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=run_gofood_extraction_worker,
+        args=(store_metadata, output_dir, result_queue),
+        name=f"gofood-pull-{job_id}",
+    )
+    timeout_seconds = max(60, int(os.getenv("GOFOOD_EXTRACTION_TIMEOUT_SECONDS", "900")))
+    started = time.monotonic()
+    last_heartbeat = started
+    process.start()
+
+    try:
+        while True:
+            try:
+                kind, payload = result_queue.get(timeout=0.5)
+                process.join(timeout=5)
+                if kind == "error":
+                    raise RuntimeError(payload)
+                return payload
+            except queue.Empty:
+                pass
+
+            now = time.monotonic()
+            if now - last_heartbeat >= 5:
+                db.expire_all()
+                current_job = db.query(Job).filter(Job.id == job_id).first()
+                if current_job and current_job.status == "RUNNING":
+                    payload_data = dict(current_job.payload or {})
+                    payload_data["heartbeat_at"] = datetime.utcnow().isoformat()
+                    current_job.payload = payload_data
+                    db.commit()
+                last_heartbeat = now
+
+            if is_job_cancelled(job_id, db):
+                raise RuntimeError("Dibatalkan oleh pengguna")
+
+            if not process.is_alive():
+                raise RuntimeError(f"Worker GoFood berhenti tanpa hasil (exit code {process.exitcode}).")
+
+            if now - started >= timeout_seconds:
+                raise TimeoutError(
+                    f"Penarikan GoFood melewati batas waktu {timeout_seconds} detik."
+                )
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+        result_queue.close()
+        result_queue.join_thread()
+
 def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
     # Setup job-specific session context
     from menu_core.database import SessionLocal
@@ -1016,6 +1080,8 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "nama_resto_final": outlet.nama_resto_final,
                 "brand": outlet.brand,
                 "username": account.username,
+                "email": account.username,
+                "phone": getattr(account, "phone", None),
                 "password": account.password
             }
             
@@ -1023,8 +1089,8 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             job.current_step = "Meluncurkan browser GoFood & memproses penarikan..."
             db.commit()
             
-            from menu_core.gofood import extract_gofood_menu
-            success, result = extract_gofood_menu(store_metadata, str(exports_dir))
+            result = run_gofood_extraction_isolated(job_id, store_metadata, str(exports_dir), db)
+            success, result = result
             
             if not success:
                 raise Exception(f"GoFood extraction failed: {result}")
@@ -1053,7 +1119,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             job.completed_at = datetime.utcnow()
             outlet.last_sync_at = datetime.utcnow()
             db.commit()
-            
+
         elif job.platform == "grab":
             job.progress_pct = 30
             job.current_step = "Menyiapkan parameter penarikan GrabFood..."
