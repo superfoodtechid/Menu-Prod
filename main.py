@@ -917,6 +917,77 @@ def run_gofood_extraction_isolated(job_id, store_metadata, output_dir, db):
         result_queue.close()
         result_queue.join_thread()
 
+
+def run_platform_extraction_isolated(job_id, platform, store_metadata, output_dir, db):
+    """Run Grab/Shopee extraction outside the Uvicorn worker with a hard timeout."""
+    import multiprocessing
+    import queue
+    import time
+    from menu_core.job_control import is_job_cancelled
+
+    if platform == "grab":
+        from menu_core.grab import run_grab_extraction_worker
+        worker = run_grab_extraction_worker
+    elif platform == "shopee":
+        from shopee.core.pull import run_shopee_extraction_worker
+        worker = run_shopee_extraction_worker
+    else:
+        raise ValueError(f"Unsupported isolated extraction platform: {platform}")
+
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=worker,
+        args=(store_metadata, output_dir, result_queue),
+        name=f"{platform}-pull-{job_id}",
+    )
+    timeout_seconds = max(60, int(os.getenv("PULL_EXTRACTION_TIMEOUT_SECONDS", "900")))
+    started = time.monotonic()
+    last_heartbeat = started
+    process.start()
+
+    try:
+        while True:
+            try:
+                kind, payload = result_queue.get(timeout=0.5)
+                process.join(timeout=5)
+                if kind == "error":
+                    raise RuntimeError(payload)
+                return payload
+            except queue.Empty:
+                pass
+
+            now = time.monotonic()
+            if now - last_heartbeat >= 5:
+                db.expire_all()
+                current_job = db.query(Job).filter(Job.id == job_id).first()
+                if current_job and current_job.status == "RUNNING":
+                    payload_data = dict(current_job.payload or {})
+                    payload_data["heartbeat_at"] = datetime.utcnow().isoformat()
+                    current_job.payload = payload_data
+                    db.commit()
+                last_heartbeat = now
+
+            if is_job_cancelled(job_id, db):
+                raise RuntimeError("Dibatalkan oleh pengguna")
+            if not process.is_alive():
+                raise RuntimeError(
+                    f"Worker {platform} berhenti tanpa hasil (exit code {process.exitcode})."
+                )
+            if now - started >= timeout_seconds:
+                raise TimeoutError(
+                    f"Penarikan {platform} melewati batas waktu {timeout_seconds} detik."
+                )
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+        result_queue.close()
+        result_queue.join_thread()
+
 def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
     # Setup job-specific session context
     from menu_core.database import SessionLocal
@@ -1024,7 +1095,12 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             # This is useful for the allvbadmin profile, which may require an
             # interactive session or visual verification during a pull.
             is_headless = (os.getenv("HEADLESS_SHOPEE", "false").strip().lower() in ("true", "1", "yes"))
-            success, result = extract_shopee_menu(store_metadata, str(exports_dir), headless=is_headless)
+            store_metadata["headless"] = is_headless
+            worker_payload = run_platform_extraction_isolated(
+                job_id, "shopee", store_metadata, str(exports_dir), db
+            )
+            store_metadata.update(worker_payload.get("store_metadata") or {})
+            success, result = worker_payload["extraction"]
             
             if not success:
                 raise Exception(f"Shopee extraction failed: {result}")
@@ -1142,8 +1218,11 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             job.current_step = "Meluncurkan browser GrabFood & memproses penarikan..."
             db.commit()
             
-            from menu_core.grab import extract_grab_menu
-            success, result = extract_grab_menu(store_metadata, str(exports_dir))
+            worker_payload = run_platform_extraction_isolated(
+                job_id, "grab", store_metadata, str(exports_dir), db
+            )
+            store_metadata.update(worker_payload.get("store_metadata") or {})
+            success, result = worker_payload["extraction"]
             
             if not success:
                 raise Exception(f"Grab extraction failed: {result}")

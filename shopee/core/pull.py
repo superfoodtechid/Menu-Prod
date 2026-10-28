@@ -862,3 +862,18 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         }
     except Exception as e:
         return False, f"Error selama ekstraksi menu: {e}"
+
+
+def run_shopee_extraction_worker(store_metadata: dict, output_dir: str, result_queue) -> None:
+    """Run Shopee extraction in a killable worker process."""
+    try:
+        headless = bool(store_metadata.get("headless", True))
+        result_queue.put((
+            "result",
+            {
+                "extraction": extract_shopee_menu(store_metadata, output_dir, headless=headless),
+                "store_metadata": store_metadata,
+            },
+        ))
+    except BaseException as exc:
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
