@@ -5214,6 +5214,37 @@ async def parse_c5_endpoint(
                 drive_photo_baseline_cache[sid_key] = {}
         return drive_photo_baseline_cache[sid_key]
 
+    # ── Folder Link / Photo Improvement Resolution ──
+    from menu_core.c5_template_helper import read_folder_link_entries
+    folder_entries = read_folder_link_entries(wb)
+    folder_link_by_sid = {}
+    default_folder_link = ""
+    for fl_label, fl_url in folder_entries:
+        if is_drive_folder_link(fl_url):
+            if not default_folder_link:
+                default_folder_link = fl_url
+            for fl_part in str(fl_label or "").split("|"):
+                part_clean = fl_part.strip()
+                if part_clean:
+                    folder_link_by_sid[part_clean] = fl_url
+
+    folder_col = resolve_col(['Folder Link', 'Link Folder', 'Folder Foto', 'Link Folder Foto', 'Drive Folder', 'Link Drive', 'Google Drive Folder', 'Folder'])
+    design_imp_col = resolve_col(['Design Improvement', 'Photo Improvement'])
+
+    for r in rows[1:]:
+        if not r or all(v is None for v in r) or is_c5_reserved_row(r):
+            continue
+        r_sid = get_val(r, sid_col) or "STORE-DEFAULT"
+        r_photo = get_val(r, photo_col)
+        r_design = get_val(r, design_imp_col) if design_imp_col else ""
+        r_folder = get_val(r, folder_col) if folder_col else ""
+        for cand in (r_photo, r_design, r_folder):
+            if is_drive_folder_link(cand):
+                folder_link_by_sid[r_sid] = cand
+                if not default_folder_link:
+                    default_folder_link = cand
+                break
+
     c5_explicit_ids_by_sid = {}
     for r in rows[1:]:
         if not r or all(v is None for v in r) or is_c5_reserved_row(r):
@@ -5247,17 +5278,27 @@ async def parse_c5_endpoint(
         item_id = get_val(row, item_id_col)
         item_name = get_val(row, item_col)
         photo_link_raw = get_val(row, photo_col)
-        design_imp = get_val(row, resolve_col(['Design Improvement', 'Photo Improvement'])) if resolve_col(['Design Improvement', 'Photo Improvement']) else ""
+        design_imp = get_val(row, design_imp_col) if design_imp_col else ""
+        folder_col_val = get_val(row, folder_col) if folder_col else ""
+
+        explicit_folder = (
+            photo_link_raw if is_drive_folder_link(photo_link_raw)
+            else (design_imp if is_drive_folder_link(design_imp)
+            else (folder_col_val if is_drive_folder_link(folder_col_val) else ""))
+        )
         drive_folder_link = (
-            photo_link_raw
-            if is_drive_folder_link(photo_link_raw)
-            else (design_imp if is_drive_folder_link(design_imp) else "")
+            explicit_folder
+            or folder_link_by_sid.get(sid)
+            or folder_link_by_sid.get(outlet_name)
+            or default_folder_link
         )
         drive_image_requested = bool(drive_folder_link)
 
         # A folder URL is a search location, never an image URL for the push API.
         if design_imp and not is_drive_folder_link(design_imp) and not drive_image_requested and design_imp.startswith(("http://", "https://")):
             photo_link = design_imp
+        elif folder_col_val and not is_drive_folder_link(folder_col_val) and folder_col_val.startswith(("http://", "https://")):
+            photo_link = folder_col_val
         else:
             photo_link = "" if is_drive_folder_link(photo_link_raw) else photo_link_raw
 
