@@ -13,17 +13,25 @@ from menu_core.c5_template_helper import is_c5_reserved_row
 logger = logging.getLogger("GrabC5Push")
 
 
-def download_and_encode_image(photo_link: str) -> tuple[str, str]:
+def download_and_encode_image(photo_link: str, item_name: str = "") -> tuple[str, str]:
     """Download image from HTTP URL or Google Drive link, returning base64 data and image type."""
     target_url = str(photo_link or "").strip()
     if not target_url.startswith(("http://", "https://")):
         raise ValueError(f"URL gambar tidak valid: '{photo_link}'")
 
     if "drive.google.com" in target_url.casefold():
+        if "/folders/" in target_url or ("id=" in target_url and "folders" in target_url):
+            from menu_core.gdrive_service import resolve_drive_folder_image
+            resolved = resolve_drive_folder_image(target_url, item_name)
+            if resolved:
+                target_url = resolved
+            else:
+                raise ValueError(f"Foto untuk '{item_name or 'item'}' tidak ditemukan di folder Google Drive: {photo_link}")
         m = re.search(r"/d/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", target_url)
         if m:
             file_id = m.group(1) or m.group(2)
             target_url = f"https://lh3.googleusercontent.com/d/{file_id}=s0"
+
 
     resp = requests.get(target_url, timeout=30)
     if not resp.ok or not resp.content:
@@ -771,14 +779,15 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     if is_new_item or "PHOTO_CHANGE" in changes:
                         final_photo_url = ""
                         if photo_link:
+                            photo_cache_key = f"{photo_link}::{new_name or item_name}" if ("/folders/" in photo_link or ("drive.google.com" in photo_link and "folders" in photo_link)) else photo_link
                             if photo_link.startswith("https://food-cms.grab.com/"):
                                 final_photo_url = photo_link
-                            elif photo_link in uploaded_photo_cache:
-                                final_photo_url = uploaded_photo_cache[photo_link]
+                            elif photo_cache_key in uploaded_photo_cache:
+                                final_photo_url = uploaded_photo_cache[photo_cache_key]
                             else:
                                 logger.info(f"Mengunggah foto untuk '{new_name or item_name}' ke Grab food-cms...")
                                 try:
-                                    b64_data, p_type = download_and_encode_image(photo_link)
+                                    b64_data, p_type = download_and_encode_image(photo_link, item_name=new_name or item_name)
                                     upload_res, upload_err = await call_with_auth_recovery(
                                         lambda: api.upload_item_photo(
                                             group_id,
@@ -793,7 +802,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                                     if upload_err or not upload_res:
                                         raise ValueError(f"Gagal mengunggah foto ke Grab: {upload_err}")
                                     final_photo_url = upload_res
-                                    uploaded_photo_cache[photo_link] = final_photo_url
+                                    uploaded_photo_cache[photo_cache_key] = final_photo_url
                                     logger.info(f"Berhasil mengunggah foto Grab: {final_photo_url}")
                                 except Exception as e_up:
                                     logger.warning(f"Gagal memproses foto untuk '{new_name or item_name}': {e_up}")

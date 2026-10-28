@@ -47,17 +47,25 @@ def calculate_price_steps(old_price: float, new_price: float, max_jump_ratio: fl
     return [new_price]
 
 
-def download_image_bytes(photo_link: str) -> tuple[bytes, str, str]:
+def download_image_bytes(photo_link: str, item_name: str = "") -> tuple[bytes, str, str]:
     """Unduh gambar dari URL web atau Google Drive, mengembalikan raw bytes, nama file, dan mime type."""
     target_url = str(photo_link or "").strip()
     if not target_url.startswith(("http://", "https://")):
         raise ValueError(f"URL gambar tidak valid: '{photo_link}'")
 
     if "drive.google.com" in target_url.casefold():
+        if "/folders/" in target_url or ("id=" in target_url and "folders" in target_url):
+            from menu_core.gdrive_service import resolve_drive_folder_image
+            resolved = resolve_drive_folder_image(target_url, item_name)
+            if resolved:
+                target_url = resolved
+            else:
+                raise ValueError(f"Foto untuk '{item_name or 'item'}' tidak ditemukan di folder Google Drive: {photo_link}")
         m = re.search(r"/d/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", target_url)
         if m:
             file_id = m.group(1) or m.group(2)
             target_url = f"https://lh3.googleusercontent.com/d/{file_id}=s0"
+
 
     resp = requests.get(target_url, timeout=30)
     if not resp.ok or not resp.content:
@@ -96,35 +104,36 @@ def is_valid_shopee_image_hash(val: str) -> bool:
     return bool(re.match(r"^[a-z]{2}-[a-zA-Z0-9_-]{10,}$", val) or re.match(r"^[a-fA-F0-9]{32}$", val))
 
 
-def resolve_shopee_photo(client: ShopeeModifyClient, photo_link: str, photo_cache: dict) -> str | None:
+def resolve_shopee_photo(client: ShopeeModifyClient, photo_link: str, photo_cache: dict, item_name: str = "") -> str | None:
     """Mengubah photo_link menjadi hash gambar Shopee, mengunggah ke MMS jika diperlukan."""
     raw_link = str(photo_link or "").strip()
     if not raw_link:
         return ""
 
-    if raw_link in photo_cache:
-        return photo_cache[raw_link]
+    cache_key = f"{raw_link}::{item_name}" if ("/folders/" in raw_link or ("drive.google.com" in raw_link and "folders" in raw_link)) else raw_link
+    if cache_key in photo_cache:
+        return photo_cache[cache_key]
 
     if ("susercontent.com/file/" in raw_link) or ("shopee.co.id/file/" in raw_link):
         pic_hash = raw_link.rstrip("/").split("/")[-1].split("?")[0]
         if pic_hash:
-            photo_cache[raw_link] = pic_hash
+            photo_cache[cache_key] = pic_hash
             return pic_hash
 
     if is_valid_shopee_image_hash(raw_link):
-        photo_cache[raw_link] = raw_link
+        photo_cache[cache_key] = raw_link
         return raw_link
 
     if not raw_link.startswith(("http://", "https://")):
         logger.warning(f"Nilai foto '{raw_link}' bukan URL maupun hash Shopee yang valid. Dilewati agar tidak merusak data gambar.")
         raise ValueError(f"Nilai foto '{raw_link}' tidak valid (harus berupa URL atau hash gambar Shopee).")
 
-    img_data, filename, mime_type = download_image_bytes(raw_link)
+    img_data, filename, mime_type = download_image_bytes(raw_link, item_name=item_name)
     uploaded_hash = client.upload_image_bytes(img_data=img_data, filename=filename, content_type=mime_type)
     if not uploaded_hash:
         raise ValueError(f"Upload foto ke Shopee MMS gagal: {client.last_error or 'Gagal tanpa pesan error'}")
 
-    photo_cache[raw_link] = uploaded_hash
+    photo_cache[cache_key] = uploaded_hash
     return uploaded_hash
 
 
@@ -192,7 +201,8 @@ def _process_photo_fallback_queue(
 
             temp_path = None
             try:
-                img_data, filename, _ = download_image_bytes(photo_link)
+                item_name_for_photo = entry.get("target_name") or (upd.get("item_name") if upd else "") or dish_id
+                img_data, filename, _ = download_image_bytes(photo_link, item_name=item_name_for_photo)
                 ext = Path(filename).suffix or ".jpg"
                 with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
                     tf.write(img_data)
@@ -454,7 +464,7 @@ def push_c5_shopee_for_merchant(
             new_item_photo_fallback = False
             if photo_link and want_photo:
                 try:
-                    target_pic = resolve_shopee_photo(client, photo_link, photo_cache) or ""
+                    target_pic = resolve_shopee_photo(client, photo_link, photo_cache, item_name=new_name or item_name) or ""
                     res_item["new_photo"] = target_pic
                 except Exception as ex_photo:
                     logger.warning(f"Gagal memproses foto item baru '{new_name or item_name}': {ex_photo}")
@@ -579,7 +589,7 @@ def push_c5_shopee_for_merchant(
         photo_fallback_needed = False
         if want_photo and photo_link and photo_link != target_pic:
             try:
-                resolved_pic = resolve_shopee_photo(client, photo_link, photo_cache)
+                resolved_pic = resolve_shopee_photo(client, photo_link, photo_cache, item_name=target_name)
                 if resolved_pic:
                     target_pic = resolved_pic
                     res_item["new_photo"] = target_pic
