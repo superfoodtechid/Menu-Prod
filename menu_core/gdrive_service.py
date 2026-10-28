@@ -1303,3 +1303,83 @@ def start_deferred_photo_sync(job_id: str) -> bool:
     except Exception as exc:
         logger.warning("Could not start deferred photo sync for job %s: %s", job_id, exc)
         return False
+
+
+_DRIVE_FOLDER_IMAGE_INDEX: Dict[str, Dict[str, str]] = {}
+_DRIVE_FOLDER_INDEX_LOCK = threading.Lock()
+
+
+def resolve_drive_folder_image(folder_url: str, item_name: str) -> Optional[str]:
+    """Find the first image in a recursively nested Drive item folder matching item_name.
+
+    Returns direct image URL (https://lh3.googleusercontent.com/d/{file_id}=s0) or None.
+    """
+    root_url = folder_url or os.getenv("MENU_FOTO_GDRIVE", "")
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", str(root_url))
+    raw_item = str(item_name or "").strip()
+    wanted_name = re.sub(r"[^a-z0-9]+", " ", raw_item.casefold()).strip()
+    if not match or not wanted_name:
+        return None
+    parent_id = match.group(1) or match.group(2)
+
+    api_url = "https://www.googleapis.com/drive/v3/files"
+    env_vals = dotenv_values()
+    api_key = os.getenv("GOOGLE_DRIVE_API_KEY") or env_vals.get("GOOGLE_DRIVE_API_KEY")
+
+    def list_children(parent):
+        params = {
+            "q": f"'{parent}' in parents and trashed = false",
+            "fields": "files(id,name,mimeType)",
+            "pageSize": 1000,
+            "orderBy": "name",
+        }
+        if api_key:
+            params["key"] = api_key
+        response = requests.get(api_url, params=params, timeout=20)
+        response.raise_for_status()
+        return response.json().get("files", [])
+
+    try:
+        with _DRIVE_FOLDER_INDEX_LOCK:
+            if parent_id in _DRIVE_FOLDER_IMAGE_INDEX:
+                image_index = _DRIVE_FOLDER_IMAGE_INDEX[parent_id]
+            else:
+                image_index = {}
+                queue = [(parent_id, 0)]
+                visited = set()
+                while queue:
+                    current_id, depth = queue.pop(0)
+                    if current_id in visited or depth > 4:
+                        continue
+                    visited.add(current_id)
+                    children = list_children(current_id)
+                    for child in children:
+                        if str(child.get("mimeType", "")).startswith("image/"):
+                            image_name = re.sub(r"[^a-z0-9]+", " ", str(child.get("name", "")).rsplit(".", 1)[0].casefold()).strip()
+                            image_index.setdefault(image_name, f"https://lh3.googleusercontent.com/d/{child['id']}=s0")
+                            continue
+                        if child.get("mimeType") != "application/vnd.google-apps.folder":
+                            continue
+                        child_name = re.sub(r"[^a-z0-9]+", " ", str(child.get("name", "")).casefold()).strip()
+                        if child_name == wanted_name:
+                            images = [item for item in list_children(child["id"])
+                                      if str(item.get("mimeType", "")).startswith("image/")]
+                            if images:
+                                image_index.setdefault(wanted_name, f"https://lh3.googleusercontent.com/d/{images[0]['id']}=s0")
+                        queue.append((child["id"], depth + 1))
+                _DRIVE_FOLDER_IMAGE_INDEX[parent_id] = image_index
+
+        # 1. Exact match
+        if wanted_name in image_index:
+            return image_index[wanted_name]
+
+        # 2. Substring / partial word match fallback
+        for k, v in image_index.items():
+            if len(k) >= 4 and (k == wanted_name or k in wanted_name or wanted_name in k):
+                return v
+
+        return None
+    except Exception as exc:
+        logger.warning("Gagal resolve gambar Drive untuk '%s': %s", item_name, exc)
+        return None
+

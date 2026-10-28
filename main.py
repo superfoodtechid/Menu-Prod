@@ -4394,68 +4394,11 @@ def _download_gdrive_or_gsheet_bytes(url: str, timeout: int = 30) -> tuple[bytes
         raise HTTPException(status_code=400, detail=f"Terjadi kesalahan saat mengunduh Google Drive: {str(e)}")
 
 
-_DRIVE_FOLDER_IMAGE_INDEX: Dict[str, Dict[str, str]] = {}
+from menu_core.gdrive_service import (
+    _DRIVE_FOLDER_IMAGE_INDEX,
+    resolve_drive_folder_image as _resolve_drive_folder_image,
+)
 
-
-def _resolve_drive_folder_image(folder_url: str, item_name: str) -> Optional[str]:
-    """Find the first image in a recursively nested Drive item folder."""
-    import re
-    import requests
-
-    root_url = folder_url or os.getenv("MENU_FOTO_GDRIVE", "")
-    match = re.search(r"/folders/([a-zA-Z0-9_-]+)|[?&]id=([a-zA-Z0-9_-]+)", str(root_url))
-    wanted_name = re.sub(r"[^a-z0-9]+", " ", str(item_name or "").casefold()).strip()
-    if not match or not wanted_name:
-        return None
-    parent_id = match.group(1) or match.group(2)
-    api_url = "https://www.googleapis.com/drive/v3/files"
-    api_key = os.getenv("GOOGLE_DRIVE_API_KEY")
-
-    def list_children(parent):
-        params = {
-            "q": f"'{parent}' in parents and trashed = false",
-            "fields": "files(id,name,mimeType)",
-            "pageSize": 1000,
-            "orderBy": "name",
-        }
-        if api_key:
-            params["key"] = api_key
-        response = requests.get(api_url, params=params, timeout=20)
-        response.raise_for_status()
-        return response.json().get("files", [])
-
-    try:
-        if parent_id in _DRIVE_FOLDER_IMAGE_INDEX:
-            return _DRIVE_FOLDER_IMAGE_INDEX[parent_id].get(wanted_name)
-
-        image_index = {}
-        queue = [(parent_id, 0)]
-        visited = set()
-        while queue:
-            current_id, depth = queue.pop(0)
-            if current_id in visited or depth > 4:
-                continue
-            visited.add(current_id)
-            children = list_children(current_id)
-            for child in children:
-                if str(child.get("mimeType", "")).startswith("image/"):
-                    image_name = re.sub(r"[^a-z0-9]+", " ", str(child.get("name", "")).rsplit(".", 1)[0].casefold()).strip()
-                    image_index.setdefault(image_name, f"https://lh3.googleusercontent.com/d/{child['id']}=s500-c")
-                    continue
-                if child.get("mimeType") != "application/vnd.google-apps.folder":
-                    continue
-                child_name = re.sub(r"[^a-z0-9]+", " ", str(child.get("name", "")).casefold()).strip()
-                if child_name == wanted_name:
-                    images = [item for item in list_children(child["id"])
-                              if str(item.get("mimeType", "")).startswith("image/")]
-                    if images:
-                        image_index.setdefault(wanted_name, f"https://lh3.googleusercontent.com/d/{images[0]['id']}=s500-c")
-                queue.append((child["id"], depth + 1))
-        _DRIVE_FOLDER_IMAGE_INDEX[parent_id] = image_index
-        return image_index.get(wanted_name)
-    except Exception as exc:
-        logger.warning("Gagal resolve gambar Drive untuk '%s': %s", item_name, exc)
-        return None
 
 
 @app.post("/api/jobs/parse-c5", status_code=status.HTTP_202_ACCEPTED)
