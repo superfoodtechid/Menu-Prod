@@ -454,8 +454,96 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
 
             uploaded_photo_cache = {}
 
+            # C5 is authoritative for this push. Process deleted items first
+            # so their old categories can be removed before new data is added.
+            deleted_item_ids = set()
+            preserved_category_ids = set()
+            category_cleanup_done = False
+            delete_updates = []
+            active_updates = []
+            for candidate in updates:
+                if is_c5_reserved_row([
+                    candidate.get("item_name"),
+                    candidate.get("item_name_new"),
+                    candidate.get("category"),
+                    candidate.get("item_id"),
+                ]):
+                    continue
+                candidate_changes = set(candidate.get("changes") or candidate.get("change_types") or [])
+                if "DELETE_ITEM" in candidate_changes or candidate.get("is_deleted_item"):
+                    delete_updates.append(candidate)
+                else:
+                    active_updates.append(candidate)
+
+            processing_updates = delete_updates + active_updates
+            c5_category_keys = {
+                (candidate.get("category") or "").strip().casefold()
+                for candidate in active_updates
+                if (candidate.get("category") or "").strip()
+            }
+            c5_category_keys.update(
+                (category_name or "").strip().casefold()
+                for candidate in active_updates
+                for category_name in (candidate.get("c5_categories") or [])
+                if (category_name or "").strip()
+            )
+            c5_category_ids = {
+                str(candidate.get("category_id")).strip()
+                for candidate in active_updates
+                if str(candidate.get("category_id") or "").strip()
+            }
+
+            async def cleanup_missing_categories():
+                nonlocal category_cleanup_done
+                if category_cleanup_done:
+                    return
+                category_cleanup_done = True
+
+                for category in list(categories):
+                    category_id = str(category.get("categoryID") or category.get("id") or "").strip()
+                    category_name = (category.get("name") or "").strip()
+                    category_key = category_name.casefold()
+                    if not category_id or category_key in c5_category_keys or category_id in c5_category_ids:
+                        continue
+
+                    category_items = category.get("items") or category.get("menuItems") or []
+                    remaining_items = [
+                        item for item in category_items
+                        if str(item.get("itemID") or item.get("id") or "").strip() not in deleted_item_ids
+                    ]
+                    if remaining_items:
+                        preserved_category_ids.add(category_id)
+                        logger.warning(
+                            "⚠️ [Grab C5 Push] Kategori '%s' tidak dihapus karena masih memiliki %s item "
+                            "yang tidak ditandai hilang di C5.",
+                            category_name,
+                            len(remaining_items),
+                        )
+                        continue
+
+                    ok_category, category_error = await call_with_auth_recovery(
+                        lambda cid=category_id: api.delete_category(group_id, target_sid, cid),
+                        "delete category",
+                    )
+                    if not ok_category:
+                        preserved_category_ids.add(category_id)
+                        logger.warning(
+                            "⚠️ [Grab C5 Push] Gagal menghapus kategori '%s' (%s): %s",
+                            category_name,
+                            category_id,
+                            category_error,
+                        )
+                        continue
+
+                    logger.info("🗑️ [Grab C5 Push] Berhasil menghapus kategori '%s' (ID: %s)", category_name, category_id)
+                    categories.remove(category)
+                    cat_obj_map.pop(category.get("categoryID") or category.get("id"), None)
+                    for mapped_name, mapped_id in list(cat_map.items()):
+                        if str(mapped_id) == category_id:
+                            cat_map.pop(mapped_name, None)
+
             # Process each item update
-            for idx, upd in enumerate(updates):
+            for idx, upd in enumerate(processing_updates):
                 if is_c5_reserved_row([upd.get("item_name"), upd.get("item_name_new"), upd.get("category"), upd.get("item_id")]):
                     continue
                 item_id = str(upd.get("item_id") or "").strip()
@@ -547,6 +635,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                                 res_item["status"] = "FAILED"
                                 res_item["error"] = f"Gagal hapus item: {err_del}"
                             else:
+                                deleted_item_ids.add(item_id)
                                 logger.info(f"🗑️ [Grab C5 Push] Berhasil menghapus item '{item_name}' (ID: {item_id})")
                         else:
                             res_item["status"] = "FAILED"
@@ -555,6 +644,9 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         if item_result_cb:
                             item_result_cb(upd, res_item["status"], res_item.get("error"), applied=res_item)
                         continue
+
+                    # Complete item/category cleanup before the first create or update.
+                    await cleanup_missing_categories()
 
                     # Validate character length limits (Name <= 60, Category <= 80, Description <= 250)
                     target_name_check = (new_name or item_name or "").strip()
@@ -880,6 +972,9 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     except Exception:
                         pass
 
+            # A C5 containing only deleted items still needs category cleanup.
+            await cleanup_missing_categories()
+
             # ── 1. Reorder Categories via PUT /food/merchant/categories-sort ──
             try:
                 # Build lookup helpers for resolving category IDs:
@@ -891,7 +986,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     valid_grab_cat_ids.add(str(cid))
 
                 c5_name_to_cid = {}
-                for upd in updates:
+                for upd in active_updates:
                     c_name = (upd.get("category") or "").strip().casefold()
                     c_id = str(upd.get("category_id") or "").strip()
                     if c_name and c_id and c_id in valid_grab_cat_ids and c_name not in c5_name_to_cid:
@@ -899,7 +994,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
 
                 ordered_c5_cat_names = []
                 category_weights = {}
-                for upd in updates:
+                for upd in active_updates:
                     for c_name in (upd.get("c5_categories") or []):
                         if c_name and c_name not in ordered_c5_cat_names:
                             ordered_c5_cat_names.append(c_name)
@@ -916,9 +1011,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     ordered_c5_cat_names = [x[0] for x in sorted_c]
 
                 if not ordered_c5_cat_names:
-                    for upd in updates:
-                        if "DELETE_ITEM" in (upd.get("changes") or upd.get("change_types") or []):
-                            continue
+                    for upd in active_updates:
                         c_name = (upd.get("category") or "").strip()
                         if c_name and c_name not in ordered_c5_cat_names:
                             ordered_c5_cat_names.append(c_name)
@@ -935,15 +1028,15 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                             target_cat_ids.append(str(cid))
                             seen_cat_ids.add(str(cid))
 
-                    # Append any remaining existing categories from Grab not mentioned in C5.
-                    # In Grab, higher sortOrder is at the top, so descending order reflects current top-to-bottom.
+                    # Keep only categories that C5 still references, plus categories
+                    # whose deletion was safely skipped or failed.
                     existing_sorted_cats = sorted(categories, key=lambda c: int(c.get("sortOrder") or 0), reverse=True)
                     current_cat_ids = []
                     for c in existing_sorted_cats:
                         cid = str(c.get("categoryID") or c.get("id") or "")
                         if cid:
                             current_cat_ids.append(cid)
-                            if cid not in seen_cat_ids:
+                            if cid in preserved_category_ids and cid not in seen_cat_ids:
                                 target_cat_ids.append(cid)
                                 seen_cat_ids.add(cid)
 
@@ -970,7 +1063,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
             # ── 2. Reorder Items within each Category via PUT /food/merchant/items-sort ──
             try:
                 target_cat_keys = set()
-                for upd in updates:
+                for upd in active_updates:
                     c_name = (upd.get("category") or "").strip()
                     if c_name:
                         target_cat_keys.add(c_name.casefold())
@@ -981,7 +1074,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         continue
 
                     c5_items_in_cat = [
-                        upd for upd in updates
+                        upd for upd in active_updates
                         if (upd.get("category") or "").strip().casefold() == cat_key
                         and not ("DELETE_ITEM" in (upd.get("changes") or upd.get("change_types") or []))
                         and not (isinstance(upd.get("changes"), dict) and upd["changes"].get("is_deleted_item"))
@@ -1004,8 +1097,8 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                             target_item_ids.append(final_iid)
                             seen_item_ids.add(final_iid)
 
-                    # Append existing items in this category not in C5.
-                    # In Grab, higher sortOrder is at the top, so descending order reflects current top-to-bottom.
+                    # Do not append items omitted from C5. The deleted-item phase
+                    # has already removed them from Grab.
                     cat_obj = cat_obj_map.get(cat_id) or {}
                     existing_cat_items = sorted(
                         cat_obj.get("items") or cat_obj.get("menuItems") or [],
@@ -1017,7 +1110,7 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                         iid = str(it.get("itemID") or it.get("id") or "")
                         if iid:
                             current_item_ids.append(iid)
-                            if iid not in seen_item_ids:
+                            if iid not in seen_item_ids and iid not in deleted_item_ids:
                                 target_item_ids.append(iid)
                                 seen_item_ids.add(iid)
 
