@@ -5286,11 +5286,16 @@ async def parse_c5_endpoint(
             else (design_imp if is_drive_folder_link(design_imp)
             else (folder_col_val if is_drive_folder_link(folder_col_val) else ""))
         )
+        photo_baseline = load_drive_photo_baseline(sid)
+        baseline_folder_id = photo_baseline.get("folder_id") if isinstance(photo_baseline, dict) else ""
+        baseline_folder_url = f"https://drive.google.com/drive/folders/{baseline_folder_id}" if baseline_folder_id else ""
+
         drive_folder_link = (
             explicit_folder
             or folder_link_by_sid.get(sid)
             or folder_link_by_sid.get(outlet_name)
             or default_folder_link
+            or baseline_folder_url
         )
         drive_image_requested = bool(drive_folder_link)
 
@@ -5399,7 +5404,7 @@ async def parse_c5_endpoint(
         resolver_name = (item_name or base_name or "").strip()
         photo_resolution_error = None
         drive_archive_image = False
-        photo_baseline = load_drive_photo_baseline(sid) if drive_image_requested else {}
+        photo_baseline = photo_baseline or (load_drive_photo_baseline(sid) if drive_image_requested else {})
         photo_baseline_record = (
             photo_baseline.get("by_id", {}).get(str(item_id or "").strip())
             or photo_baseline.get("by_name", {}).get(re.sub(r"[^a-z0-9]+", " ", resolver_name.casefold()).strip())
