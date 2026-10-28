@@ -1081,8 +1081,14 @@ def prepare_photo_folder(
     timestamp_str: Optional[str] = None,
     workbook: Optional[Any] = None,
     skip_excel_update: bool = False,
+    defer_photo_upload: bool = False,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
-    """Create/resolve the photo folder and record its URL without uploading photos."""
+    """Create/resolve the photo folder and record its URL without uploading photos.
+
+    Folder preparation stays in the pull job so the URL is present in the
+    source workbook before C5 files are combined. Photo file uploads are
+    started separately after the combined workbook is ready.
+    """
     if not timestamp_str:
         timestamp_str = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y-%m-%d %H:%M")
     photo_tasks = _extract_photo_tasks(dishes)
@@ -1100,6 +1106,8 @@ def prepare_photo_folder(
         "sid": str(sid),
         "timestamp_str": timestamp_str,
         "excel_path": excel_path,
+        "photo_upload_deferred": bool(defer_photo_upload),
+        "photo_upload_trigger": "AFTER_COMBINED_C5" if defer_photo_upload else "MANUAL_OR_COMBINED",
     }
     if job_id:
         _update_job_photo_sync_metadata(job_id, metadata)
@@ -1147,7 +1155,11 @@ def prepare_photo_folder(
         metadata.update({
             "status": "WAITING_FOR_C5" if total_photos else "SKIPPED",
             "drive_folder_url": folder_url,
-            "message": None if total_photos else "Tidak ada foto menu untuk diunggah.",
+            "message": (
+                "Upload foto dijadwalkan setelah C5 combined selesai."
+                if total_photos and defer_photo_upload
+                else (None if total_photos else "Tidak ada foto menu untuk diunggah.")
+            ),
         })
         if job_id:
             _update_job_photo_sync_metadata(job_id, metadata)
@@ -1181,11 +1193,28 @@ def start_deferred_photo_sync(job_id: str) -> bool:
             photo_meta.update(calculate_photo_sync_eta(int(photo_meta.get("total_photos") or 0)))
             photo_meta["status"] = "PROCESSING"
             photo_meta["message"] = None
+            photo_job = Job(
+                outlet_id=job.outlet_id,
+                job_type="PHOTO_SYNC",
+                platform=job.platform,
+                status="RUNNING",
+                progress_pct=5,
+                current_step="Menunggu file C5 combined selesai diunggah...",
+                payload={"source_job_id": str(parsed_id)},
+                result_metadata={"source_job_id": str(parsed_id), "photo_sync": photo_meta},
+                created_by="system",
+                started_at=datetime.utcnow(),
+            )
+            db.add(photo_job)
+            db.flush()
+            photo_meta["photo_job_id"] = str(photo_job.id)
+            photo_job.result_metadata = {"source_job_id": str(parsed_id), "photo_sync": photo_meta}
             result["photo_sync"] = photo_meta
             job.result_metadata = result
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(job, "result_metadata")
             db.commit()
+            photo_job_id = str(photo_job.id)
 
         def _worker():
             try:
@@ -1193,6 +1222,11 @@ def start_deferred_photo_sync(job_id: str) -> bool:
                     job = db.query(Job).filter(Job.id == parsed_id).first()
                     result = dict(job.result_metadata or {}) if job else {}
                     meta = dict(result.get("photo_sync") or {})
+                    photo_job = db.query(Job).filter(Job.id == uuid.UUID(photo_job_id)).first()
+                    if photo_job:
+                        photo_job.progress_pct = 10
+                        photo_job.current_step = "Membaca data foto dari file C5..."
+                        db.commit()
                 excel_path = meta.get("excel_path") or result.get("excel_path")
                 if not excel_path or not os.path.exists(excel_path):
                     raise FileNotFoundError("File PULL tidak ditemukan untuk mengunggah foto.")
@@ -1236,12 +1270,33 @@ def start_deferred_photo_sync(job_id: str) -> bool:
                 )
                 if not folder_url:
                     raise RuntimeError("Folder Drive tidak dapat ditemukan saat memulai unggah foto.")
+                with SessionLocal() as db:
+                    photo_job = db.query(Job).filter(Job.id == uuid.UUID(photo_job_id)).first()
+                    if photo_job:
+                        photo_job.status = "SUCCESS"
+                        photo_job.progress_pct = 100
+                        photo_job.current_step = "Sinkronisasi foto selesai."
+                        photo_job.completed_at = datetime.utcnow()
+                        photo_job.result_metadata = {
+                            "source_job_id": str(parsed_id),
+                            "photo_sync": {"status": "SUCCESS", "drive_folder_url": folder_url},
+                        }
+                        db.commit()
             except Exception as exc:
                 logger.exception("Deferred photo sync failed for job %s", job_id)
                 _update_job_photo_sync_metadata(str(parsed_id), {
                     "status": "FAILED",
                     "message": f"Gagal memulai pengumpulan foto setelah C5 terkirim: {exc}",
                 })
+                with SessionLocal() as db:
+                    photo_job = db.query(Job).filter(Job.id == uuid.UUID(photo_job_id)).first()
+                    if photo_job:
+                        photo_job.status = "FAILED"
+                        photo_job.progress_pct = 100
+                        photo_job.current_step = "Sinkronisasi foto gagal."
+                        photo_job.error_message = str(exc)
+                        photo_job.completed_at = datetime.utcnow()
+                        db.commit()
 
         threading.Thread(target=_worker, daemon=True).start()
         return True

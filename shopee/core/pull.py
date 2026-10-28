@@ -810,6 +810,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                     excel_path=excel_path,
                     job_id=store_metadata.get("job_id"),
                     workbook=wb,
+                    defer_photo_upload=True,
                 )
             except Exception as e_drive:
                 print(f"[⚠️] Gagal menyiapkan folder foto ShopeeFood: {e_drive}")
@@ -837,6 +838,7 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
                         excel_path=excel_path,
                         job_id=store_metadata.get("job_id"),
                         skip_excel_update=True,
+                        defer_photo_upload=True,
                     )
                 except Exception as e_drive:
                     print(f"[⚠️] Gagal menyiapkan folder foto ShopeeFood fallback: {e_drive}")
@@ -860,3 +862,18 @@ def extract_shopee_menu(store_metadata: dict, output_dir: str, headless: bool = 
         }
     except Exception as e:
         return False, f"Error selama ekstraksi menu: {e}"
+
+
+def run_shopee_extraction_worker(store_metadata: dict, output_dir: str, result_queue) -> None:
+    """Run Shopee extraction in a killable worker process."""
+    try:
+        headless = bool(store_metadata.get("headless", True))
+        result_queue.put((
+            "result",
+            {
+                "extraction": extract_shopee_menu(store_metadata, output_dir, headless=headless),
+                "store_metadata": store_metadata,
+            },
+        ))
+    except BaseException as exc:
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))

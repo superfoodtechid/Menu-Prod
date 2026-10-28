@@ -853,6 +853,141 @@ PLATFORM_LOCKS = {
 # to prevent server memory exhaustion (OOM crashes)
 GLOBAL_BROWSER_SEMAPHORE = threading.BoundedSemaphore(value=2)
 
+
+def run_gofood_extraction_isolated(job_id, store_metadata, output_dir, db):
+    """Run the GoFood pull outside Uvicorn's worker thread with a hard timeout."""
+    import multiprocessing
+    import queue
+    import time
+
+    from menu_core.gofood import run_gofood_extraction_worker
+    from menu_core.job_control import is_job_cancelled
+
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=run_gofood_extraction_worker,
+        args=(store_metadata, output_dir, result_queue),
+        name=f"gofood-pull-{job_id}",
+    )
+    timeout_seconds = max(60, int(os.getenv("GOFOOD_EXTRACTION_TIMEOUT_SECONDS", "900")))
+    started = time.monotonic()
+    last_heartbeat = started
+    process.start()
+
+    try:
+        while True:
+            try:
+                kind, payload = result_queue.get(timeout=0.5)
+                process.join(timeout=5)
+                if kind == "error":
+                    raise RuntimeError(payload)
+                return payload
+            except queue.Empty:
+                pass
+
+            now = time.monotonic()
+            if now - last_heartbeat >= 5:
+                db.expire_all()
+                current_job = db.query(Job).filter(Job.id == job_id).first()
+                if current_job and current_job.status == "RUNNING":
+                    payload_data = dict(current_job.payload or {})
+                    payload_data["heartbeat_at"] = datetime.utcnow().isoformat()
+                    current_job.payload = payload_data
+                    db.commit()
+                last_heartbeat = now
+
+            if is_job_cancelled(job_id, db):
+                raise RuntimeError("Dibatalkan oleh pengguna")
+
+            if not process.is_alive():
+                raise RuntimeError(f"Worker GoFood berhenti tanpa hasil (exit code {process.exitcode}).")
+
+            if now - started >= timeout_seconds:
+                raise TimeoutError(
+                    f"Penarikan GoFood melewati batas waktu {timeout_seconds} detik."
+                )
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+        result_queue.close()
+        result_queue.join_thread()
+
+
+def run_platform_extraction_isolated(job_id, platform, store_metadata, output_dir, db):
+    """Run Grab/Shopee extraction outside the Uvicorn worker with a hard timeout."""
+    import multiprocessing
+    import queue
+    import time
+    from menu_core.job_control import is_job_cancelled
+
+    if platform == "grab":
+        from menu_core.grab import run_grab_extraction_worker
+        worker = run_grab_extraction_worker
+    elif platform == "shopee":
+        from shopee.core.pull import run_shopee_extraction_worker
+        worker = run_shopee_extraction_worker
+    else:
+        raise ValueError(f"Unsupported isolated extraction platform: {platform}")
+
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=worker,
+        args=(store_metadata, output_dir, result_queue),
+        name=f"{platform}-pull-{job_id}",
+    )
+    timeout_seconds = max(60, int(os.getenv("PULL_EXTRACTION_TIMEOUT_SECONDS", "900")))
+    started = time.monotonic()
+    last_heartbeat = started
+    process.start()
+
+    try:
+        while True:
+            try:
+                kind, payload = result_queue.get(timeout=0.5)
+                process.join(timeout=5)
+                if kind == "error":
+                    raise RuntimeError(payload)
+                return payload
+            except queue.Empty:
+                pass
+
+            now = time.monotonic()
+            if now - last_heartbeat >= 5:
+                db.expire_all()
+                current_job = db.query(Job).filter(Job.id == job_id).first()
+                if current_job and current_job.status == "RUNNING":
+                    payload_data = dict(current_job.payload or {})
+                    payload_data["heartbeat_at"] = datetime.utcnow().isoformat()
+                    current_job.payload = payload_data
+                    db.commit()
+                last_heartbeat = now
+
+            if is_job_cancelled(job_id, db):
+                raise RuntimeError("Dibatalkan oleh pengguna")
+            if not process.is_alive():
+                raise RuntimeError(
+                    f"Worker {platform} berhenti tanpa hasil (exit code {process.exitcode})."
+                )
+            if now - started >= timeout_seconds:
+                raise TimeoutError(
+                    f"Penarikan {platform} melewati batas waktu {timeout_seconds} detik."
+                )
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+        result_queue.close()
+        result_queue.join_thread()
+
 def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
     # Setup job-specific session context
     from menu_core.database import SessionLocal
@@ -960,7 +1095,12 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             # This is useful for the allvbadmin profile, which may require an
             # interactive session or visual verification during a pull.
             is_headless = (os.getenv("HEADLESS_SHOPEE", "false").strip().lower() in ("true", "1", "yes"))
-            success, result = extract_shopee_menu(store_metadata, str(exports_dir), headless=is_headless)
+            store_metadata["headless"] = is_headless
+            worker_payload = run_platform_extraction_isolated(
+                job_id, "shopee", store_metadata, str(exports_dir), db
+            )
+            store_metadata.update(worker_payload.get("store_metadata") or {})
+            success, result = worker_payload["extraction"]
             
             if not success:
                 raise Exception(f"Shopee extraction failed: {result}")
@@ -1016,6 +1156,8 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
                 "nama_resto_final": outlet.nama_resto_final,
                 "brand": outlet.brand,
                 "username": account.username,
+                "email": account.username,
+                "phone": getattr(account, "phone", None),
                 "password": account.password
             }
             
@@ -1023,8 +1165,8 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             job.current_step = "Meluncurkan browser GoFood & memproses penarikan..."
             db.commit()
             
-            from menu_core.gofood import extract_gofood_menu
-            success, result = extract_gofood_menu(store_metadata, str(exports_dir))
+            result = run_gofood_extraction_isolated(job_id, store_metadata, str(exports_dir), db)
+            success, result = result
             
             if not success:
                 raise Exception(f"GoFood extraction failed: {result}")
@@ -1053,7 +1195,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             job.completed_at = datetime.utcnow()
             outlet.last_sync_at = datetime.utcnow()
             db.commit()
-            
+
         elif job.platform == "grab":
             job.progress_pct = 30
             job.current_step = "Menyiapkan parameter penarikan GrabFood..."
@@ -1076,8 +1218,11 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             job.current_step = "Meluncurkan browser GrabFood & memproses penarikan..."
             db.commit()
             
-            from menu_core.grab import extract_grab_menu
-            success, result = extract_grab_menu(store_metadata, str(exports_dir))
+            worker_payload = run_platform_extraction_isolated(
+                job_id, "grab", store_metadata, str(exports_dir), db
+            )
+            store_metadata.update(worker_payload.get("store_metadata") or {})
+            success, result = worker_payload["extraction"]
             
             if not success:
                 raise Exception(f"Grab extraction failed: {result}")
@@ -5382,20 +5527,20 @@ async def parse_c5_endpoint(
             })
 
         # Character length limits:
-        # Nama Item <= 60 karakter
+        # Nama Item <= 80 karakter
         # Category <= 80 karakter
         # Description <= 250 karakter
         clean_item_name = (display_name or "").strip()
-        invalid_name_length = bool(clean_item_name and len(clean_item_name) > 60)
+        invalid_name_length = bool(clean_item_name and len(clean_item_name) > 80)
         if invalid_name_length:
-            name_len_err = f"Nama item melebihi batas maksimal 60 karakter ({len(clean_item_name)} karakter): '{clean_item_name}' (Store ID: {sid}, baris {r_idx}). Perpendek nama item sebelum push."
+            name_len_err = f"Nama item melebihi batas maksimal 80 karakter ({len(clean_item_name)} karakter): '{clean_item_name}' (Store ID: {sid}, baris {r_idx}). Perpendek nama item sebelum push."
             is_valid = False
             validation_errors_count += 1
             validation_error_messages.append(name_len_err)
             validation_error = f"{validation_error} {name_len_err}" if validation_error else name_len_err
             diff_details.append({
                 "column": "Nama Item",
-                "old_val": "Maksimal 60 karakter",
+                "old_val": "Maksimal 80 karakter",
                 "new_val": f"{len(clean_item_name)} karakter (Terlalu panjang)",
             })
 
@@ -6062,7 +6207,7 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         )
 
     # ── Field Character Length Validations (All Platforms) ──
-    # Nama item <= 60, Category <= 80, Description <= 250
+    # Nama item <= 80, Category <= 80, Description <= 250
     # Note: Skip DELETE_ITEM because deleted items are existing baseline items being removed,
     # not new mutations to be published.
     invalid_length_errors = []
@@ -6070,8 +6215,8 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         if "DELETE_ITEM" in (item.changes or []):
             continue
         target_name = (item.item_name_new or item.item_name or "").strip()
-        if len(target_name) > 60:
-            invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks 60)")
+        if len(target_name) > 80:
+            invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks 80)")
         target_cat = (item.category or "").strip()
         if len(target_cat) > 80:
             invalid_length_errors.append(f"Kategori '{target_cat[:25]}...' ({len(target_cat)} karakter, maks 80)")
@@ -6084,7 +6229,7 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         more = f" dan {len(invalid_length_errors) - 10} lainnya" if len(invalid_length_errors) > 10 else ""
         raise HTTPException(
             status_code=422,
-            detail=f"Batas panjang karakter terlampaui: {err_str}{more}. Batas maksimal: Nama Item 60 karakter, Kategori 80 karakter, Deskripsi 250 karakter. Perbaiki di file C5 sebelum push."
+            detail=f"Batas panjang karakter terlampaui: {err_str}{more}. Batas maksimal: Nama Item 80 karakter, Kategori 80 karakter, Deskripsi 250 karakter. Perbaiki di file C5 sebelum push."
         )
 
     if target_platform == "gofood":

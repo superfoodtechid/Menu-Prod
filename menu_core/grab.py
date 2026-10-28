@@ -386,6 +386,7 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
                 excel_path=excel_path,
                 job_id=store_metadata.get("job_id"),
                 workbook=wb,
+                defer_photo_upload=True,
             )
         except Exception as e_drive:
             print(f"   ⚠️ Gagal menyiapkan folder foto GrabFood: {e_drive}")
@@ -412,6 +413,7 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
                     excel_path=excel_path,
                     job_id=store_metadata.get("job_id"),
                     skip_excel_update=True,
+                    defer_photo_upload=True,
                 )
             except Exception as e_drive:
                 print(f"   ⚠️ Gagal menyiapkan folder foto GrabFood fallback: {e_drive}")
@@ -435,3 +437,17 @@ def extract_grab_menu(store_metadata: dict, output_dir: str):
         'mods_count': len(matched_mods),
         'photo_sync': photo_sync_meta,
     }
+
+
+def run_grab_extraction_worker(store_metadata: dict, output_dir: str, result_queue) -> None:
+    """Run Grab extraction in a killable worker process."""
+    try:
+        result_queue.put((
+            "result",
+            {
+                "extraction": extract_grab_menu(store_metadata, output_dir),
+                "store_metadata": store_metadata,
+            },
+        ))
+    except BaseException as exc:
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))

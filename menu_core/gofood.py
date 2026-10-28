@@ -673,18 +673,24 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
     photo_sync_meta = None
 
     job_id = store_metadata.get('job_id')
-    if job_id:
+
+    def _update_job_step(progress_pct: int, current_step: str) -> None:
+        if not job_id:
+            return
         try:
             from menu_core.database import SessionLocal, Job
             import uuid
             with SessionLocal() as db_sess:
                 db_j = db_sess.query(Job).filter(Job.id == uuid.UUID(str(job_id))).first()
                 if db_j and db_j.status == "RUNNING":
-                    db_j.progress_pct = 75
-                    db_j.current_step = "Menyusun dan menyimpan file Excel C5..."
+                    db_j.progress_pct = progress_pct
+                    db_j.current_step = current_step
                     db_sess.commit()
         except Exception:
             pass
+
+    if job_id:
+        _update_job_step(70, "Membuka template Excel C5...")
 
     try:
         wb = openpyxl.load_workbook(template_path)
@@ -725,6 +731,8 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                                     val = off_val.get('offline_adjustment', val)
                     
                     sheet_item.cell(row=r_idx + DATA_START_ROW, column=headers_item[col_name], value=val)
+
+        _update_job_step(82, "Mengisi data modifier ke Excel C5...")
                     
         sheet_mod = wb['Modifier']
         prepare_c5_sheet(sheet_mod)
@@ -741,6 +749,7 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                             val = str(val)
                     sheet_mod.cell(row=r_idx + DATA_START_ROW, column=headers_mod[col_name], value=val)
 
+        _update_job_step(88, "Menyiapkan metadata foto C5...")
         try:
             folder_url, photo_sync_meta = prepare_photo_folder(
                 owner_name=owner_name,
@@ -751,14 +760,17 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                 excel_path=excel_path,
                 job_id=store_metadata.get("job_id"),
                 workbook=wb,
+                defer_photo_upload=True,
             )
         except Exception as e_drive:
             print(f"   ⚠️ Gagal menyiapkan folder foto GoFood: {e_drive}")
             folder_entries = [(folder_label, "")]
             upsert_folder_link_sheet(wb, folder_entries)
 
+        _update_job_step(92, "Menyimpan file Excel C5...")
         wb.save(excel_path)
         wb.close()
+        _update_job_step(96, "Memfinalisasi hasil penarikan GoFood...")
         if prev_user_data:
             merged_count = sum(1 for iid in prev_user_data if any(str(row.get('Item ID', '')).strip() == iid for _, row in df_items.iterrows()))
             print(f"   ✅ Berhasil menyimpan file catalog dengan {merged_count} baris data user yang di-preserve.")
@@ -777,6 +789,7 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
                     excel_path=excel_path,
                     job_id=store_metadata.get("job_id"),
                     skip_excel_update=True,
+                    defer_photo_upload=True,
                 )
             except Exception as e_drive:
                 print(f"   ⚠️ Gagal menyiapkan folder foto GoFood fallback: {e_drive}")
@@ -800,3 +813,11 @@ def extract_gofood_menu(store_metadata: dict, output_dir: str):
         'mods_count': len(df_mods),
         'photo_sync': photo_sync_meta,
     }
+
+
+def run_gofood_extraction_worker(store_metadata: dict, output_dir: str, result_queue) -> None:
+    """Run GoFood extraction in an isolated process so a stuck browser/Excel save is killable."""
+    try:
+        result_queue.put(("result", extract_gofood_menu(store_metadata, output_dir)))
+    except BaseException as exc:
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
