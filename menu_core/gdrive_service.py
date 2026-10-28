@@ -1081,6 +1081,7 @@ def prepare_photo_folder(
     timestamp_str: Optional[str] = None,
     workbook: Optional[Any] = None,
     skip_excel_update: bool = False,
+    defer_photo_upload: bool = False,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """Create/resolve the photo folder and record its URL without uploading photos.
 
@@ -1105,6 +1106,8 @@ def prepare_photo_folder(
         "sid": str(sid),
         "timestamp_str": timestamp_str,
         "excel_path": excel_path,
+        "photo_upload_deferred": bool(defer_photo_upload),
+        "photo_upload_trigger": "AFTER_COMBINED_C5" if defer_photo_upload else "MANUAL_OR_COMBINED",
     }
     if job_id:
         _update_job_photo_sync_metadata(job_id, metadata)
@@ -1152,7 +1155,11 @@ def prepare_photo_folder(
         metadata.update({
             "status": "WAITING_FOR_C5" if total_photos else "SKIPPED",
             "drive_folder_url": folder_url,
-            "message": None if total_photos else "Tidak ada foto menu untuk diunggah.",
+            "message": (
+                "Upload foto dijadwalkan setelah C5 combined selesai."
+                if total_photos and defer_photo_upload
+                else (None if total_photos else "Tidak ada foto menu untuk diunggah.")
+            ),
         })
         if job_id:
             _update_job_photo_sync_metadata(job_id, metadata)
