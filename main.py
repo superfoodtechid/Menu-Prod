@@ -5228,22 +5228,26 @@ async def parse_c5_endpoint(
                 if part_clean:
                     folder_link_by_sid[part_clean] = fl_url
 
-    folder_col = resolve_col(['Folder Link', 'Link Folder', 'Folder Foto', 'Link Folder Foto', 'Drive Folder', 'Link Drive', 'Google Drive Folder', 'Folder'])
+    folder_col = resolve_col([
+        'G Drive Folder Link', 'G Drive Folder', 'GDrive Folder Link', 'GDrive Folder',
+        'G-Drive Folder Link', 'G-Drive Folder', 'Google Drive Folder Link', 'Google Drive Folder',
+        'Folder Link', 'Link Folder', 'Folder Foto', 'Link Folder Foto', 'Drive Folder', 'Link Drive', 'Google Drive Folder', 'Folder'
+    ])
     design_imp_col = resolve_col(['Design Improvement', 'Photo Improvement'])
 
     for r in rows[1:]:
         if not r or all(v is None for v in r) or is_c5_reserved_row(r):
             continue
         r_sid = get_val(r, sid_col) or "STORE-DEFAULT"
-        r_photo = get_val(r, photo_col)
-        r_design = get_val(r, design_imp_col) if design_imp_col else ""
-        r_folder = get_val(r, folder_col) if folder_col else ""
-        for cand in (r_photo, r_design, r_folder):
-            if is_drive_folder_link(cand):
-                folder_link_by_sid[r_sid] = cand
-                if not default_folder_link:
-                    default_folder_link = cand
+        row_folder = ""
+        for cell in r:
+            if cell and is_drive_folder_link(cell):
+                row_folder = str(cell).strip()
                 break
+        if row_folder:
+            folder_link_by_sid[r_sid] = row_folder
+            if not default_folder_link:
+                default_folder_link = row_folder
 
     c5_explicit_ids_by_sid = {}
     for r in rows[1:]:
@@ -5281,11 +5285,17 @@ async def parse_c5_endpoint(
         design_imp = get_val(row, design_imp_col) if design_imp_col else ""
         folder_col_val = get_val(row, folder_col) if folder_col else ""
 
-        explicit_folder = (
-            photo_link_raw if is_drive_folder_link(photo_link_raw)
-            else (design_imp if is_drive_folder_link(design_imp)
-            else (folder_col_val if is_drive_folder_link(folder_col_val) else ""))
-        )
+        # Scan row cells for any explicit Google Drive folder URL
+        explicit_folder = ""
+        for cell in row:
+            if cell and is_drive_folder_link(cell):
+                explicit_folder = str(cell).strip()
+                break
+        if explicit_folder:
+            folder_link_by_sid[sid] = explicit_folder
+            if not default_folder_link:
+                default_folder_link = explicit_folder
+
         photo_baseline = load_drive_photo_baseline(sid)
         baseline_folder_id = photo_baseline.get("folder_id") if isinstance(photo_baseline, dict) else ""
         baseline_folder_url = f"https://drive.google.com/drive/folders/{baseline_folder_id}" if baseline_folder_id else ""
