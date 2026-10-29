@@ -2198,12 +2198,19 @@ def trigger_pull_job(
     outlet = db.query(Outlet).filter(Outlet.id == outlet_id).first()
     if not outlet:
         raise HTTPException(status_code=404, detail="Outlet not found")
+
+    platform = (outlet.account.platform if outlet.account else outlet.platform or "").strip().lower()
+    if worker_target == "pi" and platform == "gofood":
+        raise HTTPException(
+            status_code=422,
+            detail="PULL GoFood hanya dapat dijalankan di worker VM1.",
+        )
     
     # Create Job log entry
     new_job = Job(
         outlet_id=outlet.id,
         job_type="PULL",
-        platform=outlet.account.platform,
+        platform=platform,
         status="PENDING",
         progress_pct=0,
         current_step="Mengantrekan tugas penarikan...",

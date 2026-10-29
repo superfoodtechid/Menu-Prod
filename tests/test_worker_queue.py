@@ -60,3 +60,15 @@ def test_worker_target_validation():
         assert "worker_target" in str(exc)
     else:
         raise AssertionError("invalid worker target should be rejected")
+
+
+def test_pi_only_claims_shopee_grab():
+    db = make_session()
+    db.add_all([
+        Job(job_type="PULL", platform="gofood", status="PENDING", worker_target="auto"),
+        Job(job_type="PULL", platform="shopee", status="PENDING", worker_target="auto"),
+    ])
+    db.commit()
+
+    job = claim_next_pull_job(db, "pi", auto_after_seconds=0)
+    assert job.platform == "shopee"
