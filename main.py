@@ -48,6 +48,7 @@ sys.path.append(str(BASE_DIR / "menu_core"))
 
 from menu_core.database import get_db, init_db, Account, Outlet, Job, AuditTrail
 from menu_core.c5_template_helper import is_c5_reserved_row, DATA_START_ROW
+from menu_core.worker_queue import validate_worker_target
 
 # Setup Logging
 logging.basicConfig(
@@ -188,7 +189,15 @@ def startup_event():
         from menu_core.database import SessionLocal, Job
         from datetime import datetime
         with SessionLocal() as db_session:
-            orphaned = db_session.query(Job).filter(Job.status.in_(["RUNNING", "PENDING"])).all()
+            # PULL jobs are durable queue entries. The worker lease decides
+            # whether they are recoverable; do not fail queued PULLs on API
+            # restart. Legacy API-owned jobs retain the old crash cleanup.
+            from menu_core.worker_queue import recover_expired_pull_leases
+            recover_expired_pull_leases(db_session)
+            orphaned = db_session.query(Job).filter(
+                Job.job_type != "PULL",
+                Job.status.in_(["RUNNING", "PENDING"]),
+            ).all()
             if orphaned:
                 for j in orphaned:
                     j.status = "FAILED"
@@ -330,6 +339,9 @@ class JobResponse(BaseModel):
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
+    worker_target: str = "auto"
+    claimed_by: Optional[str] = None
+    lease_expires_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -2173,7 +2185,16 @@ def trigger_push_price_job(request: PriceUpdateRequest, background_tasks: Backgr
 # ─── JOBS ENDPOINTS ───────────────────────────────────────────────────────────
 
 @app.post("/api/jobs/pull", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
-def trigger_pull_job(outlet_id: uuid.UUID, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def trigger_pull_job(
+    outlet_id: uuid.UUID,
+    worker_target: str = Query("auto", description="vm1, pi, atau auto"),
+    db: Session = Depends(get_db),
+):
+    try:
+        worker_target = validate_worker_target(worker_target)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     outlet = db.query(Outlet).filter(Outlet.id == outlet_id).first()
     if not outlet:
         raise HTTPException(status_code=404, detail="Outlet not found")
@@ -2186,14 +2207,18 @@ def trigger_pull_job(outlet_id: uuid.UUID, background_tasks: BackgroundTasks, db
         status="PENDING",
         progress_pct=0,
         current_step="Mengantrekan tugas penarikan...",
-        payload={"store_id": outlet.store_id, "merchant_name": outlet.merchant_name}
+        worker_target=worker_target,
+        payload={
+            "store_id": outlet.store_id,
+            "merchant_name": outlet.merchant_name,
+            "worker_target": worker_target,
+        }
     )
     db.add(new_job)
     db.commit()
     db.refresh(new_job)
 
-    # Dispatch to background executor thread
-    background_tasks.add_task(run_pull_job, new_job.id, outlet.id)
+    # A dedicated worker (VM1 by default, or Pi when selected) claims it.
     return new_job
 
 @app.get("/api/jobs/download-file")

@@ -58,6 +58,43 @@ services:
     networks:
       - foodmaster-network
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: foodmaster-worker-vm1
+    restart: unless-stopped
+    init: true
+    depends_on:
+      menu-postgres:
+        condition: service_healthy
+    shm_size: '2gb'
+    userns_mode: keep-id
+    environment:
+      - HOME=/tmp
+      - SE_CACHE_PATH=/tmp/.cache/selenium
+      - WDM_DIR=/tmp/.wdm
+      - HEADLESS_GOFOOD=${HEADLESS_GOFOOD:-true}
+      - WORKER_ID=vm1
+      - WORKER_POLL_SECONDS=${WORKER_POLL_SECONDS:-3}
+      - WORKER_LEASE_SECONDS=${WORKER_LEASE_SECONDS:-7200}
+      - WORKER_AUTO_DELAY_SECONDS=0
+    command: ["python", "worker.py"]
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./data:/app/data
+      - ./main.py:/app/main.py
+      - ./login_gofood.py:/app/login_gofood.py
+      - ./O. C5 .xlsx:/app/O. C5 .xlsx:ro
+      - ./Gofood:/app/Gofood
+      - ./shopee:/app/shopee
+      - ./grab:/app/grab
+      - ./menu_core:/app/menu_core
+      - ./src:/app/src
+      - ./src/shopee-omzet-automation/data:/app/src/shopee-omzet-automation/data
+    networks:
+      - foodmaster-network
+
   frontend:
     build:
       context: ./web

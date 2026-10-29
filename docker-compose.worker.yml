@@ -1,0 +1,32 @@
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: foodmaster-worker-pi
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    shm_size: '2gb'
+    environment:
+      HOME: /tmp
+      SE_CACHE_PATH: /tmp/.cache/selenium
+      WDM_DIR: /tmp/.wdm
+      HEADLESS_GOFOOD: ${HEADLESS_GOFOOD:-true}
+      WORKER_ID: pi
+      WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-3}
+      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-7200}
+      WORKER_AUTO_DELAY_SECONDS: ${WORKER_AUTO_DELAY_SECONDS:-30}
+    command: ["python", "worker.py"]
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./data:/app/data
+      - ./main.py:/app/main.py:ro
+      - ./login_gofood.py:/app/login_gofood.py:ro
+      - ./O. C5 .xlsx:/app/O. C5 .xlsx:ro
+      - ./Gofood:/app/Gofood
+      - ./shopee:/app/shopee
+      - ./grab:/app/grab
+      - ./menu_core:/app/menu_core:ro
+      - ./src:/app/src
+      - ./src/shopee-omzet-automation/data:/app/src/shopee-omzet-automation/data
