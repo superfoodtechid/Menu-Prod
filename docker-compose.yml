@@ -1,4 +1,26 @@
 services:
+  menu-postgres:
+    image: postgres:16-alpine
+    container_name: foodmaster-menu-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${MENU_POSTGRES_DB:-foodmaster_menu}
+      POSTGRES_USER: ${MENU_POSTGRES_USER:-foodmaster_menu}
+      POSTGRES_PASSWORD: ${MENU_POSTGRES_PASSWORD:-change-this-in-production}
+    ports:
+      # Keep the database private by default. Set MENU_POSTGRES_BIND_IP to
+      # the VM1 Tailscale IP when the Raspberry Pi worker is ready.
+      - "${MENU_POSTGRES_BIND_IP:-127.0.0.1}:${MENU_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - menu_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - foodmaster-network
+
   backend:
     build:
       context: .
@@ -6,6 +28,9 @@ services:
     container_name: foodmaster-backend
     restart: unless-stopped
     init: true
+    depends_on:
+      menu-postgres:
+        condition: service_healthy
     shm_size: '2gb'
     userns_mode: keep-id
     environment:
@@ -49,3 +74,6 @@ services:
 networks:
   foodmaster-network:
     driver: bridge
+
+volumes:
+  menu_postgres_data:
