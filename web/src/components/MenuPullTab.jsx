@@ -85,10 +85,33 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
       if (res.ok) {
         const data = await res.json();
         setCombinedResult(data);
+        // Excel combining is complete once this response arrives. The Drive
+        // upload is a separate background operation and must not keep the
+        // main activity indicator spinning.
+        setCombining(false);
 
         // If Google Drive upload is still in progress in background, poll for gspread_url
         if (data.combine_id && data.gspread_status === "UPLOADING") {
+          let combinePollAttempts = 0;
+          const finishCombinePolling = (statusData) => {
+            setCombining(false);
+            setCombinedResult((prev) => (prev ? {
+              ...prev,
+              gspread_url: statusData?.gspread_url || null,
+              gspread_status: statusData?.status || "FAILED",
+              combine_error: statusData?.error || null,
+            } : prev));
+          };
           const pollCombine = setInterval(async () => {
+            combinePollAttempts += 1;
+            if (combinePollAttempts >= 60) {
+              clearInterval(pollCombine);
+              finishCombinePolling({
+                status: "FAILED",
+                error: "Status upload C5 tidak merespons setelah 2 menit.",
+              });
+              return;
+            }
             try {
               const statusRes = await fetch(`${API_BASE_URL}/api/jobs/combine-c5/${data.combine_id}/status`, {
                 headers: { "X-API-Key": API_SECRET_KEY || "" }
@@ -97,15 +120,19 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
                 const statusData = await statusRes.json();
                 if (statusData.status === "SUCCESS" || statusData.status === "FAILED") {
                   clearInterval(pollCombine);
-                  setCombinedResult((prev) => (prev ? {
-                    ...prev,
-                    gspread_url: statusData.gspread_url,
-                    gspread_status: statusData.status,
-                  } : prev));
+                  finishCombinePolling(statusData);
+                } else {
+                  setCombining(false);
                 }
+              } else {
+                throw new Error(`Combine status returned ${statusRes.status}`);
               }
             } catch (pollErr) {
               clearInterval(pollCombine);
+              finishCombinePolling({
+                status: "FAILED",
+                error: "Status upload C5 tidak dapat diperbarui dari server.",
+              });
             }
           }, 2000);
         }
