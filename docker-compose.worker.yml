@@ -13,6 +13,7 @@ services:
       SE_CACHE_PATH: /tmp/.cache/selenium
       WDM_DIR: /tmp/.wdm
       HEADLESS_GOFOOD: ${HEADLESS_GOFOOD:-true}
+      HEADLESS_SHOPEE: ${HEADLESS_SHOPEE_PI:-true}
       WORKER_ID: pi
       WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-3}
       WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-7200}
