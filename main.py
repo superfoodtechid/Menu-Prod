@@ -5526,20 +5526,20 @@ async def parse_c5_endpoint(
             })
 
         # Character length limits:
-        # Nama Item <= 80 karakter
+        # Nama Item <= 60 karakter
         # Category <= 80 karakter
         # Description <= 250 karakter
         clean_item_name = (display_name or "").strip()
-        invalid_name_length = bool(clean_item_name and len(clean_item_name) > 80)
+        invalid_name_length = bool(clean_item_name and len(clean_item_name) > 60)
         if invalid_name_length:
-            name_len_err = f"Nama item melebihi batas maksimal 80 karakter ({len(clean_item_name)} karakter): '{clean_item_name}' (Store ID: {sid}, baris {r_idx}). Perpendek nama item sebelum push."
+            name_len_err = f"Nama item melebihi batas maksimal 60 karakter ({len(clean_item_name)} karakter): '{clean_item_name}' (Store ID: {sid}, baris {r_idx}). Perpendek nama item sebelum push."
             is_valid = False
             validation_errors_count += 1
             validation_error_messages.append(name_len_err)
             validation_error = f"{validation_error} {name_len_err}" if validation_error else name_len_err
             diff_details.append({
                 "column": "Nama Item",
-                "old_val": "Maksimal 80 karakter",
+                "old_val": "Maksimal 60 karakter",
                 "new_val": f"{len(clean_item_name)} karakter (Terlalu panjang)",
             })
 
@@ -6206,7 +6206,7 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         )
 
     # ── Field Character Length Validations (All Platforms) ──
-    # Nama item <= 80, Category <= 80, Description <= 250
+    # Nama item <= 60, Category <= 80, Description <= 250
     # Note: Skip DELETE_ITEM because deleted items are existing baseline items being removed,
     # not new mutations to be published.
     invalid_length_errors = []
@@ -6214,8 +6214,8 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         if "DELETE_ITEM" in (item.changes or []):
             continue
         target_name = (item.item_name_new or item.item_name or "").strip()
-        if len(target_name) > 80:
-            invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks 80)")
+        if len(target_name) > 60:
+            invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks 60)")
         target_cat = (item.category or "").strip()
         if len(target_cat) > 80:
             invalid_length_errors.append(f"Kategori '{target_cat[:25]}...' ({len(target_cat)} karakter, maks 80)")
@@ -6228,7 +6228,7 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         more = f" dan {len(invalid_length_errors) - 10} lainnya" if len(invalid_length_errors) > 10 else ""
         raise HTTPException(
             status_code=422,
-            detail=f"Batas panjang karakter terlampaui: {err_str}{more}. Batas maksimal: Nama Item 80 karakter, Kategori 80 karakter, Deskripsi 250 karakter. Perbaiki di file C5 sebelum push."
+            detail=f"Batas panjang karakter terlampaui: {err_str}{more}. Batas maksimal: Nama Item 60 karakter, Kategori 80 karakter, Deskripsi 250 karakter. Perbaiki di file C5 sebelum push."
         )
 
     if target_platform == "gofood":
