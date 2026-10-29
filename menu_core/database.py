@@ -178,6 +178,11 @@ class Job(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
+    # Queue routing for hybrid VM1/Raspberry Pi workers. Existing jobs default
+    # to VM1 so enabling the worker service does not change current routing.
+    worker_target = Column(String(20), nullable=False, default="auto")
+    claimed_by = Column(String(100), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     outlet = relationship("Outlet", back_populates="jobs")
@@ -420,6 +425,17 @@ def init_db():
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_jobs_status_type ON jobs(job_type, status)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audit_trails_outlet_id ON audit_trails(outlet_id)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_audit_trails_item_id ON audit_trails(item_id)"))
+        if "jobs" in inspector.get_table_names():
+            columns = [c["name"] for c in inspector.get_columns("jobs")]
+            with engine.begin() as conn:
+                if "worker_target" not in columns:
+                    conn.execute(text("ALTER TABLE jobs ADD COLUMN worker_target VARCHAR(20) DEFAULT 'vm1'"))
+                if "claimed_by" not in columns:
+                    conn.execute(text("ALTER TABLE jobs ADD COLUMN claimed_by VARCHAR(100)"))
+                if "lease_expires_at" not in columns:
+                    conn.execute(text("ALTER TABLE jobs ADD COLUMN lease_expires_at TIMESTAMP"))
+                conn.execute(text("UPDATE jobs SET worker_target = 'vm1' WHERE worker_target IS NULL"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_jobs_worker_queue ON jobs(job_type, status, worker_target)"))
         if "item_offline_prices" in inspector.get_table_names():
             with engine.begin() as conn:
                 conn.execute(text("CREATE INDEX IF NOT EXISTS idx_offline_store_id ON item_offline_prices(store_id)"))
