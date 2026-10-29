@@ -8,6 +8,7 @@ from sqlalchemy import and_, or_
 from .database import Job
 
 SUPPORTED_WORKER_TARGETS = {"vm1", "pi", "auto"}
+PI_PULL_PLATFORMS = {"shopee", "grab"}
 
 
 def validate_worker_target(value: Optional[str]) -> str:
@@ -55,6 +56,8 @@ def claim_next_pull_job(
         .order_by(Job.created_at.asc(), Job.id.asc())
         .with_for_update(skip_locked=True)
     )
+    if worker_id == "pi":
+        query = query.filter(Job.platform.in_(PI_PULL_PLATFORMS))
     job = query.first()
     if not job:
         db.rollback()
