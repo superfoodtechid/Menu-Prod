@@ -5558,21 +5558,31 @@ async def parse_c5_endpoint(
                 "new_val": new_fake_raw or "(Kosong)",
             })
 
-        # Character length limits:
-        # Nama Item <= 80 karakter
-        # Category <= 80 karakter
-        # Description <= 250 karakter
+        # Character length limits per platform:
+        # User rule: GoFood (go) = 150, Grab = 60, Shopee = 80
+        # Category <= 80 karakter, Description <= 250 karakter
+        base_plat_str = str(baseline.get("baseline_platform") or "").lower()
+        sid_str = str(sid or "").strip()
+        if "grab" in base_plat_str or sid_str.startswith("6-") or "IDGF" in sid_str:
+            max_name_limit = 60
+        elif "shopee" in base_plat_str:
+            max_name_limit = 80
+        elif "go" in base_plat_str or (sid_str.startswith(("G", "M")) and sid_str[1:].isdigit()):
+            max_name_limit = 150
+        else:
+            max_name_limit = 80
+
         clean_item_name = (display_name or "").strip()
-        invalid_name_length = bool(clean_item_name and len(clean_item_name) > 80)
+        invalid_name_length = bool(clean_item_name and len(clean_item_name) > max_name_limit)
         if invalid_name_length:
-            name_len_err = f"Nama item melebihi batas maksimal 80 karakter ({len(clean_item_name)} karakter): '{clean_item_name}' (Store ID: {sid}, baris {r_idx}). Perpendek nama item sebelum push."
+            name_len_err = f"Nama item melebihi batas maksimal {max_name_limit} karakter ({len(clean_item_name)} karakter): '{clean_item_name}' (Store ID: {sid}, baris {r_idx}). Perpendek nama item sebelum push."
             is_valid = False
             validation_errors_count += 1
             validation_error_messages.append(name_len_err)
             validation_error = f"{validation_error} {name_len_err}" if validation_error else name_len_err
             diff_details.append({
                 "column": "Nama Item",
-                "old_val": "Maksimal 80 karakter",
+                "old_val": f"Maksimal {max_name_limit} karakter",
                 "new_val": f"{len(clean_item_name)} karakter (Terlalu panjang)",
             })
 
@@ -6238,17 +6248,24 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
             detail=f"Urutan kategori tidak valid: {full_detail}. Kategori yang sama terpecah / diselingi kategori lain. Semua item dalam kategori yang sama harus dikelompokkan bersama dalam baris yang berurutan. Perbaiki urutan di file C5 sebelum push."
         )
 
-    # ── Field Character Length Validations (All Platforms) ──
-    # Nama item <= 80, Category <= 80, Description <= 250
-    # Note: Skip DELETE_ITEM because deleted items are existing baseline items being removed,
-    # not new mutations to be published.
+    # ── Field Character Length Validations (Per Platform: GoFood=150, Grab=60, Shopee=80) ──
+    # User rule: GoFood (go) = 150, Grab = 60, Shopee = 80
+    if "grab" in target_platform:
+        max_item_name_len = 60
+    elif "shopee" in target_platform:
+        max_item_name_len = 80
+    elif "go" in target_platform:
+        max_item_name_len = 150
+    else:
+        max_item_name_len = 80
+
     invalid_length_errors = []
     for item in request.updates:
         if "DELETE_ITEM" in (item.changes or []):
             continue
         target_name = (item.item_name_new or item.item_name or "").strip()
-        if len(target_name) > 80:
-            invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks 80)")
+        if len(target_name) > max_item_name_len:
+            invalid_length_errors.append(f"Nama item '{target_name[:25]}...' ({len(target_name)} karakter, maks {max_item_name_len})")
         target_cat = (item.category or "").strip()
         if len(target_cat) > 80:
             invalid_length_errors.append(f"Kategori '{target_cat[:25]}...' ({len(target_cat)} karakter, maks 80)")
@@ -6261,7 +6278,7 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         more = f" dan {len(invalid_length_errors) - 10} lainnya" if len(invalid_length_errors) > 10 else ""
         raise HTTPException(
             status_code=422,
-            detail=f"Batas panjang karakter terlampaui: {err_str}{more}. Batas maksimal: Nama Item 80 karakter, Kategori 80 karakter, Deskripsi 250 karakter. Perbaiki di file C5 sebelum push."
+            detail=f"Batas panjang karakter terlampaui: {err_str}{more}. Batas maksimal: Nama Item {max_item_name_len} karakter ({target_platform.title()}), Kategori 80 karakter, Deskripsi 250 karakter. Perbaiki di file C5 sebelum push."
         )
 
     if target_platform == "gofood":
