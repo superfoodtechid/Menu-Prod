@@ -18,13 +18,14 @@ def validate_worker_target(value: Optional[str]) -> str:
     return target
 
 
-def claim_next_pull_job(
+def claim_next_job(
     db,
     worker_id: str,
     lease_seconds: int = 7200,
     auto_after_seconds: int = 0,
+    job_types=None,
 ):
-    """Atomically claim one PULL job eligible for this worker.
+    """Atomically claim one eligible job for this worker.
 
     PostgreSQL uses SKIP LOCKED so VM1 and Pi cannot claim the same job. SQLite
     keeps the same transaction shape for local tests, where SKIP LOCKED is
@@ -38,6 +39,7 @@ def claim_next_pull_job(
     now = datetime.utcnow()
     lease_until = now + timedelta(seconds=max(60, int(lease_seconds)))
     auto_cutoff = now - timedelta(seconds=max(0, int(auto_after_seconds)))
+    job_types = tuple(job_types or ("PULL",))
     if worker_id == "pi" and auto_after_seconds > 0:
         target_filter = or_(
             Job.worker_target == "pi",
@@ -49,7 +51,7 @@ def claim_next_pull_job(
     query = (
         db.query(Job)
         .filter(
-            Job.job_type == "PULL",
+            Job.job_type.in_(job_types),
             Job.status == "PENDING",
             target_filter,
         )
@@ -57,7 +59,11 @@ def claim_next_pull_job(
         .with_for_update(skip_locked=True)
     )
     if worker_id == "pi":
-        query = query.filter(Job.platform.in_(PI_PULL_PLATFORMS))
+        # Push jobs stay on VM1 because their browser/session files are not
+        # provisioned for the Pi worker.
+        query = query.filter(
+            and_(Job.job_type == "PULL", Job.platform.in_(PI_PULL_PLATFORMS))
+        )
     job = query.first()
     if not job:
         db.rollback()
@@ -71,13 +77,18 @@ def claim_next_pull_job(
     return job
 
 
-def recover_expired_pull_leases(db) -> int:
-    """Return jobs from dead workers to PENDING without touching active jobs."""
+def claim_next_pull_job(db, worker_id: str, lease_seconds: int = 7200, auto_after_seconds: int = 0):
+    """Backward-compatible PULL-only queue helper."""
+    return claim_next_job(db, worker_id, lease_seconds, auto_after_seconds, ("PULL",))
+
+
+def recover_expired_leases(db) -> int:
+    """Return queued jobs from dead workers to PENDING without touching active jobs."""
     now = datetime.utcnow()
     jobs = (
         db.query(Job)
         .filter(
-            Job.job_type == "PULL",
+            Job.job_type.in_(("PULL", "PUSH_UPDATE")),
             Job.status == "RUNNING",
             Job.lease_expires_at.isnot(None),
             Job.lease_expires_at < now,
@@ -92,3 +103,8 @@ def recover_expired_pull_leases(db) -> int:
     if jobs:
         db.commit()
     return len(jobs)
+
+
+def recover_expired_pull_leases(db) -> int:
+    """Backward-compatible PULL-only name; recovery now covers push jobs too."""
+    return recover_expired_leases(db)

@@ -5,7 +5,9 @@ from sqlalchemy.orm import sessionmaker
 
 from menu_core.database import Base, Job
 from menu_core.worker_queue import (
+    claim_next_job,
     claim_next_pull_job,
+    recover_expired_leases,
     recover_expired_pull_leases,
     validate_worker_target,
 )
@@ -20,7 +22,7 @@ def make_session():
 def test_claim_respects_worker_target_and_auto():
     db = make_session()
     db.add_all([
-        Job(job_type="PULL", platform="gofood", status="PENDING", worker_target="pi"),
+        Job(job_type="PULL", platform="shopee", status="PENDING", worker_target="pi"),
         Job(job_type="PULL", platform="grab", status="PENDING", worker_target="auto"),
     ])
     db.commit()
@@ -45,11 +47,26 @@ def test_expired_lease_is_returned_to_queue():
     db.add(job)
     db.commit()
 
-    assert recover_expired_pull_leases(db) == 1
+    assert recover_expired_leases(db) == 1
     db.refresh(job)
     assert job.status == "PENDING"
     assert job.claimed_by is None
     assert job.lease_expires_at is None
+
+
+def test_vm1_claims_push_update_and_pi_does_not():
+    db = make_session()
+    db.add_all([
+        Job(job_type="PUSH_UPDATE", platform="gofood", status="PENDING", worker_target="vm1"),
+        Job(job_type="PUSH_UPDATE", platform="grab", status="PENDING", worker_target="auto"),
+    ])
+    db.commit()
+
+    vm_job = claim_next_job(db, "vm1", job_types=("PULL", "PUSH_UPDATE"))
+    assert vm_job.job_type == "PUSH_UPDATE"
+
+    pi_job = claim_next_job(db, "pi", job_types=("PULL", "PUSH_UPDATE"))
+    assert pi_job is None
 
 
 def test_worker_target_validation():
