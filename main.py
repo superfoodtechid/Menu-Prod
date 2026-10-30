@@ -189,13 +189,12 @@ def startup_event():
         from menu_core.database import SessionLocal, Job
         from datetime import datetime
         with SessionLocal() as db_session:
-            # PULL jobs are durable queue entries. The worker lease decides
-            # whether they are recoverable; do not fail queued PULLs on API
-            # restart. Legacy API-owned jobs retain the old crash cleanup.
-            from menu_core.worker_queue import recover_expired_pull_leases
-            recover_expired_pull_leases(db_session)
+            # Worker-owned jobs are durable queue entries. The worker lease
+            # decides whether they are recoverable across an API restart.
+            from menu_core.worker_queue import recover_expired_leases
+            recover_expired_leases(db_session)
             orphaned = db_session.query(Job).filter(
-                Job.job_type != "PULL",
+                Job.job_type.notin_(("PULL", "PUSH_UPDATE")),
                 Job.status.in_(["RUNNING", "PENDING"]),
             ).all()
             if orphaned:
@@ -853,17 +852,13 @@ def delete_outlet_endpoint(outlet_id: uuid.UUID, db: Session = Depends(get_db)):
 
 # ─── BACKGROUND JOBS WORKER ───────────────────────────────────────────────────
 
-# Platform-specific locks to allow parallel execution between different platforms,
-# but enforce sequential execution within each platform (especially Shopee).
+# GoFood must remain sequential; Shopee and Grab may use separate worker slots.
 PLATFORM_LOCKS = {
-    "shopee": threading.Lock(),
-    "grab": threading.Lock(),
     "gofood": threading.Lock()
 }
 
-# Global semaphore to limit simultaneous headless browser instances across all platforms
-# to prevent server memory exhaustion (OOM crashes)
-GLOBAL_BROWSER_SEMAPHORE = threading.BoundedSemaphore(value=2)
+# Limit simultaneous headless browser instances to the worker pool size.
+GLOBAL_BROWSER_SEMAPHORE = threading.BoundedSemaphore(value=3)
 
 
 def run_gofood_extraction_isolated(job_id, store_metadata, output_dir, db):
@@ -2172,13 +2167,19 @@ def trigger_push_price_job(request: PriceUpdateRequest, background_tasks: Backgr
         status="PENDING",
         progress_pct=0,
         current_step="Mengantrekan pembaruan harga...",
-        payload={"store_id": outlet.store_id, "merchant_name": outlet.merchant_name, "updates_count": len(updates_payload)}
+        worker_target="vm1",
+        payload={
+            "store_id": outlet.store_id,
+            "merchant_name": outlet.merchant_name,
+            "updates_count": len(updates_payload),
+            "updates": updates_payload,
+        }
     )
     db.add(new_job)
     db.commit()
     db.refresh(new_job)
 
-    background_tasks.add_task(run_push_price_job, new_job.id, outlet.id, updates_payload)
+    # The durable worker claims and executes PUSH_UPDATE jobs.
     return new_job
 
 
@@ -6405,17 +6406,20 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
         status="PENDING",
         progress_pct=0,
         current_step=f"Mengantrekan C5 push {target_platform.title()}...",
+        worker_target="vm1",
         payload={
+            "push_kind": "c5",
             "selected_sids": request.selected_sids,
             "updates_count": len(updates_payload),
-            "platform": target_platform
+            "platform": target_platform,
+            "updates": updates_payload,
         }
     )
     db.add(new_job)
     db.commit()
     db.refresh(new_job)
 
-    background_tasks.add_task(run_push_c5_job, new_job.id, request.selected_sids, updates_payload)
+    # The durable worker claims and executes PUSH_UPDATE jobs.
     return new_job
 
 

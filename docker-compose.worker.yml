@@ -18,6 +18,7 @@ services:
       WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-3}
       WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-7200}
       WORKER_AUTO_DELAY_SECONDS: ${WORKER_AUTO_DELAY_SECONDS:-30}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-3}
     command: ["python", "worker.py"]
     volumes:
       - ./.env:/app/.env:ro
