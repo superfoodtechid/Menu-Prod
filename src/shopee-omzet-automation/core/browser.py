@@ -20,6 +20,7 @@ import socket
 import random
 import fcntl
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs, unquote
 from pathlib import Path
 
 import requests
@@ -247,6 +248,255 @@ SHOPEE_IMG_BASE      = "https://down-id.img.susercontent.com/file"
 
 # Words that must NEVER be clicked — guard against accidental logout
 LOGOUT_KEYWORDS = ["log out", "logout", "keluar", "sign out", "signout"]
+
+OLD_STALE_SPC_CLIENTID = "cGRxaDczOWMybjIwdyonikzysnemngru"
+
+VB_PORTAL_ALIASES = {
+    "f": ["superfood"],
+    "w": ["wonderfood"],
+    "l": ["lokarasa", "loka rasa"],
+    "d": ["do eat", "gurame bakar, do eat"],
+}
+
+def extract_spc_clientid_from_url(url: str) -> str | None:
+    """Extracts spc_clientid parameter directly from a URL or embedded sub-urls."""
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        # 1. Direct query param: ?spc_clientid=...
+        if "spc_clientid" in qs and qs["spc_clientid"][0]:
+            cid = qs["spc_clientid"][0].strip()
+            if cid and cid != OLD_STALE_SPC_CLIENTID:
+                return cid
+
+        # 2. Inside verify_session_url param
+        if "verify_session_url" in qs and qs["verify_session_url"][0]:
+            sub_url = unquote(qs["verify_session_url"][0])
+            sub_qs = parse_qs(urlparse(sub_url).query)
+            if "spc_clientid" in sub_qs and sub_qs["spc_clientid"][0]:
+                cid = sub_qs["spc_clientid"][0].strip()
+                if cid and cid != OLD_STALE_SPC_CLIENTID:
+                    return cid
+
+        # 3. Inside business_next or state param
+        for param in ("business_next", "state"):
+            if param in qs and qs[param][0]:
+                sub_url = unquote(qs[param][0])
+                if "spc_clientid" in sub_url:
+                    sub_qs = parse_qs(urlparse(sub_url).query)
+                    if "spc_clientid" in sub_qs and sub_qs["spc_clientid"][0]:
+                        cid = sub_qs["spc_clientid"][0].strip()
+                        if cid and cid != OLD_STALE_SPC_CLIENTID:
+                            return cid
+    except Exception as e:
+        log.debug(f"Failed to extract spc_clientid from {url}: {e}")
+    return None
+
+def extract_and_sync_spc_clientid(driver) -> str | None:
+    """
+    Dynamically extracts the genuine spc_clientid from browser state:
+    1. driver.current_url query parameters (e.g. from onboarding / login callback redirect)
+    2. window.performance navigation & resource timing entries (history of redirects)
+    3. Existing browser cookies (if already set natively by Shopee)
+    4. Saved session.json extra_cookies
+
+    Ensures it is injected as the 'SPC_CLIENTID' cookie on .shopee.co.id
+    and saved to session.json so subsequent API/UI requests succeed.
+    """
+    client_id = None
+
+    # Source 1: Check driver.current_url
+    try:
+        client_id = extract_spc_clientid_from_url(driver.current_url)
+    except Exception:
+        pass
+
+    # Source 2: Check browser performance navigation & resource entries if not in current_url
+    if not client_id:
+        try:
+            perf_urls = driver.execute_script("""
+                var urls = [];
+                try {
+                    var nav = window.performance.getEntriesByType('navigation');
+                    for (var i = 0; i < nav.length; i++) {
+                        if (nav[i].name) urls.push(nav[i].name);
+                    }
+                    var res = window.performance.getEntriesByType('resource');
+                    for (var j = 0; j < res.length; j++) {
+                        if (res[j].name && res[j].name.includes('spc_clientid')) urls.push(res[j].name);
+                    }
+                } catch(e) {}
+                return urls;
+            """)
+            if perf_urls:
+                for u in perf_urls:
+                    cid = extract_spc_clientid_from_url(u)
+                    if cid:
+                        client_id = cid
+                        break
+        except Exception:
+            pass
+
+    # Source 3: Check if browser already has SPC_CLIENTID cookie from Shopee
+    if not client_id:
+        try:
+            cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
+            val = cookies.get("SPC_CLIENTID")
+            if val and val != OLD_STALE_SPC_CLIENTID:
+                client_id = val
+        except Exception:
+            pass
+
+    # Source 4: Check saved session.json extra_cookies
+    if not client_id:
+        try:
+            saved = load_session()
+            if saved:
+                val = saved.get("extra_cookies", {}).get("SPC_CLIENTID")
+                if val and val != OLD_STALE_SPC_CLIENTID:
+                    client_id = val
+        except Exception:
+            pass
+
+    # Inject and sync if we found a valid client_id
+    if client_id:
+        try:
+            cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
+            if cookies.get("SPC_CLIENTID") != client_id:
+                driver.add_cookie({
+                    "name": "SPC_CLIENTID",
+                    "value": client_id,
+                    "domain": ".shopee.co.id",
+                    "path": "/"
+                })
+                log.info(f"🍪 [COOKIE] Successfully injected/synced SPC_CLIENTID: {client_id}")
+
+            try:
+                saved = load_session() or {}
+                extra = saved.get("extra_cookies", {})
+                if extra.get("SPC_CLIENTID") != client_id:
+                    extra["SPC_CLIENTID"] = client_id
+                    saved["extra_cookies"] = extra
+                    with open(SESSION_FILE, "w") as f:
+                        json.dump(saved, f, indent=2)
+            except Exception as _pers_err:
+                log.debug(f"Could not persist SPC_CLIENTID to session file: {_pers_err}")
+
+        except Exception as e:
+            log.warning(f"⚠️ Failed to add SPC_CLIENTID cookie: {e}")
+        return client_id
+
+    return None
+
+def ensure_spc_clientid(driver):
+    """
+    Ensures that the SPC_CLIENTID cookie is present and dynamically updated in the browser.
+    Without this cookie, Shopee's React frontend sends 'x-merchant-tob-clientid: undefined',
+    causing 'SwitchMerchant' to fail with errorCode 90000 ('failed incorrect input').
+    """
+    extract_and_sync_spc_clientid(driver)
+
+def is_merchant_match(target_name: str, actual_name: str) -> bool:
+    if not target_name or not actual_name:
+        return False
+    t_norm = target_name.strip().lower()
+    a_norm = actual_name.strip().lower()
+    if t_norm == a_norm:
+        return True
+    if t_norm in VB_PORTAL_ALIASES:
+        if any(alias in a_norm for alias in VB_PORTAL_ALIASES[t_norm]):
+            return True
+    if (a_norm.startswith(t_norm) or t_norm.startswith(a_norm)) and abs(len(a_norm) - len(t_norm)) <= 3:
+        return True
+    def _clean_str(s):
+        s = re.sub(r"^\[.*?\]\s*", "", s)
+        s = re.sub(r"[\s_\-]+$", "", s)
+        s = re.sub(r"^[\s_\-]+", "", s)
+        s = re.sub(r"[\.…\s]+$", "", s)
+        return s.strip()
+    c_act = _clean_str(a_norm)
+    c_tgt = _clean_str(t_norm)
+    if c_act == c_tgt and len(c_tgt) > 0:
+        return True
+    if (c_act.startswith(c_tgt) or c_tgt.startswith(c_act)) and abs(len(c_act) - len(c_tgt)) <= 3:
+        return True
+    if len(c_act) >= 8 and (c_tgt.startswith(c_act) or c_act.startswith(c_tgt)):
+        return True
+    return False
+
+def detect_shopee_ui_error(driver) -> str | None:
+    """
+    Mendeteksi secara presisi apakah Shopee Partner UI sedang menampilkan error.
+    Menangkap teks pesan error asli dari DOM sehingga sistem tidak menebak-nebak.
+    
+    Kondisi yang dideteksi:
+      1. Modal popup error Ant Design (.ant-modal-confirm-error, .ant-modal-error, .ant-modal-content)
+         Contoh: 'Terjadi kesalahan. Silakan coba lagi nanti.'
+      2. Toast floating notification (.ant-message-error, .ant-notification-notice-error)
+      3. Alert banners error (.ant-alert-error, [role="alert"])
+      4. Anomali navbar collapse ke 'Admin:' tanpa nama merchant.
+    """
+    try:
+        err_info = driver.execute_script("""
+            // 1. Ant Modal error popup
+            var modals = Array.from(document.querySelectorAll('.ant-modal-confirm-error, .ant-modal-error, .ant-modal-content, .ant-modal'));
+            for (var m of modals) {
+                if (m.offsetHeight === 0 || m.offsetWidth === 0) continue;
+                var title = m.querySelector('.ant-modal-confirm-title, .ant-modal-title, h2, h3, h4');
+                var body = m.querySelector('.ant-modal-confirm-content, .ant-modal-body, p');
+                var titleTxt = title ? (title.innerText || '').trim() : '';
+                var bodyTxt = body ? (body.innerText || '').trim() : '';
+                var fullTxt = (titleTxt + ' ' + bodyTxt).trim();
+                if (!fullTxt) fullTxt = (m.innerText || '').trim();
+                var lower = fullTxt.toLowerCase();
+                // Abaikan jika ini dialog konfirmasi logout sengaja
+                if (lower.includes('keluar') || lower.includes('log out') || lower.includes('apakah anda yakin ingin')) {
+                    continue;
+                }
+                if (lower.includes('terjadi kesalahan') || lower.includes('kesalahan sistem') || 
+                    lower.includes('gagal') || lower.includes('error') || lower.includes('sesi') || 
+                    lower.includes('session') || lower.includes('silakan coba lagi') || lower.includes('failed')) {
+                    return fullTxt;
+                }
+            }
+
+            // 2. Ant Message toast
+            var toasts = Array.from(document.querySelectorAll('.ant-message-error, .ant-message-notice-error, .ant-notification-notice-error'));
+            for (var t of toasts) {
+                if (t.offsetHeight > 0) {
+                    var txt = (t.innerText || '').trim();
+                    if (txt) return txt;
+                }
+            }
+
+            // 3. Alert banners
+            var alerts = Array.from(document.querySelectorAll('.ant-alert-error, [role="alert"]'));
+            for (var a of alerts) {
+                if (a.offsetHeight > 0) {
+                    var txt = (a.innerText || '').trim();
+                    if (txt && !txt.toLowerCase().includes('berhasil')) return txt;
+                }
+            }
+
+            // 4. Cek apakah navbar collapse ke Admin: tanpa nama merchant
+            var mn = document.querySelector('.merchantName');
+            if (!mn || mn.offsetHeight === 0 || !mn.innerText.trim()) {
+                var headerEls = Array.from(document.querySelectorAll('header *, nav *, .ant-layout-header *, div, span'));
+                for (var el of headerEls) {
+                    var text = (el.innerText || '').trim();
+                    if (text === 'Admin:' && el.offsetHeight > 0) {
+                        return 'COLLAPSED_TO_ADMIN (Nama merchant hilang, hanya tersisa Admin:)';
+                    }
+                }
+            }
+
+            return null;
+        """)
+        return err_info
+    except Exception:
+        return None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -2186,6 +2436,7 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
 
                     if otp_code == "AUTO_APPROVED":
                         log.info(f"✅ [AUTH] Login berhasil diverifikasi secara otomatis (link/approval)! Melanjutkan...")
+                        extract_and_sync_spc_clientid(driver)
                         return True
 
                     try:
@@ -2323,6 +2574,7 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
 
                             if is_on_post_login:
                                 log.info(f"✅ [AUTH] Verifikasi OTP berhasil! Redirect ke '{url_path}' terdeteksi.")
+                                extract_and_sync_spc_clientid(driver)
                                 return True
                         
                         # Re-check error after wait
@@ -2397,6 +2649,7 @@ def _perform_login(driver, wait, username: str = None, password: str = None, pho
         log.error(f"❌ [AUTH] Login did not redirect to dashboard and is still on: {url_full}. Aborting.")
         return False
 
+    extract_and_sync_spc_clientid(driver)
     return True
 
 def auto_switch_merchant(driver, target_name, is_retry=False):
@@ -2406,11 +2659,31 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
     """
     log.info(f"🔄 [MERCHANT] Switching to: {target_name}...")
     try:
+        # Fast pre-check: If already active as target and no error modal, do nothing and return immediately!
+        if not is_retry:
+            try:
+                current_ui_name = driver.find_element(By.CSS_SELECTOR, ".merchantName").text.strip()
+                if is_merchant_match(target_name, current_ui_name):
+                    ui_err = detect_shopee_ui_error(driver)
+                    if not ui_err:
+                        log.info(f"✅ [MERCHANT] Already active as target: {current_ui_name}")
+                        return True
+                    else:
+                        log.warning(f"  ⚠️ Target cocok ({current_ui_name}) tapi ada error UI terdeteksi: '{ui_err}'")
+            except:
+                pass
+
+        # Ensure SPC_CLIENTID cookie is present before interacting with UI switch menu
+        ensure_spc_clientid(driver)
+
+        # 0. Fast Loader Removal
+        driver.execute_script("document.querySelectorAll('.ant-spin, [class*=\"loading\"], .shopee-loading').forEach(el => el.remove());")
+        
         wait = WebDriverWait(driver, 15)
 
         js_selector_click = """
             // PHASE 1: Selalu klik merchant pertama di list untuk bypass selector page.
-            // Tujuannya hanya keluar dari halaman ini - PHASE 2 yang handle switch ke target.
+            // Tujuannya hanya keluar dari halaman ini — PHASE 2 yang handle switch ke target.
             // Merchant baru (yang perlu di-accept) selalu muncul di posisi paling atas.
             var listItems = document.querySelectorAll('.listItem, .merchant-item, li[class*="item"]');
             for (var i = 0; i < listItems.length; i++) {
@@ -2469,8 +2742,8 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
                         # Re-check current name after landing on dashboard
                         if "/food/dashboard" in driver.current_url:
                             try:
-                                actual_name = driver.find_element(By.CSS_SELECTOR, ".merchantName").text.strip().lower()
-                                if target_name.lower() in actual_name:
+                                actual_name = driver.find_element(By.CSS_SELECTOR, ".merchantName").text
+                                if is_merchant_match(target_name, actual_name):
                                     return True
                                 else:
                                     log.info(f"  📍 Landed on dashboard as '{actual_name}'. Will switch to target now.")
@@ -2487,135 +2760,270 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
 
         # PHASE 2: Dashboard Switch Logic
         if "/food/dashboard" not in driver.current_url:
-            if any(marker in driver.current_url.lower() for marker in ("/login", "authenticate")):
-                log.warning("  ⚠️ Merchant switch stopped: browser is on an authentication page.")
-                return False
             driver.get(PARTNER_DASHBOARD)
-        try:
-            WebDriverWait(driver, 20).until(
-                lambda d: d.execute_script("return document.readyState") == "complete"
-            )
-        except Exception:
-            log.warning("  ⚠️ Dashboard document did not reach readyState=complete (URL: %s).", driver.current_url)
+            time.sleep(2)
         
-        for switch_attempt in range(2):
-            # Dismiss any overlapping Ant Design popups/modals/banners before finding profile_menu
-            try:
-                driver.execute_script("""
-                    var popups = document.querySelectorAll('.ant-modal-close, button.close, [aria-label="Close"], .ant-notification-notice-close');
-                    popups.forEach(function(el) {
-                        if (el && typeof el.click === 'function') el.click();
-                    });
-                """)
-            except Exception:
-                pass
-
-            # Use ActionChains to hover Profile then "Pilih Merchant Lain"
+        for switch_attempt in range(3):
+            # Use ActionChains to hover Profile then "Switch Merchant" / "Pilih Merchant Lain"
             dropdown_opened = False
             try:
                 actions = ActionChains(driver)
                 # 1. Hover/Click merchantName (Profile)
-                profile_menu = None
-                for sel in [".merchantName", "[class*='merchantName']", ".user-info", ".ant-dropdown-trigger"]:
-                    try:
-                        profile_menu = WebDriverWait(driver, 10 if sel == ".merchantName" else 3).until(
-                            EC.visibility_of_element_located((By.CSS_SELECTOR, sel))
-                        )
-                        if profile_menu:
-                            break
-                    except Exception:
-                        continue
-                if not profile_menu:
-                    raise Exception("Profile menu trigger element not found on dashboard.")
+                profile_menu = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".merchantName, .adminWrapper, .header-right, [class*='merchantName']")))
                 actions.move_to_element(profile_menu).click().perform()
                 time.sleep(1)
                 
-                # 2. Cek apakah dropdown terbuka dengan timeout SINGKAT (3 detik)
-                #    Jika 3 detik tidak muncul, sesi kemungkinan stale/overlay menghalangi.
-                quick_wait = WebDriverWait(driver, 3)
-                try:
-                    switch_trigger = quick_wait.until(EC.presence_of_element_located((By.XPATH, "//span[contains(text(), 'Pilih Merchant Lain') or contains(text(), 'Switch Merchant')]")))
-                    # Harus di-click agar sub-menu daftar merchant muncul dengan benar (tidak sekadar hover)
-                    actions.move_to_element(switch_trigger).click().perform()
-                    dropdown_opened = True
-                    time.sleep(1)
-                except:
-                    # Fallback: coba JS click dan CEK hasilnya
-                    js_found = driver.execute_script("""
-                        var spans = document.querySelectorAll('span, p, div');
-                        for (var s of spans) {
-                            var text = (s.innerText || '').trim();
-                            if (text.includes('Pilih Merchant Lain') || text.includes('Switch Merchant')) {
-                                s.click();
-                                return true;
+                # 2. Buka submenu "Switch Merchant" / "Pilih Merchant Lain"
+                # Submenu di Ant Design terbuka saat HOVER (mouseenter) pada container submenu (.ant-dropdown-menu-submenu)
+                submenu_opened = False
+                for open_sub_attempt in range(3):
+                    # Dispatch mouseenter & pointerover ke trigger dan parent li via JS
+                    driver.execute_script("""
+                        var all = Array.from(document.querySelectorAll('.ant-dropdown:not(.ant-dropdown-hidden) *, span, div, li, a, p'));
+                        var trigger = all.find(function(el) {
+                            var t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                            return t === 'switch merchant' || t === 'pilih merchant lain' ||
+                                   t.startsWith('switch merchant') || t.startsWith('pilih merchant');
+                        });
+                        if (!trigger) return;
+
+                        var title = trigger.closest('.ant-dropdown-menu-submenu-title') || trigger;
+                        var li = trigger.closest('.ant-dropdown-menu-submenu') || trigger.closest('li') || trigger;
+
+                        var events = ['pointerenter', 'pointerover', 'mouseenter', 'mouseover', 'mousemove'];
+                        for (var el of [trigger, title, li]) {
+                            if (!el) continue;
+                            for (var ev of events) {
+                                try {
+                                    el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }));
+                                } catch(e) {}
                             }
                         }
-                        return false;
                     """)
-                    if js_found:
-                        dropdown_opened = True
-                        time.sleep(1)
+
+                    # Hover juga via Selenium ActionChains
+                    try:
+                        switch_trigger = driver.find_element(By.XPATH, "//span[contains(text(), 'Switch Merchant') or contains(text(), 'Pilih Merchant Lain')]")
+                        ActionChains(driver).move_to_element(switch_trigger).pause(0.5).perform()
+                    except Exception:
+                        pass
+
+                    time.sleep(1.0)
+
+                    # Cek apakah submenu (.ant-dropdown-menu-sub atau popup terpisah) sudah ter-render di DOM
+                    sub_check = driver.execute_script("""
+                        var subs = document.querySelectorAll('.ant-dropdown-menu-sub, .ant-dropdown-menu-submenu-popup, ul[class*="menu-sub"]');
+                        for (var s of subs) {
+                            var rect = s.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {
+                                var items = s.querySelectorAll('li, [role="menuitem"], .ant-dropdown-menu-item');
+                                if (items.length > 0) return { open: true, count: items.length };
+                            }
+                        }
+                        var allMenus = document.querySelectorAll('.ant-dropdown-menu, ul[role="menu"]');
+                        for (var m of allMenus) {
+                            var items = m.querySelectorAll('li, [role="menuitem"], .ant-dropdown-menu-item');
+                            if (items.length > 5) return { open: true, count: items.length };
+                        }
+                        return { open: false, count: 0 };
+                    """)
+
+                    if sub_check and sub_check.get("open"):
+                        submenu_opened = True
+                        log.info(f"  ✅ Submenu 'Switch Merchant' terbuka ({sub_check.get('count')} outlet terdeteksi).")
+                        break
+                    else:
+                        # Jika hover belum memunculkan submenu, coba click langsung pada title submenu
+                        log.debug("  Hover belum memunculkan submenu, mencoba click submenu title...")
+                        driver.execute_script("""
+                            var all = Array.from(document.querySelectorAll('.ant-dropdown:not(.ant-dropdown-hidden) *, span, div, li, a, p'));
+                            var trigger = all.find(function(el) {
+                                var t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                return t === 'switch merchant' || t === 'pilih merchant lain' ||
+                                       t.startsWith('switch merchant') || t.startsWith('pilih merchant');
+                            });
+                            if (trigger) {
+                                var title = trigger.closest('.ant-dropdown-menu-submenu-title') || trigger;
+                                title.click();
+                            }
+                        """)
+                        time.sleep(1.0)
+                        sub_check = driver.execute_script("""
+                            var subs = document.querySelectorAll('.ant-dropdown-menu-sub, .ant-dropdown-menu-submenu-popup, ul[class*="menu-sub"]');
+                            for (var s of subs) {
+                                var rect = s.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0) {
+                                    var items = s.querySelectorAll('li, [role="menuitem"], .ant-dropdown-menu-item');
+                                    if (items.length > 0) return { open: true, count: items.length };
+                                }
+                            }
+                            return { open: false, count: 0 };
+                        """)
+                        if sub_check and sub_check.get("open"):
+                            submenu_opened = True
+                            log.info("  ✅ Submenu 'Switch Merchant' berhasil terbuka via click.")
+                            break
+
+                if not submenu_opened:
+                    log.warning(f"  ⚠️ Dropdown submenu merchant tidak terbuka pada attempt {switch_attempt+1}.")
+                    if switch_attempt == 2:
+                        return False
+                    continue
+
+                dropdown_opened = True
+                log.info("  ⏳ Menunggu seluruh daftar merchant (80+ outlet) selesai dimuat...")
+                time.sleep(4.0)  # Waktu tunggu ekstra sesuai permintaan user untuk lazy-load 80+ outlet
             except Exception as e:
                 err_str = str(e)
-                log.warning(
-                    "  ⚠️ Failed to trigger merchant menu at %s: %s",
-                    driver.current_url, err_str,
-                )
-                # A missing selector is not proof of an expired session. Only
-                # the caller may reauthenticate after positively detecting an
-                # auth/login page; otherwise stop and report the page state.
-                return False
+                log.warning(f"  ⚠️ Failed to trigger merchant menu: {err_str}")
+                if "TimeoutException" in err_str or "merchantName" not in driver.page_source:
+                    log.warning("  ⚠️ [STALE SESSION] Elemen profil (.merchantName) tidak ditemukan. Sesi kemungkinan kedaluwarsa.")
+                    return False
+                    
+                if switch_attempt == 2:
+                    return False
+                continue
 
             if not dropdown_opened:
-                log.warning(
-                    "  ⚠️ Merchant menu did not open at %s; this is not sufficient evidence that the session expired.",
-                    driver.current_url,
-                )
+                log.warning(f"  ⚠️ [STALE SESSION] Dropdown profil tidak terbuka setelah klik — sesi kemungkinan kedaluwarsa.")
                 return False
 
-            # Use JS to click the target merchant in the revealed list
-            js_switch_script = """
+            # Use JS to click the target merchant in the revealed submenu list
+            # STRICT EXACT MATCH ONLY during initial scan with scrolling across all items
+            js_switch_script = r"""
                 var targetName = arguments[0].toLowerCase().trim();
-                var items = document.querySelectorAll('li.ant-menu-item, li[role="menuitem"], .ant-dropdown-menu-item, [class*="menu-item"]');
+                var subContainer = document.querySelector('.ant-dropdown-menu-sub, .ant-dropdown-menu-submenu-popup, ul[class*="menu-sub"]');
+                var items = subContainer ? subContainer.querySelectorAll('li, [role="menuitem"], .ant-dropdown-menu-item, [class*="menu-item"]') : document.querySelectorAll('li.ant-menu-item, li[role="menuitem"], .ant-dropdown-menu-item, [class*="menu-item"]');
+                
+                function cleanName(s) {
+                    return (s || "").toLowerCase()
+                        .replace(/^\[.*?\]\s*/, '')
+                        .replace(/[\s_\-]+$/, '')
+                        .replace(/^[\s_\-]+/, '')
+                        .replace(/[\.…\s]+$/, '')
+                        .trim();
+                }
+                var cleanTarget = cleanName(targetName);
+                
+                function clickItem(el) {
+                    el.scrollIntoView({block: 'center'});
+                    var events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                    for (var k = 0; k < events.length; k++) {
+                        try {
+                            var evt = new MouseEvent(events[k], { bubbles: true, cancelable: true, view: window });
+                            el.dispatchEvent(evt);
+                        } catch(e) {}
+                    }
+                    try { el.click(); } catch(e) {}
+                    return true;
+                }
+                
+                // PASS 1: Strict raw exact match
                 for (var i = 0; i < items.length; i++) {
-                    var text = (items[i].innerText || "").toLowerCase().trim();
-                    if (text === targetName || text.includes(targetName)) {
-                        items[i].scrollIntoView({block: 'center'});
-                        items[i].click();
-                        return true;
+                    var text = (items[i].innerText || items[i].textContent || "").toLowerCase().trim();
+                    if (text === targetName) {
+                        return clickItem(items[i]);
+                    }
+                }
+                
+                // PASS 2: Cleaned exact match (e.g. [SR] Warung Presiden_ vs Warung Presiden)
+                if (cleanTarget.length > 0) {
+                    for (var i = 0; i < items.length; i++) {
+                        var text = cleanName(items[i].innerText || items[i].textContent || "");
+                        if (text === cleanTarget) {
+                            return clickItem(items[i]);
+                        }
                     }
                 }
                 return false;
             """
             
             found_target = False
-            # Polling selama 5 detik dengan SCROLL untuk memastikan seluruh daftar termuat (Lazy Load)
-            for _ in range(5):
+            # Scroll through the dropdown list (35 scroll steps with 0.8s pause to thoroughly cover 80+ merchants)
+            for scroll_idx in range(35):
                 if driver.execute_script(js_switch_script, target_name):
                     found_target = True
                     break
-                # Scroll ke bawah di dalam elemen dropdown/list untuk memuat sisa merchant
                 try:
-                    driver.execute_script("document.querySelectorAll('.ant-dropdown-menu, ul[role=\"menu\"], .ant-popover-inner-content').forEach(el => el.scrollTop += 600);")
-                except: pass
-                time.sleep(1)
+                    driver.execute_script("""
+                        var containers = document.querySelectorAll('.ant-dropdown-menu-sub, .ant-dropdown-menu-submenu-popup, .ant-dropdown-menu, ul[role="menu"], .ant-popover-inner-content');
+                        containers.forEach(function(el) { el.scrollTop += 350; });
+                    """)
+                except Exception:
+                    pass
+                time.sleep(0.8)
+                
+            # PASS 3: Fallback ONLY if exact match was not found after full scroll:
+            # check with strict length boundary (diff <= 3 chars) so we NEVER match a different outlet
+            if not found_target:
+                try:
+                    driver.execute_script("""
+                        var containers = document.querySelectorAll('.ant-dropdown-menu-sub, .ant-dropdown-menu-submenu-popup, .ant-dropdown-menu, ul[role="menu"], .ant-popover-inner-content');
+                        containers.forEach(function(el) { el.scrollTop = 0; });
+                    """)
+                except Exception:
+                    pass
+                time.sleep(1.2)
+                
+                js_fuzzy_script = r"""
+                    var targetName = arguments[0].toLowerCase().trim();
+                    var subContainer = document.querySelector('.ant-dropdown-menu-sub, .ant-dropdown-menu-submenu-popup, ul[class*="menu-sub"]');
+                    var items = subContainer ? subContainer.querySelectorAll('li, [role="menuitem"], .ant-dropdown-menu-item, [class*="menu-item"]') : document.querySelectorAll('li.ant-menu-item, li[role="menuitem"], .ant-dropdown-menu-item, [class*="menu-item"]');
+                    
+                    function cleanName(s) {
+                        return (s || "").toLowerCase()
+                            .replace(/^\[.*?\]\s*/, '')
+                            .replace(/[\s_\-]+$/, '')
+                            .replace(/^[\s_\-]+/, '')
+                            .replace(/[\.…\s]+$/, '')
+                            .trim();
+                    }
+                    var cleanTarget = cleanName(targetName);
+                    function clickItem(el) {
+                        el.scrollIntoView({block: 'center'});
+                        var events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                        for (var k = 0; k < events.length; k++) {
+                            try {
+                                var evt = new MouseEvent(events[k], { bubbles: true, cancelable: true, view: window });
+                                el.dispatchEvent(evt);
+                            } catch(e) {}
+                        }
+                        try { el.click(); } catch(e) {}
+                        return true;
+                    }
+                    for (var i = 0; i < items.length; i++) {
+                        var rawText = (items[i].innerText || items[i].textContent || "").toLowerCase().trim();
+                        var cText = cleanName(rawText);
+                        if (cText.includes(cleanTarget) || cleanTarget.includes(cText)) {
+                            // ONLY allow if length diff <= 3 (minor typo/punctuation difference)
+                            if (Math.abs(cText.length - cleanTarget.length) <= 3) {
+                                return clickItem(items[i]);
+                            }
+                        }
+                    }
+                    return false;
+                """
+                for _ in range(35):
+                    if driver.execute_script(js_fuzzy_script, target_name):
+                        found_target = True
+                        break
+                    try:
+                        driver.execute_script("""
+                            var containers = document.querySelectorAll('.ant-dropdown-menu-sub, .ant-dropdown-menu-submenu-popup, .ant-dropdown-menu, ul[role="menu"], .ant-popover-inner-content');
+                            containers.forEach(function(el) { el.scrollTop += 350; });
+                        """)
+                    except Exception:
+                        pass
+                    time.sleep(0.8)
                 
             if found_target:
                 log.debug(f"  ✅ Clicked {target_name} in menu.")
             else:
-                log.warning(f"  ⚠️ Nama outlet '{target_name}' tidak ditemukan di dropdown (Attempt {switch_attempt+1}/2).")
-                if switch_attempt == 1:
-                    msg = f"Nama outlet '{target_name}' tidak terdaftar atau belum ditambahkan (invite) di akun Shopee ini."
-                    log.error(f"❌ {msg}")
-                    # Mengirimkan error ke Discord secara langsung karena ini fatal dan kita akan langsung abort.
-                    send_discord_error(
-                        platform="Shopee", 
-                        merchant=target_name, 
-                        error_type="SYSTEM_ERROR", 
-                        message=msg
-                    )
-                    # Lempar error spesifik agar pipeline terluar menangkapnya
-                    raise ValueError(f"MERCHANT_NOT_FOUND: {target_name}")
+                log.warning(f"  ⚠️ Nama outlet '{target_name}' tidak ditemukan di dropdown (Attempt {switch_attempt+1}/3).")
+                if switch_attempt == 2:
+                    msg = f"Nama outlet '{target_name}' tidak ditemukan di dropdown setelah 3x percobaan pencarian."
+                    log.warning(f"⚠️ {msg}")
+                    return False
                 continue # Ulangi proses klik profil dan buka dropdown dari awal
 
             # Wait to see if we redirect to onboarding invitation page
@@ -2638,28 +3046,87 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
                         return False
                     continue
 
-            # Cek apakah nama merchant di UI berubah dalam 5 detik (Sesuai instruksi User)
+            # Tangani respon klik: Beri jeda untuk backend Shopee menyelesaikan SwitchMerchant
+            time.sleep(1.5)
+
+            # ── CEK KONDISI 1: Apakah Shopee memunculkan pop-up / toast error tepat setelah klik? ──
+            ui_err = detect_shopee_ui_error(driver)
+            if ui_err:
+                current_ui_name = ""
+                try: current_ui_name = driver.find_element(By.CSS_SELECTOR, ".merchantName").text.strip()
+                except: pass
+                log.warning(f"  🚨 [SWITCH REJECTED] Shopee UI memunculkan error setelah klik '{target_name}': '{ui_err}' (Navbar saat ini: '{current_ui_name or 'Admin'}').")
+                # Backend Shopee menolak switch; tidak ada gunanya menunggu 15s timeout
+                return False
+
+            time.sleep(1.5)
+
+            # Cek apakah nama merchant di UI berubah, jika belum langsung refresh dashboard
             try:
-                log.info(f"  ⏳ Menunggu 5 detik melihat pembaruan nama menjadi {target_name} (Attempt {switch_attempt+1}/3)...")
                 def is_name_updated(d):
                     try:
-                        return target_name.lower() in d.find_element(By.CSS_SELECTOR, ".merchantName").text.lower()
+                        actual = d.find_element(By.CSS_SELECTOR, ".merchantName").text.strip()
+                        return actual if is_merchant_match(target_name, actual) else False
                     except:
                         return False
-                        
-                WebDriverWait(driver, 5).until(is_name_updated)
-                log.info(f"✅ [MERCHANT] Switched to: {target_name}")
+
+                # 1. Cek langsung di UI SPA
+                matched_name = is_name_updated(driver)
+                
+                # 2. Jika UI SPA belum berubah (misal karena toast atau React belum re-render), refresh dashboard
+                if not matched_name:
+                    # Cek error sebelum refresh
+                    ui_err = detect_shopee_ui_error(driver)
+                    if ui_err:
+                        log.warning(f"  🚨 [SWITCH REJECTED] Terdeteksi popup/toast error saat menunggu update nama '{target_name}': '{ui_err}'")
+                        return False
+
+                    log.info(f"  🔄 [MERCHANT] Merefresh dashboard untuk memastikan sesi merchant baru aktif...")
+                    driver.get(PARTNER_DASHBOARD)
+                    time.sleep(2)
+
+                    # Cek error setelah refresh
+                    ui_err = detect_shopee_ui_error(driver)
+                    if ui_err:
+                        log.warning(f"  🚨 [SWITCH REJECTED] Terdeteksi popup/toast error setelah refresh: '{ui_err}'")
+                        return False
+
+                    matched_name = WebDriverWait(driver, 10).until(is_name_updated)
+
+                log.info(f"✅ [MERCHANT] Switched to: {matched_name or target_name}")
+                try:
+                    cookies_list = driver.get_cookies()
+                    cookies_dict = {c["name"]: c["value"] for c in cookies_list}
+                    new_token = cookies_dict.get("shopee_tob_token")
+                    if new_token:
+                        save_session(
+                            tob_token=new_token,
+                            entity_id=cookies_dict.get("shopee_tob_entity_id") or cookies_dict.get("shopee_foody_mid") or "",
+                            extra_cookies=cookies_dict
+                        )
+                        log.info(f"💾 [SESSION] Updated session.json with active {target_name} tokens.")
+                except Exception as _save_err:
+                    log.warning(f"⚠️ Failed to update session after switch: {_save_err}")
                 return True
-            except:
-                log.warning(f"⚠️ [MERCHANT] UI name belum berubah ke {target_name}.")
+            except Exception as e:
+                actual_seen = ""
+                try: actual_seen = driver.find_element(By.CSS_SELECTOR, ".merchantName").text.strip()
+                except: pass
+
+                ui_err = detect_shopee_ui_error(driver)
+                if ui_err:
+                    log.warning(f"  🚨 [SWITCH REJECTED] Terdeteksi error UI: '{ui_err}' (terlihat: '{actual_seen}').")
+                    return False
+
+                log.warning(f"  ⚠️ [MERCHANT] UI name belum berubah ke '{target_name}' (terlihat: '{actual_seen}', Attempt {switch_attempt+1}/3).")
                 if switch_attempt == 2:
-                    log.warning(f"❌ [MERCHANT] Gagal melakukan switch ke {target_name} setelah 3x percobaan klik.")
+                    log.warning(f"  ❌ [SILENT FAILURE] Sesi terkunci/stuck pada '{actual_seen}' dan tidak berganti ke '{target_name}' setelah 3x percobaan.")
                     if is_retry:
                         send_discord_error(
                             platform="Shopee", 
                             merchant=target_name, 
                             error_type="SYSTEM_ERROR", 
-                            message=f"Dashboard tidak memuat profil outlet '{target_name}' meskipun sudah 3x dipilih di menu."
+                            message=f"Dashboard tidak memuat profil outlet '{target_name}' meskipun sudah 3x dipilih di menu (terkunci pada '{actual_seen}')."
                         )
                     return False
                 # Jika belum attempt terakhir, loop akan berputar dan mengulang klik dari awal
@@ -2668,9 +3135,6 @@ def auto_switch_merchant(driver, target_name, is_retry=False):
             raise e
         log.error(f"❌ Auto-switch failed: {e}")
         return False
-
-
-
 
 
 def _handle_merchant_selection(driver, active_id_forced=None, interactive=True):
