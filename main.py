@@ -5559,16 +5559,16 @@ async def parse_c5_endpoint(
             })
 
         # Character length limits per platform:
-        # User rule: GoFood (go) = 150, Grab = 60, Shopee = 80
+        # User rule: GoFood (go) = 150, Grab = 80, Shopee = 80
         # Category <= 80 karakter, Description <= 250 karakter
         base_plat_str = str(baseline.get("baseline_platform") or "").lower()
         sid_str = str(sid or "").strip()
-        if "grab" in base_plat_str or sid_str.startswith("6-") or "IDGF" in sid_str:
-            max_name_limit = 60
+        if "go" in base_plat_str or (sid_str.startswith(("G", "M")) and sid_str[1:].isdigit()):
+            max_name_limit = 150
+        elif "grab" in base_plat_str or sid_str.startswith("6-") or "IDGF" in sid_str:
+            max_name_limit = 80
         elif "shopee" in base_plat_str:
             max_name_limit = 80
-        elif "go" in base_plat_str or (sid_str.startswith(("G", "M")) and sid_str[1:].isdigit()):
-            max_name_limit = 150
         else:
             max_name_limit = 80
 
@@ -6248,14 +6248,14 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
             detail=f"Urutan kategori tidak valid: {full_detail}. Kategori yang sama terpecah / diselingi kategori lain. Semua item dalam kategori yang sama harus dikelompokkan bersama dalam baris yang berurutan. Perbaiki urutan di file C5 sebelum push."
         )
 
-    # ── Field Character Length Validations (Per Platform: GoFood=150, Grab=60, Shopee=80) ──
-    # User rule: GoFood (go) = 150, Grab = 60, Shopee = 80
-    if "grab" in target_platform:
-        max_item_name_len = 60
+    # ── Field Character Length Validations (Per Platform: GoFood=150, Grab=80, Shopee=80) ──
+    # User rule: GoFood (go) = 150, Grab = 80, Shopee = 80
+    if "go" in target_platform:
+        max_item_name_len = 150
+    elif "grab" in target_platform:
+        max_item_name_len = 80
     elif "shopee" in target_platform:
         max_item_name_len = 80
-    elif "go" in target_platform:
-        max_item_name_len = 150
     else:
         max_item_name_len = 80
 
