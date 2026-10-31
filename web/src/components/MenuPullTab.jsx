@@ -52,6 +52,11 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
   const pollingIntervalsRef = useRef({});
   const activeJobsRef = useRef([]);
   const hasTriggeredCombineRef = useRef(false);
+  // Refs, not state: polling closures created at pull time must see the current batch.
+  const batchIdRef = useRef(null);
+  const batchLabelRef = useRef("");
+  const [combineError, setCombineError] = useState(null);
+  const batchPollRef = useRef(null);
 
   useEffect(() => {
     activeJobsRef.current = activeJobs;
@@ -63,8 +68,92 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
     return `${selectedParents[0]} dan ${selectedParents.length - 1} lainnya`;
   };
 
+  const BATCH_STORAGE_KEY = "menuPull.lastBatch";
+  const COMBINE_FINAL_STATUSES = ["SUCCESS", "FAILED", "COMBINE_FAILED"];
+
+  const stopBatchPolling = () => {
+    if (batchPollRef.current) {
+      clearInterval(batchPollRef.current);
+      batchPollRef.current = null;
+    }
+  };
+
+  // Apply a combine record stored on the backend (see run_batch_combine).
+  const applyCombineRecord = (record) => {
+    if (!record) return false;
+    if (record.status === "COMBINE_FAILED") {
+      setCombining(false);
+      setCombineError(record.error || "Gagal menggabungkan file C5.");
+      return true;
+    }
+    setCombineError(null);
+    setCombining(record.status === "COMBINING");
+    if (record.download_url) {
+      setCombinedResult({
+        ...record,
+        gspread_status: record.gspread_status || record.status,
+        combine_error: record.error || null,
+      });
+    }
+    return COMBINE_FINAL_STATUSES.includes(record.status);
+  };
+
+  // The combine may run in the worker, so the browser only follows its status.
+  const followBatchCombine = (id) => {
+    stopBatchPolling();
+    let attempts = 0;
+    const poll = async () => {
+      attempts += 1;
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/jobs/batch/${id}/combine`, {
+          headers: { "X-API-Key": API_SECRET_KEY || "" }
+        });
+        if (!res.ok) throw new Error(`Batch status returned ${res.status}`);
+        const data = await res.json();
+        // all_done without a record: nothing to follow (e.g. every job cancelled).
+        if (applyCombineRecord(data.combine) || (data.all_done && !data.combine)) stopBatchPolling();
+      } catch (err) {
+        console.warn("Gagal membaca status combine C5:", err);
+      }
+      if (attempts >= 90 && batchPollRef.current) {
+        stopBatchPolling();
+        setCombining(false);
+      }
+    };
+    poll();
+    batchPollRef.current = setInterval(poll, 2000);
+  };
+
   // Trigger C5 combination for current outlet
-  const triggerCombineC5 = async (jobList = activeJobs, outletName = getOutletDisplayName()) => {
+  const triggerCombineC5 = async (jobList = activeJobs, outletName = batchLabelRef.current || getOutletDisplayName(), { force = false } = {}) => {
+    const batchId = batchIdRef.current;
+    if (batchId) {
+      setCombining(true);
+      setCombineError(null);
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/jobs/combine-c5`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-API-Key": API_SECRET_KEY || ""
+          },
+          body: JSON.stringify({ batch_id: batchId, outlet_name: outletName || "Combined Outlet", force })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setCombining(false);
+          setCombineError(data.detail || "Gagal menggabungkan file C5.");
+          return;
+        }
+        if (!applyCombineRecord(data)) followBatchCombine(batchId);
+      } catch (err) {
+        console.error("Error trigger combine-c5:", err);
+        setCombining(false);
+        setCombineError("Server tidak dapat dihubungi untuk menggabungkan C5.");
+      }
+      return;
+    }
+
     const successJobs = jobList.filter((j) => j.status === "SUCCESS" && j.id && !String(j.id).startsWith("err-"));
     const successJobIds = successJobs.map((j) => j.id);
     if (successJobIds.length === 0) return;
@@ -205,6 +294,42 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
 
     return () => controller.abort();
   }, [selectedPlatforms, API_BASE_URL, API_SECRET_KEY]);
+
+  // Keep the last pull session so a page refresh can pick it back up.
+  useEffect(() => {
+    if (!batchIdRef.current || activeJobs.length === 0) return;
+    const jobs = activeJobs.filter((j) => !String(j.id).startsWith("err-"));
+    localStorage.setItem(BATCH_STORAGE_KEY, JSON.stringify({
+      batchId: batchIdRef.current,
+      label: batchLabelRef.current,
+      jobs,
+    }));
+  }, [activeJobs]);
+
+  useEffect(() => {
+    let saved;
+    try {
+      saved = JSON.parse(localStorage.getItem(BATCH_STORAGE_KEY) || "null");
+    } catch {
+      saved = null;
+    }
+    if (!saved?.batchId || !saved.jobs?.length) return;
+
+    batchIdRef.current = saved.batchId;
+    batchLabelRef.current = saved.label || "";
+    activeJobsRef.current = saved.jobs;
+    setActiveJobs(saved.jobs);
+    const unfinished = saved.jobs.filter((j) => j.status === "PENDING" || j.status === "RUNNING");
+    hasTriggeredCombineRef.current = unfinished.length === 0;
+    if (unfinished.length > 0) {
+      setTriggering(true);
+      unfinished.forEach((j) => startPollingJob(j.id));
+    }
+    followBatchCombine(saved.batchId);
+    return stopBatchPolling;
+    // Runs once on mount; the helpers only read refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Extract unique owners from allOutlets
   const uniqueOwners = Array.from(
@@ -400,7 +525,13 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
 
     setTriggering(true);
     setCombinedResult(null);
+    setCombineError(null);
+    stopBatchPolling();
     hasTriggeredCombineRef.current = false;
+    // randomUUID only exists in secure contexts; the dashboard may be served over plain http.
+    batchIdRef.current = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    batchLabelRef.current = getOutletDisplayName();
+    const batchQuery = `&batch_id=${encodeURIComponent(batchIdRef.current)}&batch_label=${encodeURIComponent(batchLabelRef.current)}`;
 
     // Filter branches details that are checked
     const targets = availableBranches.filter((b) => checkedBranchIds.includes(b.id));
@@ -412,7 +543,7 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
     for (const target of targets) {
       const branchLabel = target.brand || target.nama_outlet || target.merchant_name;
       try {
-        const res = await fetch(`${API_BASE_URL}/api/jobs/pull?outlet_id=${target.id}`, {
+        const res = await fetch(`${API_BASE_URL}/api/jobs/pull?outlet_id=${target.id}${batchQuery}`, {
           method: "POST",
           headers: { "X-API-Key": API_SECRET_KEY || "" }
         });
@@ -466,7 +597,10 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
     hasTriggeredCombineRef.current = false;
 
     try {
-      const res = await fetch(`${API_BASE_URL}/api/jobs/pull?outlet_id=${outletId}`, {
+      const batchQuery = batchIdRef.current
+        ? `&batch_id=${encodeURIComponent(batchIdRef.current)}&batch_label=${encodeURIComponent(batchLabelRef.current)}`
+        : "";
+      const res = await fetch(`${API_BASE_URL}/api/jobs/pull?outlet_id=${outletId}${batchQuery}`, {
         method: "POST",
         headers: { "X-API-Key": API_SECRET_KEY || "" }
       });
@@ -836,6 +970,18 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
               <p className="text-[13px] font-bold uppercase tracking-[0.18em] text-red-600 dark:text-zinc-400">Aktivitas</p>
               <h2 className="mt-1 text-xl font-bold text-slate-900 dark:text-white">Status penarikan menu</h2>
             </div>
+            {!isPulling && activeJobs.some((j) => j.status === "SUCCESS") && (
+              <button
+                type="button"
+                onClick={() => triggerCombineC5(activeJobs, undefined, { force: true })}
+                className="secondary-action min-h-[36px] gap-1.5 px-3 py-1.5 text-[13px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+              >
+                <svg className="w-3.5 h-3.5 fill-none stroke-current stroke-2" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                <span>Gabung Ulang C5</span>
+              </button>
+            )}
             {isPulling && (
               <button
                 type="button"
@@ -858,6 +1004,12 @@ export default function MenuPullTab({ API_BASE_URL, API_SECRET_KEY }) {
               </svg>
               <span>Menggabungkan file C5 per outlet...</span>
             </div>
+          )}
+
+          {combineError && !combining && (
+            <p role="alert" className="mb-4 rounded-xl border border-red-300 bg-red-50 p-3.5 text-[13px] font-medium text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+              C5 belum tergabung: {combineError} Tekan "Gabung Ulang C5" untuk mencoba lagi.
+            </p>
           )}
 
           {combinedResult && (
