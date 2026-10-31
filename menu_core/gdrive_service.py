@@ -21,6 +21,32 @@ DEFAULT_APPSCRIPT_URL = ""
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
+_EXCEL_WRITE_LOCKS: Dict[str, threading.Lock] = {}
+_EXCEL_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _excel_write_lock(path: str) -> threading.Lock:
+    key = os.path.abspath(path)
+    with _EXCEL_WRITE_LOCKS_GUARD:
+        return _EXCEL_WRITE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _atomic_save_workbook(wb, path: str) -> None:
+    """Save to a temp file in the same directory, then swap it in.
+
+    os.replace is atomic on the same filesystem, so c5_combiner (possibly in
+    another process) sees either the old or the new workbook, never a
+    half-written zip.
+    """
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        wb.save(tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 def _sanitize_name(name: str) -> str:
     """Sanitize folder or file name for filesystem and Drive safe naming."""
     if not name:
@@ -190,37 +216,38 @@ def _restore_cdn_urls_in_excel(excel_path: Optional[str], dishes: List[Dict[str,
         if not url_by_id and not url_by_name:
             return
 
-        wb = openpyxl.load_workbook(excel_path)
-        if "Item" not in wb.sheetnames:
+        with _excel_write_lock(excel_path):
+            wb = openpyxl.load_workbook(excel_path)
+            if "Item" not in wb.sheetnames:
+                wb.close()
+                return
+
+            sheet = wb["Item"]
+            headers = {str(cell.value).strip(): cell.column for cell in sheet[1] if cell.value}
+            photo_col = headers.get("Photo Link")
+            item_id_col = headers.get("Item ID")
+            item_name_col = headers.get("Item") or headers.get("Item Name")
+
+            if not photo_col:
+                wb.close()
+                return
+
+            updated = 0
+            for row_idx in range(DATA_START_ROW, sheet.max_row + 1):
+                row_vals = [sheet.cell(row=row_idx, column=c).value for c in range(1, min(8, sheet.max_column + 1))]
+                if is_c5_reserved_row(row_vals):
+                    continue
+                iid = str(sheet.cell(row=row_idx, column=item_id_col).value or "").strip() if item_id_col else ""
+                iname = str(sheet.cell(row=row_idx, column=item_name_col).value or "").strip().casefold() if item_name_col else ""
+                orig_url = url_by_id.get(iid) or url_by_name.get(iname)
+                if orig_url is not None:
+                    sheet.cell(row=row_idx, column=photo_col, value=orig_url)
+                    updated += 1
+
+            if updated > 0:
+                _atomic_save_workbook(wb, excel_path)
+                logger.info("Restored %d original CDN photo URLs in %s after Drive sync failure.", updated, excel_path)
             wb.close()
-            return
-
-        sheet = wb["Item"]
-        headers = {str(cell.value).strip(): cell.column for cell in sheet[1] if cell.value}
-        photo_col = headers.get("Photo Link")
-        item_id_col = headers.get("Item ID")
-        item_name_col = headers.get("Item") or headers.get("Item Name")
-
-        if not photo_col:
-            wb.close()
-            return
-
-        updated = 0
-        for row_idx in range(DATA_START_ROW, sheet.max_row + 1):
-            row_vals = [sheet.cell(row=row_idx, column=c).value for c in range(1, min(8, sheet.max_column + 1))]
-            if is_c5_reserved_row(row_vals):
-                continue
-            iid = str(sheet.cell(row=row_idx, column=item_id_col).value or "").strip() if item_id_col else ""
-            iname = str(sheet.cell(row=row_idx, column=item_name_col).value or "").strip().casefold() if item_name_col else ""
-            orig_url = url_by_id.get(iid) or url_by_name.get(iname)
-            if orig_url is not None:
-                sheet.cell(row=row_idx, column=photo_col, value=orig_url)
-                updated += 1
-
-        if updated > 0:
-            wb.save(excel_path)
-            logger.info("Restored %d original CDN photo URLs in %s after Drive sync failure.", updated, excel_path)
-        wb.close()
     except Exception as exc:
         logger.warning("Failed to restore CDN photo URLs in Excel %s: %s", excel_path, exc)
 
@@ -233,10 +260,11 @@ def update_excel_folder_link(excel_path: Optional[str], folder_label: str, folde
         import openpyxl
         from menu_core.c5_template_helper import upsert_folder_link_sheet
 
-        wb = openpyxl.load_workbook(excel_path)
-        upsert_folder_link_sheet(wb, [(folder_label, folder_url)])
-        wb.save(excel_path)
-        wb.close()
+        with _excel_write_lock(excel_path):
+            wb = openpyxl.load_workbook(excel_path)
+            upsert_folder_link_sheet(wb, [(folder_label, folder_url)])
+            _atomic_save_workbook(wb, excel_path)
+            wb.close()
         logger.info(f"Updated Folder Link in {excel_path}: {folder_label} -> {folder_url}")
         return True
     except Exception as exc:

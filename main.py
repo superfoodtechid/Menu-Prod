@@ -376,6 +376,9 @@ class PriceUpdateRequest(BaseModel):
 class CombineC5Request(BaseModel):
     job_ids: Optional[List[str]] = None
     outlet_name: Optional[str] = None
+    batch_id: Optional[str] = None
+    # Re-run the combine even if this batch already has a combined file.
+    force: bool = False
 
 class RetryCombineC5Request(BaseModel):
     combine_id: Optional[str] = None
@@ -1003,6 +1006,7 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
     if not job:
         db.close()
         return
+    batch_id = (job.payload or {}).get("batch_id")
 
     platform = (job.platform or "").lower()
     lock = PLATFORM_LOCKS.get(platform)
@@ -1297,6 +1301,13 @@ def run_pull_job(job_id: uuid.UUID, outlet_id: uuid.UUID):
             except Exception as se:
                 logger.warning(f"⚠️ Failed to release global browser semaphore: {se}")
         db.close()
+        # Whichever job finishes last combines the session, so the C5 file no
+        # longer depends on the browser tab staying open.
+        if batch_id:
+            try:
+                run_batch_combine(batch_id)
+            except Exception as ce:
+                logger.warning("Auto-combine C5 untuk batch %s gagal: %s", batch_id, ce)
 
 
 def run_push_price_job(job_id: uuid.UUID, outlet_id: uuid.UUID, updates_list: list):
@@ -2189,6 +2200,8 @@ def trigger_push_price_job(request: PriceUpdateRequest, background_tasks: Backgr
 def trigger_pull_job(
     outlet_id: uuid.UUID,
     worker_target: str = Query("auto", description="vm1, pi, atau auto"),
+    batch_id: Optional[str] = Query(None, max_length=64, description="ID sesi PULL untuk auto-combine C5"),
+    batch_label: Optional[str] = Query(None, max_length=255, description="Nama outlet untuk file C5 gabungan"),
     db: Session = Depends(get_db),
 ):
     try:
@@ -2220,6 +2233,8 @@ def trigger_pull_job(
             "store_id": outlet.store_id,
             "merchant_name": outlet.merchant_name,
             "worker_target": worker_target,
+            "batch_id": (batch_id or "").strip() or None,
+            "batch_label": (batch_label or "").strip() or None,
         }
     )
     db.add(new_job)
@@ -2354,12 +2369,130 @@ def download_job_file(job_id: uuid.UUID, db: Session = Depends(get_db)):
 
 COMBINE_STATUS: Dict[str, Dict[str, Any]] = {}
 
+TERMINAL_JOB_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
+# A COMBINING marker older than this is treated as a crashed run and can be reclaimed.
+BATCH_COMBINE_STALE_SECONDS = 15 * 60
+_BATCH_COMBINE_LOCK = threading.Lock()
+
+
+def _lock_batch_rows(db: Session, batch_id: str) -> None:
+    # API and worker are separate processes, so the in-process lock is not
+    # enough on Postgres. The advisory lock is released on commit/rollback.
+    if db.bind.dialect.name == "postgresql":
+        import hashlib
+        from sqlalchemy import text
+        key = int.from_bytes(hashlib.sha1(batch_id.encode()).digest()[:8], "big", signed=True)
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
+def _query_batch_jobs(db: Session, batch_id: str) -> List[Job]:
+    return (
+        db.query(Job)
+        .filter(Job.job_type == "PULL", Job.payload["batch_id"].as_string() == batch_id)
+        .all()
+    )
+
+
+def _get_batch_combine_record(jobs: List[Job]) -> Dict[str, Any]:
+    for job in jobs:
+        record = (job.payload or {}).get("batch_combine")
+        if record:
+            return dict(record)
+    return {}
+
+
+def _write_batch_combine_record(jobs: List[Job], record: Dict[str, Any]) -> None:
+    # Stored in payload (not result_metadata) because photo sync rewrites
+    # result_metadata from background threads.
+    from sqlalchemy.orm.attributes import flag_modified
+    record["updated_at"] = datetime.utcnow().isoformat()
+    for job in jobs:
+        payload = dict(job.payload or {})
+        payload["batch_combine"] = record
+        job.payload = payload
+        flag_modified(job, "payload")
+
+
+def _update_batch_combine(batch_id: Optional[str], updates: Dict[str, Any]) -> None:
+    if not batch_id:
+        return
+    from menu_core.database import SessionLocal
+    try:
+        with _BATCH_COMBINE_LOCK, SessionLocal() as db:
+            _lock_batch_rows(db, batch_id)
+            jobs = _query_batch_jobs(db, batch_id)
+            if not jobs:
+                return
+            record = _get_batch_combine_record(jobs)
+            record.update(updates)
+            _write_batch_combine_record(jobs, record)
+            db.commit()
+    except Exception as exc:
+        logger.warning("Gagal menyimpan status combine batch %s: %s", batch_id, exc)
+
+
+def _claim_batch_combine(db: Session, batch_id: str, force: bool, outlet_name: Optional[str]):
+    """Return (job_ids, label, record). job_ids is None when this caller must not combine."""
+    with _BATCH_COMBINE_LOCK:
+        _lock_batch_rows(db, batch_id)
+        jobs = _query_batch_jobs(db, batch_id)
+        record = _get_batch_combine_record(jobs)
+        success_ids = sorted(str(j.id) for j in jobs if j.status == "SUCCESS")
+        all_done = bool(jobs) and all(j.status in TERMINAL_JOB_STATUSES for j in jobs)
+        if not all_done or not success_ids:
+            db.rollback()
+            return None, None, record
+
+        status_value = record.get("status")
+        started_at = record.get("started_at")
+        combining_fresh = status_value == "COMBINING" and started_at and (
+            datetime.utcnow() - datetime.fromisoformat(started_at)
+        ).total_seconds() < BATCH_COMBINE_STALE_SECONDS
+        # A re-run job adds a new SUCCESS id, so the batch needs a new combine.
+        already_done = record.get("job_ids") == success_ids and status_value != "COMBINING"
+        if combining_fresh or (already_done and not force):
+            db.rollback()
+            return None, None, record
+
+        label = (
+            (outlet_name or "").strip()
+            or next(((j.payload or {}).get("batch_label") for j in jobs if (j.payload or {}).get("batch_label")), None)
+            or "Combined Outlet"
+        )
+        record = {
+            "batch_id": batch_id,
+            "status": "COMBINING",
+            "job_ids": success_ids,
+            "outlet_name": label,
+            "started_at": datetime.utcnow().isoformat(),
+        }
+        _write_batch_combine_record(jobs, record)
+        db.commit()
+        return success_ids, label, record
+
+
+def run_batch_combine(batch_id: str, force: bool = False, outlet_name: Optional[str] = None) -> Dict[str, Any]:
+    """Combine a PULL session once every job in it is finished. Safe to call from API and worker."""
+    from menu_core.database import SessionLocal
+    with SessionLocal() as db:
+        job_ids, label, record = _claim_batch_combine(db, batch_id, force, outlet_name)
+        if job_ids is None:
+            return record
+        try:
+            return _execute_combine_and_upload(job_ids, label, db, batch_id=batch_id)
+        except Exception as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            _update_batch_combine(batch_id, {"status": "COMBINE_FAILED", "error": detail})
+            raise
+
+
 def _trigger_bg_combined_upload(
     combine_id: str,
     combined_path: str,
     clean_owner_name: str,
     drive_filename: str,
-    photo_job_ids: List[str]
+    photo_job_ids: List[str],
+    batch_id: Optional[str] = None,
 ):
     def _bg_upload_worker():
         try:
@@ -2368,6 +2501,8 @@ def _trigger_bg_combined_upload(
             url = upload_combined_to_drive(combined_path, clean_owner_name, custom_filename=drive_filename)
             COMBINE_STATUS[combine_id]["gspread_url"] = url
             COMBINE_STATUS[combine_id]["status"] = "SUCCESS" if url else "FAILED"
+            final_status = "SUCCESS" if url else "FAILED"
+            _update_batch_combine(batch_id, {"status": final_status, "gspread_status": final_status, "gspread_url": url})
             logger.info("Upload file gabungan C5 selesai (combine_id=%s): %s", combine_id, url)
             if url:
                 from menu_core.gdrive_service import start_deferred_photo_sync
@@ -2378,6 +2513,7 @@ def _trigger_bg_combined_upload(
             logger.error("Error upload file gabungan C5 ke Google Drive: %s", exc)
             COMBINE_STATUS[combine_id]["status"] = "FAILED"
             COMBINE_STATUS[combine_id]["error"] = str(exc)
+            _update_batch_combine(batch_id, {"status": "FAILED", "gspread_status": "FAILED", "error": str(exc)})
 
     threading.Thread(target=_bg_upload_worker, daemon=True).start()
 
@@ -2386,7 +2522,8 @@ def _execute_combine_and_upload(
     job_ids: Optional[List[str]],
     outlet_name: Optional[str],
     db: Session,
-    clean_override_owner: Optional[str] = None
+    clean_override_owner: Optional[str] = None,
+    batch_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     from menu_core.c5_combiner import combine_c5
     from upload_drive import find_latest_combined_c5_url
@@ -2481,15 +2618,7 @@ def _execute_combine_and_upload(
         "error": None,
     }
 
-    _trigger_bg_combined_upload(
-        combine_id=combine_id,
-        combined_path=combined_path,
-        clean_owner_name=clean_owner_name,
-        drive_filename=drive_filename,
-        photo_job_ids=photo_job_ids,
-    )
-
-    return {
+    response = {
         "ok": True,
         "combine_id": combine_id,
         "excel_filename": excel_filename,
@@ -2503,10 +2632,42 @@ def _execute_combine_and_upload(
         "outlet_name": owner_name
     }
 
+    # Must be written before the upload thread starts, or a fast upload's
+    # SUCCESS could be overwritten by this UPLOADING record.
+    _update_batch_combine(batch_id, {**response, "status": "UPLOADING", "error": None})
+
+    _trigger_bg_combined_upload(
+        combine_id=combine_id,
+        combined_path=combined_path,
+        clean_owner_name=clean_owner_name,
+        drive_filename=drive_filename,
+        photo_job_ids=photo_job_ids,
+        batch_id=batch_id,
+    )
+
+    return response
+
 
 @app.post("/api/jobs/combine-c5")
 def combine_c5_endpoint(request: CombineC5Request, db: Session = Depends(get_db)):
+    if request.batch_id:
+        record = run_batch_combine(request.batch_id, force=request.force, outlet_name=request.outlet_name)
+        if not record:
+            raise HTTPException(status_code=409, detail="Penarikan menu pada sesi ini belum selesai atau tidak ada yang berhasil.")
+        return {"ok": True, **record}
     return _execute_combine_and_upload(request.job_ids, request.outlet_name, db)
+
+
+@app.get("/api/jobs/batch/{batch_id}/combine")
+def get_batch_combine_status(batch_id: str, db: Session = Depends(get_db)):
+    jobs = _query_batch_jobs(db, batch_id)
+    if not jobs:
+        raise HTTPException(status_code=404, detail="Sesi penarikan tidak ditemukan")
+    return {
+        "batch_id": batch_id,
+        "all_done": all(j.status in TERMINAL_JOB_STATUSES for j in jobs),
+        "combine": _get_batch_combine_record(jobs) or None,
+    }
 
 
 @app.post("/api/jobs/combine-c5/retry")
@@ -5559,16 +5720,16 @@ async def parse_c5_endpoint(
             })
 
         # Character length limits per platform:
-        # User rule: GoFood (go) = 150, Grab = 60, Shopee = 80
+        # User rule: GoFood (go) = 150, Grab = 80, Shopee = 80
         # Category <= 80 karakter, Description <= 250 karakter
         base_plat_str = str(baseline.get("baseline_platform") or "").lower()
         sid_str = str(sid or "").strip()
-        if "grab" in base_plat_str or sid_str.startswith("6-") or "IDGF" in sid_str:
-            max_name_limit = 60
+        if "go" in base_plat_str or (sid_str.startswith(("G", "M")) and sid_str[1:].isdigit()):
+            max_name_limit = 150
+        elif "grab" in base_plat_str or sid_str.startswith("6-") or "IDGF" in sid_str:
+            max_name_limit = 80
         elif "shopee" in base_plat_str:
             max_name_limit = 80
-        elif "go" in base_plat_str or (sid_str.startswith(("G", "M")) and sid_str[1:].isdigit()):
-            max_name_limit = 150
         else:
             max_name_limit = 80
 
@@ -6248,14 +6409,14 @@ def trigger_push_c5_job(request: C5PushRequest, background_tasks: BackgroundTask
             detail=f"Urutan kategori tidak valid: {full_detail}. Kategori yang sama terpecah / diselingi kategori lain. Semua item dalam kategori yang sama harus dikelompokkan bersama dalam baris yang berurutan. Perbaiki urutan di file C5 sebelum push."
         )
 
-    # ── Field Character Length Validations (Per Platform: GoFood=150, Grab=60, Shopee=80) ──
-    # User rule: GoFood (go) = 150, Grab = 60, Shopee = 80
-    if "grab" in target_platform:
-        max_item_name_len = 60
+    # ── Field Character Length Validations (Per Platform: GoFood=150, Grab=80, Shopee=80) ──
+    # User rule: GoFood (go) = 150, Grab = 80, Shopee = 80
+    if "go" in target_platform:
+        max_item_name_len = 150
+    elif "grab" in target_platform:
+        max_item_name_len = 80
     elif "shopee" in target_platform:
         max_item_name_len = 80
-    elif "go" in target_platform:
-        max_item_name_len = 150
     else:
         max_item_name_len = 80
 

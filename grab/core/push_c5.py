@@ -648,10 +648,10 @@ async def _async_push_c5_grab(username: str, password: str, store_id: str, updat
                     # Complete item/category cleanup before the first create or update.
                     await cleanup_missing_categories()
 
-                    # Validate character length limits (Name <= 60, Category <= 80, Description <= 250)
+                    # Validate character length limits (Name <= 80, Category <= 80, Description <= 250)
                     target_name_check = (new_name or item_name or "").strip()
-                    if len(target_name_check) > 60:
-                        raise ValueError(f"Nama item melebihi batas 60 karakter ({len(target_name_check)} karakter): '{target_name_check[:30]}...'")
+                    if len(target_name_check) > 80:
+                        raise ValueError(f"Nama item melebihi batas 80 karakter ({len(target_name_check)} karakter): '{target_name_check[:30]}...'")
                     target_cat_check = (new_cat_name or "").strip()
                     if len(target_cat_check) > 80:
                         raise ValueError(f"Nama kategori melebihi batas 80 karakter ({len(target_cat_check)} karakter): '{target_cat_check[:30]}...'")
